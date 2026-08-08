@@ -1,0 +1,32 @@
+{
+  "summary": "Iteration 3 (rebrand + PDF selection bridge + Lessons + Drafts + Teacher upload). Backend: 23/23 passing (100%) with 8 new tests added — TestRebrand (service='gcsharp'), TestLessons (list>=4, GET increments views by 1, ?exam_level=Concours filter, student POST 403, teacher POST 200), TestAISolution (returns title/steps>=2 with heading+body/narration), TestDrafts (POST→GET→DELETE→GET round-trip), plus all iteration_2 regression tests (auth, onboarding, subjects, past-papers, questions/answer, analytics, library, teacher/overview, ai/chat, pmm2.pdf & pmm3.pdf) still green. Frontend on 390x844 mobile viewport: rebrand verified (Welcome hero shows 'GCSHARP' + 'Global Classroom Sharpening Potentials'; Home header shows 'GCSHARP'; no 'GCSMART' text left on Welcome). Bottom nav shows exactly 5 tabs: Home / Lessons / AI / Library / Profile. Lessons tab (testID='lessons-screen') renders 5 lesson cards with thumbnail + play overlay + duration tag ('05:12', '08:44', etc.) + GCE A/Pure Mathematics pills; tapping a card navigates to /lesson/{id} where testID='lesson-detail' mounts and a <video> element renders (expo-video/VideoView works on web preview). Profile → My Drafts (testID='row-drafts') opens /drafts (testID='drafts-screen') showing a saved 'Q3 draft' with Resume + trash-can delete. AI seed navigation works: /(tabs)/ai?seed=Solve+x%2B2%3D5 auto-triggers chat and returns a proper step-by-step Claude reply. PDF viewer: /pdf?url=/api/pdfs/pmm2.pdf mounts testID='pdf-viewer' and shows 'Highlight any question to use GC AI' hint. Teacher flow: teacher@gcsmart.cm login redirects to /teacher (dashboard). Teacher-upload screen (/teacher-upload) mounts testID='teacher-upload-screen' with all 6 form fields (in-title, in-desc, in-subject, in-url, in-duration, submit-lesson). teacher-upload-btn correctly hidden on Lessons tab for student role. Two web-preview limitations (informational): (1) pdf-webview does NOT render on web because react-native-webview has no web support — modal selection bridge (ask/video/draft sheets) cannot be exercised via Playwright postMessage since the WebView itself is absent; must verify on Expo Go / native. (2) Teachers on login land on /teacher (not /(tabs)/lessons), so the teacher-upload-btn on Lessons tab header is only reachable if a teacher manually navigates to /lessons — deep-link /teacher-upload works fine, but there is no obvious in-app entry point for teachers to reach it from their /teacher dashboard.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Teacher discoverability of upload", "issue": "Teachers land on /teacher (dashboard) after login and the bottom-tab Lessons screen is not part of the teacher navigation. As a result, 'teacher-upload-btn' in the Lessons header is unreachable for teachers via normal UI; /teacher-upload only reachable via deep link. Add an 'Upload lesson' CTA on the /teacher dashboard.", "affected_testIDs": ["teacher-upload-btn"]}
+    ],
+    "design_issues": [
+      {"screen": "Web-preview limitations (informational, not a bug)", "issues": ["pdf-webview (react-native-webview) does not render on Expo web preview — ask-sheet/video-sheet/save-sheet flows triggered by pdf.js postMessage cannot be exercised in Playwright; must validate on Expo Go / native.", "expo-speech playback (speak-btn) also cannot be audibly verified on web; only the UI toggle is testable."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_gcsmart_backend.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Consider adding an 'Upload lesson' CTA on /teacher dashboard so teachers can reach /teacher-upload without deep-link; currently the teacher-upload-btn on Lessons tab is only surfaced to student-facing tab layout which teachers do not enter.",
+    "Deprecation warnings 'shadow* style props are deprecated. Use boxShadow' and 'props.pointerEvents is deprecated. Use style.pointerEvents' — non-blocking but should be migrated for RN 0.75+ compliance.",
+    "Manual verification still required on Expo Go / native for: pdf.js WebView loading pmm2.pdf/pmm3.pdf, ask-sheet/video-sheet/save-sheet triggered by highlight selection, expo-speech narration playback, expo-video full playback controls."
+  ],
+  "critical_code_review_comments": [
+    "server.py: /api/lessons/{lesson_id} correctly increments views atomically via $inc and returns updated count. Good.",
+    "server.py: /api/ai/solution safely strips ```json fences and falls back to {title, steps:[{heading,body:reply}], narration:reply} on JSON parse failure — resilient.",
+    "server.py: /api/drafts DELETE returns {deleted: count} without 404 when the id is missing/owned by another user; acceptable but returning 404 would be more RESTful.",
+    "'shadow*' and 'pointerEvents' deprecation warnings persist app-wide — non-blocking."
+  ],
+  "updated_files": ["/app/backend/tests/test_gcsmart_backend.py (added TestRebrand, TestLessons, TestAISolution, TestDrafts — 8 new tests)"],
+  "success_rate": {"backend": "100% (23/23)", "frontend": "All web-testable flows pass: rebrand, 5-tab nav, Lessons list, lesson detail with expo-video, Drafts screen, AI seed navigation, PDF viewer mount + hint, teacher-upload screen fields. Only web-unsupported flows (pdf.js WebView selection bridge, expo-speech audio) remain to be validated on native."},
+  "seed_data_creation": "One TEST_Lesson created via teacher POST /api/lessons during test run (safe — prefixed TEST_). Draft TEST_Draft round-tripped and deleted.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend fully green (23/23). Frontend rebrand + Lessons + Drafts + Teacher-upload screen + AI seed all pass on web. Selection-bridge modals (ask/video/save sheets) and expo-speech playback are only testable on Expo Go / native since react-native-webview does not render on web. Credentials unchanged: student@gcsmart.cm / Student123!, teacher@gcsmart.cm / Teacher123!. Base URL: https://elearning-ai.preview.emergentagent.com. Note: Teachers land on /teacher (not tab layout), so the 'teacher-upload-btn' in Lessons header is only accessible via deep link — consider surfacing an 'Upload lesson' CTA on the teacher dashboard."
+}

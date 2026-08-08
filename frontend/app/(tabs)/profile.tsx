@@ -32,8 +32,10 @@ export default function Profile() {
         </View>
 
         <Row icon="stats-chart-outline" label="Academic Analytics" onPress={() => router.push("/stats")} testID="row-stats" />
+        <Row icon="bookmark-outline" label="My Drafts" onPress={() => router.push("/drafts")} testID="row-drafts" />
         <Row icon="document-text-outline" label="Past Questions" onPress={() => router.push("/past-questions")} testID="row-pastq" />
         <Row icon="chatbubble-ellipses-outline" label="AI Tutor" onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
+        <Row icon="videocam-outline" label="Lesson Videos" onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
         <Row icon="book-outline" label="Library" onPress={() => router.push("/(tabs)/library")} testID="row-library" />
         <Row icon="log-out-outline" label="Log out" danger onPress={doLogout} testID="row-logout" />
       </ScrollView>

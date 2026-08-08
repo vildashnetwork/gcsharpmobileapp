@@ -50,8 +50,8 @@ export default function Welcome() {
           <View style={styles.logoCard}>
             <Ionicons name="school" size={44} color={theme.brand} />
           </View>
-          <Text style={styles.brandText}>GCSMART</Text>
-          <Text style={styles.brandSub}>Redefining Education in Cameroon</Text>
+          <Text style={styles.brandText}>GCSHARP</Text>
+          <Text style={styles.brandSub}>Global Classroom Sharpening Potentials</Text>
         </View>
 
         <View style={styles.formWrap}>

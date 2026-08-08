@@ -1,4 +1,4 @@
-"""GCSMART FastAPI backend - Auth, Content, Analytics, AI Tutor."""
+"""GCSHARP FastAPI backend - Auth, Content, Analytics, AI Tutor."""
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -26,7 +26,7 @@ EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title="GCSMART API")
+app = FastAPI(title="GCSHARP API")
 api = APIRouter(prefix="/api")
 
 # Serve seeded PDFs at /api/pdfs/*
@@ -74,6 +74,29 @@ class ChatIn(BaseModel):
     session_id: str
     message: str
     current_problem: Optional[str] = None
+
+
+class SolutionIn(BaseModel):
+    question: str
+
+
+class DraftIn(BaseModel):
+    paper_id: str
+    title: Optional[str] = None
+    page: int = 1
+    selection: Optional[str] = None
+    note: Optional[str] = None
+
+
+class LessonIn(BaseModel):
+    title: str
+    description: str
+    subject_id: Optional[str] = None
+    subject_name: str
+    exam_level: str
+    video_url: str
+    thumbnail: Optional[str] = None
+    duration: Optional[str] = None
 
 
 # ---------- Helpers ----------
@@ -434,10 +457,137 @@ async def ai_history(session_id: str, user: dict = Depends(current_user)):
     return {"messages": [serialize(m) for m in msgs]}
 
 
+@api.post("/ai/solution")
+async def ai_solution(inp: SolutionIn, user: dict = Depends(current_user)):
+    """Generate a scripted step-by-step video-style solution for a highlighted question."""
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except Exception as e:
+        raise HTTPException(500, f"AI unavailable: {e}")
+
+    system = (
+        "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
+        "- title: short problem title (max 8 words)\n"
+        "- steps: array of 4-7 objects each with 'heading' and 'body' (concise, exam-style)\n"
+        "- narration: single paragraph script (150-250 words) suitable for text-to-speech, spoken naturally.\n"
+        "Return ONLY valid JSON, no markdown, no code fences."
+    )
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"sol_{uuid.uuid4().hex[:8]}",
+        system_message=system,
+    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+    try:
+        reply = await chat.send_message(UserMessage(text=inp.question))
+    except Exception as e:
+        raise HTTPException(500, f"AI error: {e}")
+
+    import json as _json
+    reply_clean = reply.strip()
+    if reply_clean.startswith("```"):
+        reply_clean = reply_clean.strip("`")
+        if reply_clean.lower().startswith("json"):
+            reply_clean = reply_clean[4:].strip()
+    try:
+        data = _json.loads(reply_clean)
+    except Exception:
+        data = {"title": "Solution", "steps": [{"heading": "Solution", "body": reply}], "narration": reply}
+    return data
+
+
+# ---------- Drafts ----------
+@api.post("/drafts")
+async def create_draft(inp: DraftIn, user: dict = Depends(current_user)):
+    draft_id = f"draft_{uuid.uuid4().hex[:10]}"
+    doc = {
+        "draft_id": draft_id,
+        "user_id": user["user_id"],
+        "paper_id": inp.paper_id,
+        "title": inp.title or "Untitled draft",
+        "page": inp.page,
+        "selection": inp.selection,
+        "note": inp.note,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+    await db.drafts.insert_one(doc)
+    return {"draft": serialize(doc)}
+
+
+@api.get("/drafts")
+async def list_drafts(user: dict = Depends(current_user)):
+    items = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("updated_at", -1).to_list(200)
+    # Enrich with paper info
+    enriched = []
+    for d in items:
+        paper = await db.past_papers.find_one({"paper_id": d["paper_id"]}, {"_id": 0}) or {}
+        enriched.append({**serialize(d), "paper": paper})
+    return {"items": enriched}
+
+
+@api.delete("/drafts/{draft_id}")
+async def delete_draft(draft_id: str, user: dict = Depends(current_user)):
+    r = await db.drafts.delete_one({"draft_id": draft_id, "user_id": user["user_id"]})
+    return {"deleted": r.deleted_count}
+
+
+# ---------- Lesson Videos ----------
+@api.get("/lessons")
+async def list_lessons(exam_level: Optional[str] = None):
+    q = {} if not exam_level else {"exam_level": exam_level}
+    items = await db.lesson_videos.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return {"items": [serialize(x) for x in items]}
+
+
+@api.get("/lessons/{lesson_id}")
+async def get_lesson(lesson_id: str):
+    l = await db.lesson_videos.find_one({"lesson_id": lesson_id}, {"_id": 0})
+    if not l:
+        raise HTTPException(404, "Not found")
+    # increment view count
+    await db.lesson_videos.update_one({"lesson_id": lesson_id}, {"$inc": {"views": 1}})
+    l["views"] = l.get("views", 0) + 1
+    return {"lesson": serialize(l)}
+
+
+@api.post("/lessons")
+async def create_lesson(inp: LessonIn, user: dict = Depends(current_user)):
+    if user.get("role") != "teacher":
+        raise HTTPException(403, "Teachers only")
+    lesson_id = f"lesson_{uuid.uuid4().hex[:10]}"
+    doc = {
+        "lesson_id": lesson_id,
+        "teacher_id": user["user_id"],
+        "teacher_name": user["full_name"],
+        "teacher_avatar": user.get("profile_photo"),
+        "title": inp.title,
+        "description": inp.description,
+        "subject_id": inp.subject_id,
+        "subject_name": inp.subject_name,
+        "exam_level": inp.exam_level,
+        "video_url": inp.video_url,
+        "thumbnail": inp.thumbnail or "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwxfHxtYXRoJTIwcGh5c2ljcyUyMHRleHRib29rfGVufDB8fHx8MTc4NjE2OTQ0OXww&ixlib=rb-4.1.0&q=85",
+        "duration": inp.duration or "10:00",
+        "views": 0,
+        "rating": 5.0,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.lesson_videos.insert_one(doc)
+    return {"lesson": serialize(doc)}
+
+
+@api.get("/teacher/lessons")
+async def teacher_lessons(user: dict = Depends(current_user)):
+    if user.get("role") != "teacher":
+        raise HTTPException(403, "Teachers only")
+    items = await db.lesson_videos.find({"teacher_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return {"items": [serialize(x) for x in items]}
+
+
 # ---------- Health ----------
 @api.get("/")
 async def root():
-    return {"service": "gcsmart", "ok": True}
+    return {"service": "gcsharp", "ok": True}
 
 
 # ---------- Seed ----------
@@ -654,6 +804,75 @@ async def seed():
         },
     ]
     await db.courses.insert_many(courses)
+
+    # Seed lesson videos (short-form teacher uploads)
+    lesson_videos = [
+        {
+            "lesson_id": f"lesson_{uuid.uuid4().hex[:10]}",
+            "teacher_id": "seed_teacher",
+            "teacher_name": "Dr. Nkeng Paul",
+            "teacher_avatar": tavatar,
+            "title": "Integration by Parts — 5-Minute Masterclass",
+            "description": "The LIATE rule and 3 worked examples from A-Level papers.",
+            "subject_name": "Pure Mathematics",
+            "exam_level": "GCE A",
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
+            "thumbnail": thumb,
+            "duration": "05:12",
+            "views": 843,
+            "rating": 4.8,
+            "created_at": datetime.now(timezone.utc),
+        },
+        {
+            "lesson_id": f"lesson_{uuid.uuid4().hex[:10]}",
+            "teacher_id": "seed_teacher",
+            "teacher_name": "Ms. Fon Bih",
+            "teacher_avatar": tavatar,
+            "title": "Trig Identities You Must Memorise",
+            "description": "The 8 identities that unlock 30% of Paper 1 marks.",
+            "subject_name": "Pure Mathematics",
+            "exam_level": "GCE A",
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+            "thumbnail": thumb,
+            "duration": "08:44",
+            "views": 1210,
+            "rating": 4.9,
+            "created_at": datetime.now(timezone.utc),
+        },
+        {
+            "lesson_id": f"lesson_{uuid.uuid4().hex[:10]}",
+            "teacher_id": "seed_teacher",
+            "teacher_name": "Mr. Tabi Enow",
+            "teacher_avatar": tavatar,
+            "title": "Newton's Laws in Real Cameroon Contexts",
+            "description": "Applied problems using taxi motion, market crowd flow, and more.",
+            "subject_name": "Physics",
+            "exam_level": "GCE A",
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
+            "thumbnail": thumb,
+            "duration": "12:03",
+            "views": 512,
+            "rating": 4.7,
+            "created_at": datetime.now(timezone.utc),
+        },
+        {
+            "lesson_id": f"lesson_{uuid.uuid4().hex[:10]}",
+            "teacher_id": "seed_teacher",
+            "teacher_name": "Dr. Nkeng Paul",
+            "teacher_avatar": tavatar,
+            "title": "How to Approach Any Concours General-Knowledge Question",
+            "description": "A 4-step framework any Concours candidate can use.",
+            "subject_name": "General Knowledge",
+            "exam_level": "Concours",
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4",
+            "thumbnail": thumb,
+            "duration": "07:20",
+            "views": 328,
+            "rating": 4.6,
+            "created_at": datetime.now(timezone.utc),
+        },
+    ]
+    await db.lesson_videos.insert_many(lesson_videos)
     log.info(f"Seeded {len(subjects)} subjects, {len(papers)} papers, {len(questions)} questions, {len(courses)} courses.")
 
 
@@ -684,6 +903,45 @@ async def ensure_pdf_papers():
         })
 
 
+async def ensure_lesson_videos():
+    if await db.lesson_videos.count_documents({}) > 0:
+        return
+    thumb = "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwxfHxtYXRoJTIwcGh5c2ljcyUyMHRleHRib29rfGVufDB8fHx8MTc4NjE2OTQ0OXww&ixlib=rb-4.1.0&q=85"
+    tavatar = "https://images.unsplash.com/photo-1541178735493-479c1a27ed24?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NjZ8MHwxfHNlYXJjaHwxfHxhZnJpY2FuJTIwdGVhY2hlciUyMGxhcHRvcHxlbnwwfHx8fDE3ODYxNjk0NDl8MA&ixlib=rb-4.1.0&q=85"
+    now = datetime.now(timezone.utc)
+    docs = [
+        {"lesson_id": f"lesson_{uuid.uuid4().hex[:10]}", "teacher_id": "seed_teacher",
+         "teacher_name": "Dr. Nkeng Paul", "teacher_avatar": tavatar,
+         "title": "Integration by Parts — 5-Minute Masterclass",
+         "description": "The LIATE rule and 3 worked examples from A-Level papers.",
+         "subject_name": "Pure Mathematics", "exam_level": "GCE A",
+         "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
+         "thumbnail": thumb, "duration": "05:12", "views": 843, "rating": 4.8, "created_at": now},
+        {"lesson_id": f"lesson_{uuid.uuid4().hex[:10]}", "teacher_id": "seed_teacher",
+         "teacher_name": "Ms. Fon Bih", "teacher_avatar": tavatar,
+         "title": "Trig Identities You Must Memorise",
+         "description": "The 8 identities that unlock 30% of Paper 1 marks.",
+         "subject_name": "Pure Mathematics", "exam_level": "GCE A",
+         "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+         "thumbnail": thumb, "duration": "08:44", "views": 1210, "rating": 4.9, "created_at": now},
+        {"lesson_id": f"lesson_{uuid.uuid4().hex[:10]}", "teacher_id": "seed_teacher",
+         "teacher_name": "Mr. Tabi Enow", "teacher_avatar": tavatar,
+         "title": "Newton's Laws in Real Cameroon Contexts",
+         "description": "Applied problems using taxi motion, market crowd flow, and more.",
+         "subject_name": "Physics", "exam_level": "GCE A",
+         "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
+         "thumbnail": thumb, "duration": "12:03", "views": 512, "rating": 4.7, "created_at": now},
+        {"lesson_id": f"lesson_{uuid.uuid4().hex[:10]}", "teacher_id": "seed_teacher",
+         "teacher_name": "Dr. Nkeng Paul", "teacher_avatar": tavatar,
+         "title": "How to Approach Any Concours General-Knowledge Question",
+         "description": "A 4-step framework any Concours candidate can use.",
+         "subject_name": "General Knowledge", "exam_level": "Concours",
+         "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4",
+         "thumbnail": thumb, "duration": "07:20", "views": 328, "rating": 4.6, "created_at": now},
+    ]
+    await db.lesson_videos.insert_many(docs)
+
+
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
@@ -694,8 +952,11 @@ async def startup():
     await db.past_papers.create_index("paper_id", unique=True)
     await db.questions.create_index("question_id", unique=True)
     await db.courses.create_index("course_id", unique=True)
+    await db.lesson_videos.create_index("lesson_id", unique=True)
+    await db.drafts.create_index("draft_id", unique=True)
     await seed()
     await ensure_pdf_papers()
+    await ensure_lesson_videos()
 
     # Seed a demo teacher account
     if not await db.users.find_one({"email": "teacher@gcsmart.cm"}):

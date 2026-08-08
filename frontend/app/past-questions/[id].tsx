@@ -73,7 +73,7 @@ export default function MCQViewer() {
     <SafeAreaView edges={["top"]} style={styles.root} testID="mcq-screen">
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} testID="back-btn"><Ionicons name="arrow-back" size={22} color={theme.brand} /></Pressable>
-        <Text style={styles.brand}>GCSMART</Text>
+        <Text style={styles.brand}>GCSHARP</Text>
         <View style={{ width: 22 }} />
       </View>
       <View style={styles.progressRow}>

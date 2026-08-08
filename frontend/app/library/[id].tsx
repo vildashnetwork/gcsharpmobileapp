@@ -26,7 +26,7 @@ export default function CourseDetail() {
     <SafeAreaView edges={["top"]} style={styles.root} testID="course-detail">
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} testID="back-btn"><Ionicons name="arrow-back" size={22} color={theme.brand} /></Pressable>
-        <Text style={styles.brand}>GCSMART</Text>
+        <Text style={styles.brand}>GCSHARP</Text>
         <View style={{ width: 22 }} />
       </View>
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>

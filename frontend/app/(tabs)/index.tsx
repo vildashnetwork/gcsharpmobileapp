@@ -47,7 +47,7 @@ export default function Home() {
             <View style={styles.avatar}><Text style={styles.avatarTxt}>{initials}</Text></View>
             <View>
               <Text style={styles.greet}>Hello, {user?.full_name?.split(" ")[0] || "Student"}</Text>
-              <Text style={styles.brandTop}>GCSMART</Text>
+              <Text style={styles.brandTop}>GCSHARP</Text>
             </View>
           </View>
           <Pressable style={styles.bell} testID="notifications-btn">

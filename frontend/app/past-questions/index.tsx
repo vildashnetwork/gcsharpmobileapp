@@ -98,7 +98,7 @@ export default function PastQuestions() {
                     if (p.pdf_url) {
                       router.push({
                         pathname: "/pdf",
-                        params: { url: p.pdf_url, title: p.title || `${p.subject_name} ${p.year}` },
+                        params: { url: p.pdf_url, title: p.title || `${p.subject_name} ${p.year}`, paper_id: p.paper_id },
                       });
                     } else {
                       router.push(`/past-questions/${p.paper_id}`);

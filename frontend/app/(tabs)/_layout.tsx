@@ -7,7 +7,7 @@ import { theme, radii } from "@/src/theme";
 function Icon({ name, focused, label }: { name: any; focused: boolean; label: string }) {
   return (
     <View style={[styles.item, focused && styles.itemActive]}>
-      <Ionicons name={name} size={22} color={focused ? theme.brandPrimary : theme.onSurfaceMuted} />
+      <Ionicons name={name} size={20} color={focused ? theme.brandPrimary : theme.onSurfaceMuted} />
       <Text style={[styles.label, focused && { color: theme.brandPrimary }]}>{label}</Text>
     </View>
   );
@@ -34,12 +34,16 @@ export default function TabsLayout() {
         options={{ tabBarIcon: ({ focused }) => <Icon name="home-outline" focused={focused} label="Home" /> }}
       />
       <Tabs.Screen
-        name="library"
-        options={{ tabBarIcon: ({ focused }) => <Icon name="book-outline" focused={focused} label="Library" /> }}
+        name="lessons"
+        options={{ tabBarIcon: ({ focused }) => <Icon name="videocam-outline" focused={focused} label="Lessons" /> }}
       />
       <Tabs.Screen
         name="ai"
-        options={{ tabBarIcon: ({ focused }) => <Icon name="chatbubble-ellipses-outline" focused={focused} label="AI" /> }}
+        options={{ tabBarIcon: ({ focused }) => <Icon name="sparkles-outline" focused={focused} label="AI" /> }}
+      />
+      <Tabs.Screen
+        name="library"
+        options={{ tabBarIcon: ({ focused }) => <Icon name="book-outline" focused={focused} label="Library" /> }}
       />
       <Tabs.Screen
         name="profile"
@@ -51,9 +55,9 @@ export default function TabsLayout() {
 
 const styles = StyleSheet.create({
   item: {
-    alignItems: "center", justifyContent: "center", paddingHorizontal: 14, paddingVertical: 6,
-    borderRadius: radii.md, gap: 2, minWidth: 76,
+    alignItems: "center", justifyContent: "center", paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radii.md, gap: 2, minWidth: 60,
   },
   itemActive: { backgroundColor: theme.brandTertiary },
-  label: { fontSize: 11, color: theme.onSurfaceMuted, fontWeight: "600", marginTop: 2 },
+  label: { fontSize: 10, color: theme.onSurfaceMuted, fontWeight: "600", marginTop: 2 },
 });

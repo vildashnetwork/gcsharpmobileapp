@@ -234,3 +234,115 @@ class TestPdfPapers:
         for p in p2025:
             # subject_name should be 'Pure Mathematics with Mechanics'
             assert "Pure Mathematics" in (p.get("subject_name") or ""), p
+
+
+# ---------- REBRAND ----------
+class TestRebrand:
+    def test_root_service_gcsharp(self):
+        r = requests.get(f"{API}/", timeout=30)
+        assert r.status_code == 200
+        assert r.json().get("service") == "gcsharp"
+
+
+# ---------- LESSONS ----------
+class TestLessons:
+    def test_list_lessons_min4(self):
+        r = requests.get(f"{API}/lessons", timeout=30)
+        assert r.status_code == 200
+        items = r.json().get("items", [])
+        assert len(items) >= 4
+        needed = {"title", "subject_name", "exam_level", "video_url",
+                  "thumbnail", "duration", "views", "rating"}
+        for l in items:
+            missing = needed - set(l.keys())
+            assert not missing, f"Lesson missing fields: {missing}: {l}"
+
+    def test_get_lesson_increments_views(self):
+        items = requests.get(f"{API}/lessons", timeout=30).json()["items"]
+        target = items[0]
+        lid = target["lesson_id"]
+        before = target.get("views", 0)
+        r = requests.get(f"{API}/lessons/{lid}", timeout=30)
+        assert r.status_code == 200
+        l = r.json()["lesson"]
+        assert l["views"] == before + 1
+
+    def test_filter_concours(self):
+        r = requests.get(f"{API}/lessons", params={"exam_level": "Concours"}, timeout=30)
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert len(items) >= 1
+        assert all(l["exam_level"] == "Concours" for l in items)
+
+    def test_student_cannot_post(self, student_token):
+        r = requests.post(f"{API}/lessons", json={
+            "title": "T", "description": "D", "subject_name": "Math",
+            "exam_level": "GCE A", "video_url": "https://example.com/v.mp4"
+        }, headers=h(student_token), timeout=30)
+        assert r.status_code == 403
+
+    def test_teacher_can_post(self, teacher_token):
+        payload = {
+            "title": "TEST_Lesson", "description": "TEST", "subject_name": "Pure Mathematics",
+            "exam_level": "GCE A",
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "duration": "05:00"
+        }
+        r = requests.post(f"{API}/lessons", json=payload, headers=h(teacher_token), timeout=30)
+        assert r.status_code == 200, r.text
+        lesson = r.json()["lesson"]
+        assert "lesson_id" in lesson
+        assert lesson["title"] == "TEST_Lesson"
+        assert lesson["exam_level"] == "GCE A"
+
+
+# ---------- AI SOLUTION ----------
+class TestAISolution:
+    def test_ai_solution_shape(self, student_token):
+        r = requests.post(f"{API}/ai/solution",
+                          json={"question": "Differentiate y = 3x^2 + 2x"},
+                          headers=h(student_token), timeout=120)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert isinstance(d.get("title"), str) and len(d["title"]) > 0
+        assert isinstance(d.get("steps"), list) and len(d["steps"]) >= 2
+        for s in d["steps"]:
+            assert "heading" in s and "body" in s
+        assert isinstance(d.get("narration"), str) and len(d["narration"]) > 0
+
+
+# ---------- DRAFTS ----------
+class TestDrafts:
+    def test_draft_crud(self, student_token):
+        # find a paper_id to reference
+        subs = requests.get(f"{API}/subjects", params={"exam_level": "GCE A"}, timeout=30).json().get("items", [])
+        paper_id = None
+        for s in subs:
+            papers = requests.get(f"{API}/past-papers",
+                                  params={"subject_id": s["subject_id"]}, timeout=30).json().get("items", [])
+            if papers:
+                paper_id = papers[0]["paper_id"]
+                break
+        assert paper_id
+        payload = {"paper_id": paper_id, "title": "TEST_Draft", "page": 1, "selection": "Differentiate y=3x^2"}
+        r = requests.post(f"{API}/drafts", json=payload, headers=h(student_token), timeout=30)
+        assert r.status_code == 200, r.text
+        draft = r.json()["draft"]
+        draft_id = draft["draft_id"]
+        assert draft["title"] == "TEST_Draft"
+
+        # GET list
+        rl = requests.get(f"{API}/drafts", headers=h(student_token), timeout=30)
+        assert rl.status_code == 200
+        items = rl.json()["items"]
+        ids = [d["draft_id"] for d in items]
+        assert draft_id in ids
+
+        # DELETE
+        rd = requests.delete(f"{API}/drafts/{draft_id}", headers=h(student_token), timeout=30)
+        assert rd.status_code == 200
+        assert rd.json()["deleted"] == 1
+
+        # GET again — should be gone
+        items2 = requests.get(f"{API}/drafts", headers=h(student_token), timeout=30).json()["items"]
+        assert draft_id not in [d["draft_id"] for d in items2]

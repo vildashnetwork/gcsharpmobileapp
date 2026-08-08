@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TextInput, Pressable, ActivityIndicator, Scroll
 import { SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
+import { useLocalSearchParams } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
@@ -17,11 +18,21 @@ const STARTERS = [
 
 export default function AITutor() {
   const { user } = useAuth();
+  const params = useLocalSearchParams<{ seed?: string }>();
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const sessionId = useMemo(() => `chat_${user?.user_id ?? "guest"}_${Date.now()}`, [user]);
   const scrollRef = useRef<ScrollView>(null);
+  const seededRef = useRef(false);
+
+  useEffect(() => {
+    if (params.seed && !seededRef.current && !busy) {
+      seededRef.current = true;
+      send(String(params.seed));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.seed]);
 
   const send = async (override?: string) => {
     const content = (override ?? text).trim();
