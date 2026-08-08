@@ -228,8 +228,8 @@ export default function PdfViewer() {
                     <View key={i} style={styles.stepCard}>
                       <View style={styles.stepNum}><Text style={styles.stepNumTxt}>{i + 1}</Text></View>
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.stepHead}>{s.heading}</Text>
-                        <Text style={styles.stepBody}>{s.body}</Text>
+                        <Text style={styles.stepHead}>{humanize(s.heading)}</Text>
+                        <Text style={styles.stepBody}>{humanize(s.body)}</Text>
                       </View>
                     </View>
                   ))}
