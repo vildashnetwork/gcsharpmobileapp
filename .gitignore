@@ -82,3 +82,5 @@ memory/test_credentials.md
 android-sdk/*.env 
 backend/*.db 
 frontend/.env 
+"*.env" 
+"backend/*.db" 
