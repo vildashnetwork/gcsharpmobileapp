@@ -56,29 +56,47 @@ export function pdfHtml(pdfUrl: string, page = 1): string {
       const pdf = await pdfjsLib.getDocument(PDF_URL).promise;
       wrap.innerHTML = "";
       post({ type: "meta", pages: pdf.numPages });
-      const viewportWidth = Math.min(window.innerWidth - 24, 800);
+      const containerWidth = Math.min(window.innerWidth - 24, 1100);
+      // Render at devicePixelRatio for crisp text/graphics on retina screens
+      const outputScale = Math.max(2, window.devicePixelRatio || 2);
       for (let n = 1; n <= pdf.numPages; n++) {
         const page = await pdf.getPage(n);
-        const viewport = page.getViewport({ scale: 1 });
-        const scale = viewportWidth / viewport.width;
-        const scaled = page.getViewport({ scale });
+        const baseViewport = page.getViewport({ scale: 1 });
+        const displayScale = containerWidth / baseViewport.width;
+        const viewport = page.getViewport({ scale: displayScale });
         const pageEl = document.createElement("div");
         pageEl.className = "page";
-        pageEl.style.width = scaled.width + "px";
-        pageEl.style.height = scaled.height + "px";
+        pageEl.style.width = viewport.width + "px";
+        pageEl.style.height = viewport.height + "px";
         pageEl.dataset.page = String(n);
+
         const canvas = document.createElement("canvas");
-        canvas.width = scaled.width; canvas.height = scaled.height;
+        // internal resolution = display * DPR for sharpness
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = viewport.width + "px";
+        canvas.style.height = viewport.height + "px";
         const ctx = canvas.getContext("2d");
         pageEl.appendChild(canvas);
+
         const textLayer = document.createElement("div");
         textLayer.className = "textLayer";
+        textLayer.style.width = viewport.width + "px";
+        textLayer.style.height = viewport.height + "px";
         pageEl.appendChild(textLayer);
         wrap.appendChild(pageEl);
-        await page.render({ canvasContext: ctx, viewport: scaled }).promise;
+
+        const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+        await page.render({
+          canvasContext: ctx,
+          viewport,
+          transform,
+          intent: "display",
+        }).promise;
+
         const textContent = await page.getTextContent();
         pdfjsLib.renderTextLayer({
-          textContent, container: textLayer, viewport: scaled, textDivs: []
+          textContent, container: textLayer, viewport, textDivs: []
         });
         pageEl.addEventListener("click", () => { currentPage = n; });
       }

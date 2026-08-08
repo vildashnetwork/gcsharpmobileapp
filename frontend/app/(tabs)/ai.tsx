@@ -7,6 +7,7 @@ import { useLocalSearchParams } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { humanize } from "@/src/format";
 
 type Msg = { role: "user" | "assistant"; content: string };
 const STARTERS = [
@@ -103,7 +104,9 @@ export default function AITutor() {
               testID={`msg-${i}`}
               style={[styles.bubble, m.role === "user" ? styles.userBubble : styles.aiBubble]}
             >
-              <Text style={m.role === "user" ? styles.userTxt : styles.aiTxt}>{m.content}</Text>
+              <Text style={m.role === "user" ? styles.userTxt : styles.aiTxt}>
+                {m.role === "user" ? m.content : humanize(m.content)}
+              </Text>
             </View>
           ))}
           {busy && (

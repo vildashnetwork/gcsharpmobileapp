@@ -346,3 +346,47 @@ class TestDrafts:
         # GET again — should be gone
         items2 = requests.get(f"{API}/drafts", headers=h(student_token), timeout=30).json()["items"]
         assert draft_id not in [d["draft_id"] for d in items2]
+
+
+
+# ---------- MARKDOWN-FREE AI OUTPUT (iteration 4) ----------
+class TestAIPlainText:
+    """Iteration 4 fixes: AI must reply plain-text (no Markdown / LaTeX)."""
+
+    def _serialize_no_md(self, obj) -> str:
+        """Flatten any JSON-ish object to a single string and check."""
+        import json as _json
+        return _json.dumps(obj, ensure_ascii=False)
+
+    def test_ai_solution_no_markdown(self, student_token):
+        r = requests.post(
+            f"{API}/ai/solution",
+            json={"question": "Solve integral of 3x^2 + 2x dx from 1 to 3"},
+            headers=h(student_token),
+            timeout=180,
+        )
+        assert r.status_code == 200, r.text
+        d = r.json()
+        blob = self._serialize_no_md(d)
+        assert "**" not in blob, f"Markdown bold '**' found in /ai/solution: {blob[:400]}"
+        # backslashes are LaTeX indicators (e.g. \frac, \int) — JSON escapes newlines as \n,
+        # so filter those out before checking.
+        no_json_escapes = blob.replace("\\n", "").replace("\\t", "").replace("\\r", "").replace('\\"', "")
+        assert "\\" not in no_json_escapes, f"LaTeX backslash found in /ai/solution: {no_json_escapes[:400]}"
+        # narration should be reasonably long plain text
+        assert len(d["narration"]) > 20
+
+    def test_ai_chat_no_markdown(self, student_token):
+        r = requests.post(
+            f"{API}/ai/chat",
+            json={"session_id": "md-test", "message": "Explain the derivative of x^3 + 2x using power rule"},
+            headers=h(student_token),
+            timeout=120,
+        )
+        assert r.status_code == 200, r.text
+        reply = r.json()["reply"]
+        assert "**" not in reply, f"Markdown bold '**' in /ai/chat reply: {reply[:400]}"
+        # headings starting with '#'
+        for line in reply.splitlines():
+            stripped = line.lstrip()
+            assert not stripped.startswith("#"), f"Markdown heading '#' in reply line: {line}"

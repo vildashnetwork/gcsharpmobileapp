@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, Pressable, ActivityIndicator, Modal, ScrollView,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
 import * as Speech from "expo-speech";
 import { Ionicons } from "@expo/vector-icons";
@@ -10,6 +10,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { pdfHtml } from "@/src/pdf-html";
 import { api } from "@/src/api";
+import { humanize } from "@/src/format";
 
 const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -70,7 +71,8 @@ export default function PdfViewer() {
     if (!solution) return;
     if (speaking) { Speech.stop(); setSpeaking(false); return; }
     setSpeaking(true);
-    Speech.speak(solution.narration || solution.steps.map(s => `${s.heading}. ${s.body}`).join(" "), {
+    const text = humanize(solution.narration || solution.steps.map(s => `${s.heading}. ${s.body}`).join(" "));
+    Speech.speak(text, {
       onDone: () => setSpeaking(false),
       onStopped: () => setSpeaking(false),
       onError: () => setSpeaking(false),
@@ -104,8 +106,8 @@ export default function PdfViewer() {
   };
 
   return (
-    <SafeAreaView edges={["top"]} style={styles.root} testID="pdf-viewer">
-      <View style={styles.header}>
+    <View style={styles.root} testID="pdf-viewer">
+      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
         <Pressable onPress={() => router.back()} testID="back-btn">
           <Ionicons name="arrow-back" size={22} color={theme.brand} />
         </Pressable>
@@ -237,7 +239,7 @@ export default function PdfViewer() {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
   );
 }
 

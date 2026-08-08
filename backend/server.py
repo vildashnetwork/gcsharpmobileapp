@@ -413,8 +413,14 @@ async def ai_chat(inp: ChatIn, user: dict = Depends(current_user)):
 
     system = (
         "You are GC AI Assistant, an expert academic tutor for Cameroon students preparing for "
-        "GCE O Level, GCE A Level, HND and Concours exams. Explain step-by-step, use clear math "
-        "notation, and be encouraging. Keep answers concise but complete."
+        "GCE O Level, GCE A Level, HND and Concours exams. Explain step-by-step and be encouraging.\n\n"
+        "OUTPUT FORMAT — VERY IMPORTANT:\n"
+        "- Reply in PLAIN TEXT only. No Markdown. No asterisks for bold. No hashes for headings. "
+        "No backticks. No code fences.\n"
+        "- Do NOT use LaTeX. Write math using Unicode: x², x³, √, π, θ, α, β, Δ, Σ, ∫, ∞, "
+        "≤, ≥, ≠, ≈, ×, ÷, ± , →, ⇒. For fractions write like '1/2' or '(a+b)/(c+d)'.\n"
+        "- Structure with plain numbered steps: '1) ...' or bullet points '• ...'.\n"
+        "- Keep answers concise but complete."
     )
     if inp.current_problem:
         system += f"\n\nCurrent problem context:\n{inp.current_problem}"
@@ -469,7 +475,13 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(current_user)):
         "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
         "- title: short problem title (max 8 words)\n"
         "- steps: array of 4-7 objects each with 'heading' and 'body' (concise, exam-style)\n"
-        "- narration: single paragraph script (150-250 words) suitable for text-to-speech, spoken naturally.\n"
+        "- narration: single paragraph script (150-250 words) suitable for text-to-speech, spoken naturally.\n\n"
+        "OUTPUT FORMAT — VERY IMPORTANT:\n"
+        "- The values inside 'heading', 'body', and 'narration' must be PLAIN TEXT — no Markdown, "
+        "no asterisks, no hashes, no LaTeX, no backticks.\n"
+        "- Write math with Unicode: x², √, π, θ, α, Δ, Σ, ∫, ∞, ≤, ≥, ≠, ≈, ×, ÷, →. "
+        "For fractions use '1/2' style. For narration, spell numbers/symbols naturally so a TTS engine "
+        "reads them well.\n"
         "Return ONLY valid JSON, no markdown, no code fences."
     )
     chat = LlmChat(
