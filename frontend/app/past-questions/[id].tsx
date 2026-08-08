@@ -129,7 +129,7 @@ export default function MCQViewer() {
         })}
       </ScrollView>
 
-      <View style={styles.footer}>
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, spacing.md) }]}>
         <Pressable style={[styles.btn, styles.btnGhost]} onPress={prev} disabled={idx === 0} testID="prev-btn">
           <Ionicons name="chevron-back" size={18} color={idx === 0 ? theme.onSurfaceMuted : theme.brand} />
           <Text style={[styles.btnGhostTxt, idx === 0 && { color: theme.onSurfaceMuted }]}>Previous</Text>

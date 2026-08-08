@@ -3,6 +3,7 @@ import { View, Text, TextInput, Pressable, StyleSheet, ActivityIndicator } from 
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
+import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 
@@ -11,6 +12,7 @@ type Mode = "login" | "signup";
 
 export default function Welcome() {
   const { login, register, loginWithGoogle } = useAuth();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const [role, setRole] = useState<Role>("student");
   const [mode, setMode] = useState<Mode>("login");
@@ -27,6 +29,7 @@ export default function Welcome() {
     try {
       if (mode === "login") await login(email.trim(), password);
       else await register(email.trim(), password, name.trim() || "New User", role);
+      router.replace("/");
     } catch (e: any) {
       setErr(e.message || "Something went wrong");
     } finally {
