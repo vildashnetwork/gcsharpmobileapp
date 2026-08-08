@@ -1,0 +1,172 @@
+{
+  "app_name": "GCSMART",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A premium, distraction-free academic environment combining crisp white cards, precise math rendering, and intelligent blue accents.",
+  "color": {
+    "surface": "#F3F4F6",
+    "onSurface": "#0F172A",
+    "surfaceSecondary": "#FFFFFF",
+    "onSurfaceSecondary": "#1E293B",
+    "surfaceTertiary": "#E5E7EB",
+    "onSurfaceTertiary": "#334155",
+    "surfaceInverse": "#0F172A",
+    "onSurfaceInverse": "#F8FAFC",
+    "brand": "#0A192F",
+    "brandPrimary": "#2563EB",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#1E3A5F",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#DBEAFE",
+    "onBrandTertiary": "#1E40AF",
+    "success": "#10B981",
+    "onSuccess": "#FFFFFF",
+    "warning": "#F59E0B",
+    "onWarning": "#FFFFFF",
+    "error": "#EF4444",
+    "onError": "#FFFFFF",
+    "info": "#3B82F6",
+    "onInfo": "#FFFFFF",
+    "border": "#E2E8F0",
+    "borderStrong": "#94A3B8",
+    "divider": "#E2E8F0",
+    "mcqCorrectBg": "#D1FAE5",
+    "mcqCorrectBorder": "#10B981"
+  },
+  "typography": {
+    "displayFontFamily": "Plus Jakarta Sans",
+    "textFontFamily": "Plus Jakarta Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Use generous margins (lg/xl) around main containers to achieve the premium iOS-native look. Never cramp cards. Maintain breathable vertical rhythm.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use subtle glass effects on the bottom tab bar",
+      "Apply frosted glass on sticky headers over scrolling content, especially in the Library and Past Questions"
+    ],
+    "dont's": [
+      "Never blur text areas or reading cards",
+      "Do not over-blur the MCQ option cards; they must remain highly readable"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Welcome / Auth",
+      "purpose": "A premium entry point establishing the Navy Blue brand and segmenting students from teachers.",
+      "states": {
+        "loading": "Centered blue spinner",
+        "empty": "N/A",
+        "error": "Standard alert toast"
+      },
+      "layout": "Navy blue hero top section with app branding. A clean white container below housing a Student/Teacher segmented control. Clean single-column form for email/password, a 'Continue with Google' outlined button, and a large solid blue (brandPrimary) 'Get Started' primary CTA sticky at the bottom."
+    },
+    {
+      "name": "Student Dashboard",
+      "purpose": "Provides an at-a-glance view of academic progress, study stats, and immediate jump-back points to learning.",
+      "states": {
+        "loading": "Skeleton cards mimicking the layout",
+        "empty": "Illustration with 'Take your first quiz to see stats!'",
+        "error": "Text block with retry button"
+      },
+      "layout": "Greeting header. A 2-column grid or horizontal scroll for key stats (Study Time, Accuracy Rate, Papers Completed). Below, a 'Weekly Activity' card containing a clean bar chart. Finally, 'Continue Learning' cards. Cards are surfaceSecondary (white) with subtle shadow tier 1 on a surface (light gray) background."
+    },
+    {
+      "name": "Past Questions Viewer (Paper 1 MCQ)",
+      "purpose": "A distraction-free, highly readable interface for taking multiple-choice tests with integrated math rendering.",
+      "states": {
+        "loading": "Spinner",
+        "empty": "N/A",
+        "error": "Retry loading question"
+      },
+      "layout": "Top: Progress bar (e.g., Q3/50). Middle: Large white question card with precise math rendering. Below: 4 large touch-target option cards (A, B, C, D). Bottom: Sticky footer with 'Previous', 'Discuss with AI' (secondary button), and 'Next' (primary button). The option cards use default outline, switch to brandPrimary border when selected, and switch to green background tint (mcqCorrectBg) when correct."
+    },
+    {
+      "name": "AI Assistant Chat",
+      "purpose": "A tutor-focused conversational interface with persistent context.",
+      "states": {
+        "loading": "Typing indicator bubbles",
+        "empty": "3-5 suggested prompt chips (e.g., 'Explain this step', 'Give me a similar problem')",
+        "error": "Inline error inside the chat thread"
+      },
+      "layout": "Full-screen chat. Top section: A pinned 'Current Problem' card (collapsible) so the user doesn't lose context. Thread: User bubbles are brandPrimary (blue) filled aligned right; AI bubbles are surfaceSecondary (white) cards aligned left. Bottom: Expandable text input field that stays above the keyboard."
+    },
+    {
+      "name": "Library",
+      "purpose": "A structured repository of video lessons and study materials.",
+      "states": {
+        "loading": "Skeleton rows",
+        "empty": "No materials available yet.",
+        "error": "Failed to load library"
+      },
+      "layout": "Top: Video player surface. Below: A sticky tab selector (Methodology | Chapters | Practice). Content area: Vertical list of 'Expert Strategy' cards and chapter sections. Use brandTertiary chips for tags."
+    }
+  ],
+  "haptics": {
+    "tab_press": "light",
+    "button_press": "medium",
+    "mcq_correct": "success",
+    "mcq_incorrect": "error",
+    "chat_send": "light"
+  },
+  "images": {
+    "onboarding_hero": {
+      "url": "https://images.unsplash.com/photo-1744880034743-7d75853080ea?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNTl8MHwxfHNlYXJjaHwzfHxhZnJpY2FuJTIwc3R1ZGVudCUyMHN0dWR5aW5nJTIwcGhvbmV8ZW58MHx8fHwxNzg2MTY5NDQ5fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "African student smiling while looking at phone"
+    },
+    "teacher_avatar_placeholder": {
+      "url": "https://images.unsplash.com/photo-1541178735493-479c1a27ed24?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NjZ8MHwxfHNlYXJjaHwxfHxhZnJpY2FuJTIwdGVhY2hlciUyMGxhcHRvcHxlbnwwfHx8fDE3ODYxNjk0NDl8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "African teacher working on laptop"
+    },
+    "course_thumbnail_math": {
+      "url": "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwxfHxtYXRoJTIwcGh5c2ljcyUyMHRleHRib29rfGVufDB8fHx8MTc4NjE2OTQ0OXww&ixlib=rb-4.1.0&q=85",
+      "alt": "Close up of math and physics equations on paper"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly follow the user's explicit color request: Use Navy Blue (#0A192F) for the primary brand text/headers and Bright Blue (#2563EB) for primary buttons and active tab indicators. (This overrides the standard blue ban due to the explicit user prompt).",
+    "Tab Bar Style: Implement 4 tabs. The active tab should have a blue selected background pill exactly like the requested screenshots.",
+    "Button Styles: Primary buttons MUST be blue filled (#2563EB), secondary buttons outline, and tertiary buttons text-only.",
+    "Chat Bubbles: User messages must be dark blue filled with white text. AI messages must be white cards with dark text.",
+    "MCQ Options: Cards should have a default outline (border color), a blue border when selected, and a green background tint (#D1FAE5) with a green border (#10B981) when marked correct.",
+    "Math Rendering: Use 'react-native-math-view' or 'react-native-katex' to render LaTeX equations cleanly in questions and step-by-step cards. Ensure font size matches the Plus Jakarta Sans surrounding text.",
+    "Chart Style: Use 'react-native-gifted-charts' or 'victory-native' for the Weekly Activity chart, styling it minimally with blue bars on a white card.",
+    "Implement the 'Current Problem' pinned card in the AI Assistant chat. It should be pinned to the top of the chat view to maintain context.",
+    "Always maintain 'white cards on light gray background' (surfaceSecondary on surface) to keep the premium academic feel."
+  ]
+}
