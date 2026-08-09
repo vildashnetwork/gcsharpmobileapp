@@ -29,7 +29,7 @@ export default function Welcome() {
     try {
       if (mode === "login") await login(email.trim(), password);
       else await register(email.trim(), password, name.trim() || "New User", role);
-      router.replace("/");
+      router.replace("/(tabs)");
     } catch (e: any) {
       setErr(e.message || "Something went wrong");
     } finally {
