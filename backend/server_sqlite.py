@@ -1,4 +1,4 @@
-# server_unified.py - GCSMART Unified API (Mobile + Web)
+# server_unified.py - GCSMART Unified API (Mobile + Web) - COMPLETE VERSION
 import os
 import io
 import re
@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Literal
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response as FastResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -379,31 +379,44 @@ def _new_chat(session_id: str, system: str) -> SimpleLLM:
     chat.session_id = session_id
     return chat
 
-async def get_current_user(request: Request):
-    token = request.cookies.get("session_token")
-    if not token:
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth.split(" ", 1)[1]
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
-    if not session:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    expires_at = session["expires_at"]
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=401, detail="Session expired")
-
-    user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0, "password_hash": 0})
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ", 1)[1]
+    
+    # Try JWT first
+    try:
+        decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = decoded.get("sub")
+    except Exception:
+        # Try session_token (Google auth)
+        session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+        if session:
+            exp = session.get("expires_at")
+            if exp and exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp and exp > datetime.now(timezone.utc):
+                user_id = session["user_id"]
+            else:
+                raise HTTPException(status_code=401, detail="Session expired")
+        else:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+async def get_current_user_optional(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        return await get_current_user(authorization)
+    except HTTPException:
+        return None
 
 def serialize(doc: dict) -> dict:
     if doc is None:
@@ -507,32 +520,61 @@ async def login_user(req: LoginRequest, response: Response):
 
 @api_router.post("/auth/session")
 async def process_session(request: Request, response: Response):
+    """Process OAuth session from EmergentAgent for Google Sign-In"""
+    # Try to get session_id from headers first
     session_id = request.headers.get("X-Session-ID")
+    
+    # If not in headers, try from body
     if not session_id:
-        raise HTTPException(400, "Missing session id")
+        try:
+            body = await request.json()
+            session_id = body.get("session_id")
+        except:
+            pass
+    
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session id")
 
-    async with httpx.AsyncClient() as hc:
-        r = await hc.get(
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15) as hc:
+            r = await hc.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": session_id},
+            )
+    except Exception as e:
+        logger.error(f"Error calling EmergentAgent: {e}")
+        raise HTTPException(status_code=502, detail=f"Authentication service error: {str(e)}")
+    
     if r.status_code != 200:
-        raise HTTPException(401, "Auth failed")
+        logger.error(f"EmergentAgent returned {r.status_code}: {r.text}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    
     data = r.json()
+    email = data.get("email", "").lower()
+    name = data.get("name", "")
+    picture = data.get("picture")
+    session_token = data.get("session_token") or f"tok_{uuid.uuid4().hex}"
 
-    email = data["email"].lower()
+    # Get or create user
     existing = await db.users.find_one({"email": email})
+    
     if existing:
         user = existing
+        user_id = user["user_id"]
+        # Update profile photo if changed
+        if picture and not user.get("profile_photo"):
+            await db.users.update_one({"user_id": user_id}, {"$set": {"profile_photo": picture}})
+            user["profile_photo"] = picture
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         user = {
             "user_id": user_id,
             "email": email,
-            "full_name": data.get("name", ""),
-            "profile_photo": data.get("picture"),
+            "full_name": name,
+            "profile_photo": picture,
+            "password_hash": "",  # No password for OAuth users
             "role": "student",
-            "onboarded": False,
+            "onboarded": True,
             "bio": "",
             "institution": "",
             "exam_level": "",
@@ -549,12 +591,12 @@ async def process_session(request: Request, response: Response):
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         await db.users.insert_one(dict(user))
-
-    session_token = data.get("session_token") or f"tok_{uuid.uuid4().hex}"
+    
+    # Save session
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     await db.user_sessions.insert_one({
-        "user_id": user["user_id"],
         "session_token": session_token,
+        "user_id": user_id,
         "expires_at": expires_at.isoformat(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
@@ -564,11 +606,15 @@ async def process_session(request: Request, response: Response):
         httponly=True, secure=True, samesite="none", path="/",
         max_age=7 * 24 * 60 * 60,
     )
+    
+    # Return the user data (matching your mobile app's expected format)
     user.pop("password_hash", None)
+    user.pop("_id", None)
     return {"session_token": session_token, "user": user}
 
 @api_router.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
+    user.pop("password_hash", None)
     return {"user": user}
 
 @api_router.post("/auth/logout")
@@ -585,6 +631,7 @@ async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_curren
     if update:
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
     fresh = await db.users.find_one({"user_id": user["user_id"]}, {"_id": 0, "password_hash": 0})
+    fresh.pop("password_hash", None)
     return fresh
 
 # ============================================================
@@ -656,7 +703,7 @@ async def get_paper(paper_id: str):
 @api_router.get("/papers")
 async def list_papers(level: Optional[str] = None, subject: Optional[str] = None,
                       year: Optional[int] = None, paper: Optional[int] = None,
-                      q: Optional[str] = None, user: dict = Depends(get_current_user)):
+                      q: Optional[str] = None, user: dict = Depends(get_current_user_optional)):
     query = {}
     if level: query["level"] = level
     if subject: query["subject"] = subject
@@ -664,14 +711,18 @@ async def list_papers(level: Optional[str] = None, subject: Optional[str] = None
     if paper: query["paper_number"] = paper
     if q: query["title"] = {"$regex": re.escape(q), "$options": "i"}
     papers = await db.papers.find(query, {"_id": 0}).sort([("year", -1), ("subject", 1)]).to_list(500)
-    drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0, "paper_id": 1}).to_list(500)
+    
+    # Check drafts if user is authenticated
+    drafts = []
+    if user:
+        drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0, "paper_id": 1}).to_list(500)
     saved = {d["paper_id"] for d in drafts}
     for p in papers:
         p["saved"] = p["paper_id"] in saved
     return {"items": papers}
 
 @api_router.get("/papers/filters")
-async def paper_filters(user: dict = Depends(get_current_user)):
+async def paper_filters():
     papers = await db.papers.find({}, {"_id": 0}).to_list(1000)
     levels = sorted({p.get("level") for p in papers if p.get("level")})
     subjects = sorted({p.get("subject") for p in papers if p.get("subject")})
@@ -679,16 +730,14 @@ async def paper_filters(user: dict = Depends(get_current_user)):
     return {"levels": levels, "subjects": subjects, "years": years, "papers": [1, 2, 3]}
 
 @api_router.get("/papers/{paper_id}")
-async def get_paper_detail(paper_id: str, user: dict = Depends(get_current_user)):
+async def get_paper_detail(paper_id: str):
     p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Paper not found")
-    d = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": paper_id}, {"_id": 0})
-    p["saved"] = bool(d)
     return p
 
 @api_router.get("/papers/{paper_id}/pdf")
-async def proxy_pdf(paper_id: str, user: dict = Depends(get_current_user)):
+async def proxy_pdf(paper_id: str):
     p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Paper not found")
@@ -738,7 +787,7 @@ async def answer_question(inp: AnswerIn, user: dict = Depends(get_current_user))
 # ============================================================
 
 @api_router.post("/solve")
-async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current_user)):
+async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current_user_optional)):
     local_result = solve_math_local(req.question)
     if local_result:
         return {
@@ -910,17 +959,14 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     }
 
 @api_router.get("/leaderboard")
-async def leaderboard(user: dict = Depends(get_current_user)):
+async def leaderboard():
     users = await db.users.find({"role": "student"}, {"_id": 0, "name": 1, "xp": 1, "level": 1, "user_id": 1}).to_list(500)
     users.sort(key=lambda u: u.get("xp", 0), reverse=True)
     board = []
-    my_rank = None
     for i, u in enumerate(users):
-        entry = {"rank": i + 1, "name": u.get("name", "Student"), "xp": u.get("xp", 0), "level": u.get("level", 1), "is_me": u["user_id"] == user["user_id"]}
-        if entry["is_me"]:
-            my_rank = entry
+        entry = {"rank": i + 1, "name": u.get("name", "Student"), "xp": u.get("xp", 0), "level": u.get("level", 1)}
         board.append(entry)
-    return {"top": board[:10], "my_rank": my_rank}
+    return {"top": board[:10]}
 
 # ============================================================
 # AI Tutor (Streaming)
@@ -1004,7 +1050,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     )
 
 @api_router.get("/ai/health")
-async def ai_health(user: dict = Depends(get_current_user)):
+async def ai_health():
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     result = {
         "api_key_configured": bool(api_key),
@@ -1080,6 +1126,9 @@ VIEW_RATE_FCFA = 90
 
 @api_router.post("/courses")
 async def create_course(req: CourseCreate, user: dict = Depends(get_current_user)):
+    if user.get("role") != "teacher":
+        raise HTTPException(403, "Teachers only")
+    
     course = {
         "course_id": f"crs_{uuid.uuid4().hex[:12]}",
         "teacher_id": user["user_id"],
@@ -1103,13 +1152,16 @@ async def create_course(req: CourseCreate, user: dict = Depends(get_current_user
     return course
 
 @api_router.get("/courses")
-async def list_courses(mine: bool = False, user: dict = Depends(get_current_user)):
-    q = {"teacher_id": user["user_id"]} if mine else {}
+async def list_courses(mine: bool = False, user: dict = Depends(get_current_user_optional)):
+    if mine and user:
+        q = {"teacher_id": user["user_id"]}
+    else:
+        q = {}
     items = await db.courses.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
     return items
 
 @api_router.get("/courses/{course_id}")
-async def get_course(course_id: str, user: dict = Depends(get_current_user)):
+async def get_course(course_id: str):
     c = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Not found")
@@ -1285,9 +1337,8 @@ async def root():
         "status": "running",
         "database": "MongoDB",
         "endpoints": {
-            "auth": "/api/auth",
-            "exam": "/api/exam/structure",
-            "solve": "/api/solve",
+            "auth": "/api/auth/register, /api/auth/login, /api/auth/session, /api/auth/me",
+            "subjects": "/api/subjects",
             "papers": "/api/papers",
             "past-papers": "/api/past-papers",
             "courses": "/api/courses",
@@ -1311,22 +1362,16 @@ async def seed_all_data():
     
     # Subjects
     subjects_data = [
-        # GCE O Level
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Mathematics", "code": "MATH-O", "exam_level": "GCE O", "icon": "calculator-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "English Language", "code": "ENG-O", "exam_level": "GCE O", "icon": "book-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Physics", "code": "PHY-O", "exam_level": "GCE O", "icon": "flash-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Chemistry", "code": "CHEM-O", "exam_level": "GCE O", "icon": "flask-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Biology", "code": "BIO-O", "exam_level": "GCE O", "icon": "leaf-outline"},
-        # GCE A Level
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Pure Mathematics", "code": "PMATH-A", "exam_level": "GCE A", "icon": "calculator-outline"},
-        {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Further Mathematics", "code": "FMATH-A", "exam_level": "GCE A", "icon": "infinite-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Physics", "code": "PHY-A", "exam_level": "GCE A", "icon": "flash-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Chemistry", "code": "CHEM-A", "exam_level": "GCE A", "icon": "flask-outline"},
-        {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Economics", "code": "ECON-A", "exam_level": "GCE A", "icon": "trending-up-outline"},
-        # HND
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Computer Science", "code": "CS-HND", "exam_level": "HND", "icon": "code-slash-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Business Management", "code": "BM-HND", "exam_level": "HND", "icon": "briefcase-outline"},
-        # Concours
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "General Knowledge", "code": "GK-CON", "exam_level": "Concours", "icon": "bulb-outline"},
     ]
     await db.subjects.insert_many(subjects)
@@ -1369,7 +1414,6 @@ async def seed_all_data():
         STAT2 = "https://customer-assets-0z36b82j.emergentagent.net/job_cameroon-study-hub/artifacts/uar8038x_A-LEVEL-2025-Pure-mathematics-with-statistics-2.pdf"
         MECH2 = "https://customer-assets-0z36b82j.emergentagent.net/job_cameroon-study-hub/artifacts/zo09xaaa_A-LEVEL-2025-Pure-mathematics-with-mechanics-2.pdf"
         
-        # Add to both collections for compatibility
         await db.papers.insert_many([
             {
                 "paper_id": f"pap_{uuid.uuid4().hex[:12]}",
