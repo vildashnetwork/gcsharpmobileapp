@@ -1573,8 +1573,7 @@
 
 
 
-
-# server_unified.py - Fixed version with proper auth handling
+# server_unified.py - Complete version with all endpoints
 import os
 import io
 import re
@@ -1610,6 +1609,7 @@ DB_NAME = os.environ.get("DB_NAME", "gcsmart")
 JWT_SECRET = os.environ.get("JWT_SECRET", "your-secret-key-change-this-in-production")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
+EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
 PORT = int(os.environ.get("PORT", 8000))
 APP_URL = os.environ.get("APP_URL", f"http://localhost:{PORT}")
 APP_NAME = os.environ.get("APP_NAME", "GCSMART")
@@ -1854,6 +1854,9 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+class SessionIn(BaseModel):
+    session_id: str
+
 class ProfileUpdate(BaseModel):
     role: Optional[str] = None
     bio: Optional[str] = None
@@ -1886,6 +1889,9 @@ class SolveRequest(BaseModel):
     question: str
     subject: Optional[str] = None
     variable: str = "x"
+
+class SolutionIn(BaseModel):
+    question: str
 
 class GenerateQuestionsRequest(BaseModel):
     level: str
@@ -1982,7 +1988,6 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
         if session:
             exp = session.get("expires_at")
             if exp:
-                # Handle both string and datetime
                 if isinstance(exp, str):
                     try:
                         exp = datetime.fromisoformat(exp)
@@ -2079,7 +2084,7 @@ def _clean_json(text: str):
     raise ValueError("Could not extract valid JSON")
 
 # ============================================================
-# Authentication Routes - FIXED
+# Authentication Routes
 # ============================================================
 
 @api_router.post("/auth/register")
@@ -2240,7 +2245,6 @@ async def process_session(request: Request, response: Response):
 
 @api_router.get("/auth/me")
 async def auth_me(user: dict = Depends(get_current_user)):
-    # User is already cleaned in get_current_user
     return {"user": user}
 
 @api_router.post("/auth/logout")
@@ -2280,6 +2284,45 @@ async def onboarding(inp: OnboardingIn, user: dict = Depends(get_current_user)):
         }},
     )
     return {"ok": True}
+
+# ============================================================
+# Analytics Routes
+# ============================================================
+
+@api_router.get("/analytics/student")
+async def analytics_student(user: dict = Depends(get_current_user)):
+    uid = user["user_id"]
+    papers = await db.user_answers.distinct("paper_id", {"user_id": uid})
+    answers = await db.user_answers.find({"user_id": uid}, {"_id": 0}).to_list(5000)
+    total = len(answers)
+    correct = sum(1 for a in answers if a.get("is_correct"))
+    accuracy = round((correct / total) * 100, 1) if total else 0.0
+    total_seconds = sum(a.get("time_taken", 0) for a in answers)
+    
+    today = date.today()
+    days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
+    sessions = await db.study_sessions.find(
+        {"user_id": uid, "day": {"$in": [d.isoformat() for d in days]}}, {"_id": 0}
+    ).to_list(50)
+    smap = {s["day"]: s for s in sessions}
+    weekly = []
+    for d in days:
+        s = smap.get(d.isoformat(), {})
+        weekly.append({
+            "day": d.strftime("%a"),
+            "minutes": round(s.get("seconds", 0) / 60, 1),
+            "attempted": s.get("attempted", 0),
+        })
+    return {
+        "study_hours": round(total_seconds / 3600, 1),
+        "accuracy_rate": accuracy,
+        "papers_completed": len(papers),
+        "target_papers": 20,
+        "questions_attempted": total,
+        "xp": user.get("xp", 0),
+        "streak": user.get("streak", 0),
+        "weekly": weekly,
+    }
 
 # ============================================================
 # Subjects & Exam Structure
@@ -2595,7 +2638,149 @@ async def leaderboard():
     return {"top": board[:10]}
 
 # ============================================================
-# AI Tutor (Streaming)
+# Library Routes
+# ============================================================
+
+@api_router.get("/library/courses")
+async def list_library_courses():
+    items = await db.courses.find({}, {"_id": 0}).to_list(200)
+    return {"items": items}
+
+@api_router.get("/library/courses/{course_id}")
+async def get_library_course(course_id: str):
+    c = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Not found")
+    return {"course": c}
+
+# ============================================================
+# Teacher Overview
+# ============================================================
+
+@api_router.get("/teacher/overview")
+async def teacher_overview(user: dict = Depends(get_current_user)):
+    students = await db.users.count_documents({"role": "student"})
+    my_courses = await db.courses.find({"teacher_id": user["user_id"]}, {"_id": 0}).to_list(50)
+    if not my_courses:
+        my_courses = await db.courses.find({}, {"_id": 0}).limit(5).to_list(5)
+    monthly_views = sum(c.get("views", 0) for c in my_courses)
+    earnings_fcfa = monthly_views * 90
+    return {
+        "students": students,
+        "courses": my_courses,
+        "monthly_views": monthly_views,
+        "earnings_fcfa": earnings_fcfa,
+        "rate_per_view": 90,
+    }
+
+# ============================================================
+# AI Chat with Emergent
+# ============================================================
+
+@api_router.post("/ai/chat/emergent")
+async def ai_chat_emergent(inp: ChatRequest, user: dict = Depends(get_current_user)):
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except Exception as e:
+        raise HTTPException(500, f"AI unavailable: {e}")
+
+    history = await db.chat_messages.find(
+        {"user_id": user["user_id"], "session_id": inp.session_id},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(20)
+
+    system = (
+        "You are GC AI Assistant, an expert academic tutor for Cameroon students preparing for "
+        "GCE O Level, GCE A Level, HND and Concours exams. Explain step-by-step and be encouraging.\n\n"
+        "OUTPUT FORMAT - VERY IMPORTANT:\n"
+        "- Reply in PLAIN TEXT only. No Markdown. No asterisks for bold. No hashes for headings. "
+        "No backticks. No code fences.\n"
+        "- Do NOT use LaTeX. Write math using Unicode: x², x³, √, π, θ, α, β, Δ, Σ, ∫, ∞, "
+        "≤, ≥, ≠, ≈, ×, ÷, ± , →, ⇒. For fractions write like '1/2' or '(a+b)/(c+d)'.\n"
+        "- Structure with plain numbered steps: '1) ...' or bullet points '• ...'.\n"
+        "- Keep answers concise but complete."
+    )
+    if inp.current_problem:
+        system += f"\n\nCurrent problem context:\n{inp.current_problem}"
+
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=inp.session_id,
+        system_message=system,
+    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+
+    for m in history:
+        if m.get("role") == "user":
+            try:
+                await chat.send_message(UserMessage(text=m["content"]))
+            except Exception:
+                pass
+
+    try:
+        reply = await chat.send_message(UserMessage(text=inp.message))
+    except Exception as e:
+        logger.exception("AI error")
+        raise HTTPException(500, f"AI error: {e}")
+
+    now = datetime.now(timezone.utc)
+    await db.chat_messages.insert_many([
+        {"user_id": user["user_id"], "session_id": inp.session_id, "role": "user",
+         "content": inp.message, "created_at": now},
+        {"user_id": user["user_id"], "session_id": inp.session_id, "role": "assistant",
+         "content": reply, "created_at": now},
+    ])
+    return {"reply": reply}
+
+@api_router.get("/ai/history")
+async def ai_history(session_id: str, user: dict = Depends(get_current_user)):
+    msgs = await db.chat_messages.find(
+        {"user_id": user["user_id"], "session_id": session_id}, {"_id": 0}
+    ).sort("created_at", 1).to_list(200)
+    return {"messages": [serialize(m) for m in msgs]}
+
+@api_router.post("/ai/solution")
+async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except Exception as e:
+        raise HTTPException(500, f"AI unavailable: {e}")
+
+    system = (
+        "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
+        "- title: short problem title (max 8 words)\n"
+        "- steps: array of 4-7 objects each with 'heading' and 'body' (concise, exam-style)\n"
+        "- narration: single paragraph script (150-250 words) suitable for text-to-speech, spoken naturally.\n\n"
+        "OUTPUT FORMAT - VERY IMPORTANT:\n"
+        "- The values inside 'heading', 'body', and 'narration' must be PLAIN TEXT - no Markdown, "
+        "no asterisks, no hashes, no LaTeX, no backticks.\n"
+        "- Write math with Unicode: x², √, π, θ, α, Δ, Σ, ∫, ∞, ≤, ≥, ≠, ≈, ×, ÷, →. "
+        "For fractions use '1/2' style. For narration, spell numbers/symbols naturally so a TTS engine "
+        "reads them well.\n"
+        "Return ONLY valid JSON, no markdown, no code fences."
+    )
+    chat = LlmChat(
+        api_key=EMERGENT_LLM_KEY,
+        session_id=f"sol_{uuid.uuid4().hex[:8]}",
+        system_message=system,
+    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+    try:
+        reply = await chat.send_message(UserMessage(text=inp.question))
+    except Exception as e:
+        raise HTTPException(500, f"AI error: {e}")
+
+    reply_clean = reply.strip()
+    if reply_clean.startswith("```"):
+        reply_clean = reply_clean.strip("`")
+        if reply_clean.lower().startswith("json"):
+            reply_clean = reply_clean[4:].strip()
+    try:
+        data = json.loads(reply_clean)
+    except Exception:
+        data = {"title": "Solution", "steps": [{"heading": "Solution", "body": reply}], "narration": reply}
+    return data
+
+# ============================================================
+# AI Tutor (Streaming with OpenRouter)
 # ============================================================
 
 @api_router.get("/ai/sessions")
@@ -2972,7 +3157,9 @@ async def root():
             "papers": "/api/papers",
             "past-papers": "/api/past-papers",
             "courses": "/api/courses",
-            "ai": "/api/ai/chat",
+            "library": "/api/library/courses",
+            "analytics": "/api/analytics/student",
+            "ai": "/api/ai/chat, /api/ai/chat/emergent, /api/ai/solution",
             "docs": "/docs"
         }
     }
@@ -2984,13 +3171,11 @@ app.include_router(api_router)
 # ============================================================
 
 async def seed_all_data():
-    # Check if data already exists
     if await db.subjects.count_documents({}) > 0:
         return
     
     logger.info("Seeding sample data...")
     
-    # Subjects
     subjects_data = [
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "Mathematics", "code": "MATH-O", "exam_level": "GCE O", "icon": "calculator-outline"},
         {"subject_id": f"subj_{uuid.uuid4().hex[:8]}", "name": "English Language", "code": "ENG-O", "exam_level": "GCE O", "icon": "book-outline"},
@@ -3006,7 +3191,6 @@ async def seed_all_data():
     ]
     await db.subjects.insert_many(subjects_data)
     
-    # Demo users
     if not await db.users.find_one({"email": "student@gcsmart.cm"}):
         await db.users.insert_one({
             "user_id": f"user_{uuid.uuid4().hex[:12]}",
@@ -3037,7 +3221,6 @@ async def seed_all_data():
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
     
-    # Past papers
     pmath = await db.subjects.find_one({"code": "PMATH-A"})
     if pmath:
         STAT1 = "https://customer-assets-0z36b82j.emergentagent.net/job_cameroon-study-hub/artifacts/bpetqdqc_PURE%20MATHEMATICS%20with%20statistics%20paper%201.pdf"
@@ -3112,9 +3295,38 @@ async def seed_all_data():
             },
         ])
     
-    # Lesson videos
     thumb = "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&q=85&w=800"
     tavatar = "https://images.unsplash.com/photo-1541178735493-479c1a27ed24?crop=entropy&cs=srgb&fm=jpg&q=85&w=800"
+    
+    courses = [
+        {
+            "course_id": f"course_{uuid.uuid4().hex[:8]}",
+            "title": "Advanced Mechanics: Rotating Rigid Body Dynamics",
+            "subject_name": "Physics", "exam_level": "GCE A",
+            "teacher_name": "Dr. Nkeng Paul",
+            "teacher_avatar": tavatar,
+            "thumbnail": thumb,
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "duration": "42:15",
+            "views": 1240,
+            "rating": 4.8,
+            "description": "Master torque, angular momentum and rotational kinematics for Paper 2.",
+        },
+        {
+            "course_id": f"course_{uuid.uuid4().hex[:8]}",
+            "title": "Calculus Masterclass: Integration Techniques",
+            "subject_name": "Pure Mathematics", "exam_level": "GCE A",
+            "teacher_name": "Ms. Fon Bih",
+            "teacher_avatar": tavatar,
+            "thumbnail": thumb,
+            "video_url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+            "duration": "38:00",
+            "views": 980,
+            "rating": 4.9,
+            "description": "Substitution, by parts, partial fractions — with GCE-style examples.",
+        },
+    ]
+    await db.courses.insert_many(courses)
     
     await db.lesson_videos.insert_many([
         {
@@ -3150,6 +3362,7 @@ if __name__ == "__main__":
     print("Starting Unified GCSMART API Server...")
     print(f"Database: {DB_NAME}")
     print(f"OpenRouter: {'Enabled' if OPENROUTER_API_KEY else 'Disabled'}")
+    print(f"Emergent LLM: {'Enabled' if EMERGENT_LLM_KEY else 'Disabled'}")
     print(f"API: {APP_URL}")
     print(f"Docs: {APP_URL}/docs")
     print(f"CORS Origins: {CORS_ORIGINS}")
