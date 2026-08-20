@@ -272,9 +272,9 @@ async def create_user_session(user_id: str) -> str:
 
 async def bcrypt_check_dummy_pin(pin: str) -> None:
     """Perform a dummy bcrypt check to prevent timing attacks."""
-    dummy_hash = "$2b$12$dummyhashdummyhashdummyhashdummyhashdummyhashdummyhash"
+    dummy_hash = bcrypt.hashpw(b"000000", bcrypt.gensalt())
     try:
-        bcrypt.checkpw(pin.encode(), dummy_hash.encode())
+        bcrypt.checkpw(pin.encode(), dummy_hash)
     except Exception:
         pass
 
@@ -985,10 +985,16 @@ async def pin_login(
             detail="Invalid PIN",
         )
 
-    # Successful PIN login - reset failed attempts
+    # Successful PIN login - reset failed attempts and rotate biometric token
+    biometric_token = new_biometric_token()
     await db.users.update_one(
         {"user_id": user["user_id"]},
-        {"$set": {"failed_pin_attempts": 0, "pin_locked_until": None}}
+        {"$set": {
+            "failed_pin_attempts": 0,
+            "pin_locked_until": None,
+            "biometric_token_hash": hash_biometric_token(biometric_token),
+            "biometric_enabled": True,
+        }}
     )
 
     # Log successful attempt
@@ -1013,9 +1019,12 @@ async def pin_login(
         max_age=7 * 24 * 60 * 60,
     )
 
+    fresh_user = await db.users.find_one({"user_id": user["user_id"]})
+
     return {
         "token": session_token,
-        "user": public_user(user),
+        "biometric_token": biometric_token,
+        "user": public_user(fresh_user),
     }
 
 
@@ -1025,9 +1034,17 @@ async def biometric_login(
     request: Request,
     response: Response,
 ):
-    # Find user by biometric token hash
-    token_hash = hash_biometric_token(req.biometric_token)
-    user = await db.users.find_one({"biometric_token_hash": token_hash})
+    # bcrypt hashes are salted, so we must verify against each stored hash
+    candidates = await db.users.find(
+        {"biometric_token_hash": {"$exists": True, "$ne": None}}
+    ).to_list(length=5000)
+
+    user = None
+    for candidate in candidates:
+        hashed = candidate.get("biometric_token_hash")
+        if hashed and check_biometric_token(req.biometric_token, hashed):
+            user = candidate
+            break
 
     if not user:
         raise HTTPException(
@@ -1142,8 +1159,9 @@ async def pin_status(
     user: dict = Depends(get_current_user),
 ):
     """Check if a user has PIN set up."""
-    has_pin = user.get("pin_hash") is not None
-    has_biometric = user.get("biometric_enabled", False)
+    raw_user = await db.users.find_one({"user_id": user["user_id"]})
+    has_pin = bool(raw_user and raw_user.get("pin_hash"))
+    has_biometric = bool(raw_user and raw_user.get("biometric_enabled", False))
     
     return {
         "has_pin": has_pin,
