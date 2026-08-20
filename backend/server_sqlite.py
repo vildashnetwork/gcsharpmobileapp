@@ -9,6 +9,11 @@ from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Literal
 from contextlib import asynccontextmanager
 
+import secrets
+from pydantic import field_validator
+
+
+
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response as FastResponse
@@ -220,9 +225,78 @@ class SimpleLLM:
                     return result
         return "I'm having trouble reaching the AI service. Please try again."
 
+await db.users.create_index(
+    "biometric_token_hash",
+    unique=True,
+    sparse=True,
+)
+
+await db.pin_login_audit.create_index(
+    [("user_id", 1), ("created_at", -1)]
+)
+
+
+
+
+
+class RegisterWithPinRequest(BaseModel):
+    email: EmailStr
+    name: str = Field(min_length=2, max_length=100)
+    password: str = Field(min_length=8, max_length=128)
+    pin: str
+    role: Literal["student", "teacher"] = "student"
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("PIN must contain exactly 6 digits")
+        return value
+
+
+class PinLoginRequest(BaseModel):
+    email: EmailStr
+    pin: str
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("PIN must contain exactly 6 digits")
+        return value
+
+
+class BiometricLoginRequest(BaseModel):
+    biometric_token: str = Field(min_length=32, max_length=256)
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ============================================================
 # Local Math Solver
 # ============================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def solve_math_local(question: str) -> Optional[str]:
     try:
@@ -771,6 +845,159 @@ async def list_subjects(exam_level: Optional[str] = None):
     q = {"exam_level": exam_level} if exam_level else {}
     items = await db.subjects.find(q, {"_id": 0}).to_list(500)
     return {"items": items}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@api_router.post("/auth/register-with-pin")
+async def register_with_pin(
+    req: RegisterWithPinRequest,
+    response: Response,
+):
+    email = req.email.lower().strip()
+
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="An account already exists for this email",
+        )
+
+    # Reject a few especially weak PINs.
+    weak_pins = {
+        "000000",
+        "111111",
+        "123456",
+        "654321",
+        "121212",
+        "112233",
+    }
+
+    if req.pin in weak_pins:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a less predictable PIN",
+        )
+
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    biometric_token = new_biometric_token()
+
+    user = {
+        "user_id": user_id,
+        "email": email,
+        "password_hash": hash_pw(req.password),
+        "pin_hash": hash_pin(req.pin),
+        "biometric_token_hash": hash_biometric_token(
+            biometric_token
+        ),
+        "full_name": req.name.strip(),
+        "role": req.role,
+        "onboarded": False,
+        "bio": "",
+        "institution": "",
+        "exam_level": "",
+        "study_year": None,
+        "subjects": [],
+        "goals": [],
+        "daily_commitment": "",
+        "proficiency": "",
+        "learning_style": "",
+        "specialization": "",
+        "xp": 0,
+        "level": 1,
+        "streak": 0,
+        "profile_photo": None,
+        "failed_pin_attempts": 0,
+        "pin_locked_until": None,
+        "pin_created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(timezone.utc),
+    }
+
+    try:
+        await db.users.insert_one(dict(user))
+    except Exception:
+        logger.exception("PIN registration failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not create the account",
+        )
+
+    session_token = await create_user_session(user_id)
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60,
+    )
+
+    return {
+        "token": session_token,
+        "biometric_token": biometric_token,
+        "user": public_user(user),
+    }
+
+
+@api_router.post("/auth/pin-login")
+async def pin_login(
+    req: PinLoginRequest,
+    request: Request,
+    response: Response,
+):
+    email = req.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+
+    # Use the same public response for unknown users and users
+    # without a PIN to reduce account enumeration.
+    if not user or not user.get("pin_hash"):
+        await bcrypt_check_dummy_pin(req.pin)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or PIN",
+        )
+
+    remaining = pin_lock_remaining(user)
+    if remaining > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many attempts. Try again in {remaining} seconds.",
+        )
+
+    if not check_pin(req.pin, user["pin_hash"]):
+        attempts = int(user.get("failed_pin_attempts", 0)) + 1
+
+        updates = {
+            "failed_pin_attempts": attempts,
+        }
+
+        # Lock for 15 minutes after five failures.
+        if attempts >= 5:
+            updates["failed_pin_attempts"] = 0
+            updates["pin_locked_until"] = (
+                datetime.now(timezone.utc) + timedelta(minutes=15)
+            )
+
+        await db.users.update
 
 # ============================================================
 # Past Papers (Mobile & Web compatible)
