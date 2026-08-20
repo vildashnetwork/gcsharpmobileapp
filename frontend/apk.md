@@ -1,4 +1,3 @@
-
 # 1. Install EAS CLI globally if not installed
 
 npm install -g eas-cli
@@ -11,9 +10,7 @@ eas login
 
 eas build:configure
 
-# 4. Build APK for Android
-
-eas build --platform android --profile preview
+# 4. Build APK for Androidart
 
 # 5. Or build for production
 
