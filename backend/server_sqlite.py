@@ -12,8 +12,6 @@ from contextlib import asynccontextmanager
 import secrets
 from pydantic import field_validator
 
-
-
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response as FastResponse
@@ -86,6 +84,11 @@ async def lifespan(app: FastAPI):
         await db.ai_sessions.create_index("session_id", unique=True)
         await db.study_sessions.create_index("user_id", 1)
         await db.study_sessions.create_index("day", 1)
+        
+        # PIN auth indexes
+        await db.users.create_index("biometric_token_hash", unique=True, sparse=True)
+        await db.pin_login_audit.create_index([("user_id", 1), ("created_at", -1)])
+        
         print("Indexes created successfully")
     except Exception as e:
         print(f"Index creation warning (may be harmless): {e}")
@@ -225,19 +228,95 @@ class SimpleLLM:
                     return result
         return "I'm having trouble reaching the AI service. Please try again."
 
-await db.users.create_index(
-    "biometric_token_hash",
-    unique=True,
-    sparse=True,
-)
+# ============================================================
+# PIN Auth Helper Functions
+# ============================================================
 
-await db.pin_login_audit.create_index(
-    [("user_id", 1), ("created_at", -1)]
-)
+def hash_pin(pin: str) -> str:
+    """Hash a PIN using bcrypt."""
+    return bcrypt.hashpw(pin.encode(), bcrypt.gensalt()).decode()
 
+def check_pin(pin: str, hashed: str) -> bool:
+    """Verify a PIN against its hash."""
+    try:
+        return bcrypt.checkpw(pin.encode(), hashed.encode())
+    except Exception:
+        return False
 
+def hash_biometric_token(token: str) -> str:
+    """Hash a biometric token using bcrypt."""
+    return bcrypt.hashpw(token.encode(), bcrypt.gensalt()).decode()
 
+def check_biometric_token(token: str, hashed: str) -> bool:
+    """Verify a biometric token against its hash."""
+    try:
+        return bcrypt.checkpw(token.encode(), hashed.encode())
+    except Exception:
+        return False
 
+def new_biometric_token() -> str:
+    """Generate a new secure biometric token."""
+    return f"bio_{secrets.token_urlsafe(32)}"
+
+async def create_user_session(user_id: str) -> str:
+    """Create a new user session and return the session token."""
+    session_token = f"tok_{uuid.uuid4().hex}"
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    await db.user_sessions.insert_one({
+        "user_id": user_id,
+        "session_token": session_token,
+        "expires_at": expires_at.isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return session_token
+
+async def bcrypt_check_dummy_pin(pin: str) -> None:
+    """Perform a dummy bcrypt check to prevent timing attacks."""
+    dummy_hash = "$2b$12$dummyhashdummyhashdummyhashdummyhashdummyhashdummyhash"
+    try:
+        bcrypt.checkpw(pin.encode(), dummy_hash.encode())
+    except Exception:
+        pass
+
+def pin_lock_remaining(user: dict) -> int:
+    """Return remaining lock time in seconds for a user."""
+    locked_until = user.get("pin_locked_until")
+    if not locked_until:
+        return 0
+    if isinstance(locked_until, str):
+        locked_until = datetime.fromisoformat(locked_until)
+    remaining = (locked_until - datetime.now(timezone.utc)).total_seconds()
+    return max(0, int(remaining))
+
+def public_user(user: dict) -> dict:
+    """Return a safe user object without sensitive fields."""
+    safe = {k: v for k, v in user.items() if k not in [
+        "password_hash", "pin_hash", "biometric_token_hash",
+        "failed_pin_attempts", "pin_locked_until", "_id"
+    ]}
+    # Ensure required fields exist
+    safe.setdefault("onboarded", False)
+    safe.setdefault("xp", 0)
+    safe.setdefault("level", 1)
+    safe.setdefault("streak", 0)
+    safe.setdefault("profile_photo", None)
+    safe.setdefault("exam_level", None)
+    safe.setdefault("full_name", safe.get("full_name", "User"))
+    safe.setdefault("role", "student")
+    safe.setdefault("bio", "")
+    safe.setdefault("institution", "")
+    safe.setdefault("study_year", None)
+    safe.setdefault("subjects", [])
+    safe.setdefault("goals", [])
+    safe.setdefault("daily_commitment", "")
+    safe.setdefault("proficiency", "")
+    safe.setdefault("learning_style", "")
+    safe.setdefault("specialization", "")
+    return safe
+
+# ============================================================
+# Pydantic Models for PIN Auth
+# ============================================================
 
 class RegisterWithPinRequest(BaseModel):
     email: EmailStr
@@ -270,33 +349,24 @@ class BiometricLoginRequest(BaseModel):
     biometric_token: str = Field(min_length=32, max_length=256)
 
 
+class PinSetupRequest(BaseModel):
+    pin: str
+
+    @field_validator("pin")
+    @classmethod
+    def validate_pin(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("PIN must contain exactly 6 digits")
+        return value
 
 
-
-
-
-
-
-
-
+class BiometricSetupRequest(BaseModel):
+    enable: bool = True
 
 
 # ============================================================
 # Local Math Solver
 # ============================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def solve_math_local(question: str) -> Optional[str]:
     try:
@@ -442,7 +512,7 @@ class LessonIn(BaseModel):
     duration: Optional[str] = None
 
 # ============================================================
-# Auth Helpers - FIXED
+# Auth Helpers
 # ============================================================
 
 def hash_pw(pw: str) -> str:
@@ -764,107 +834,8 @@ async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_curren
     return fresh
 
 # ============================================================
-# Onboarding
+# PIN Authentication Routes
 # ============================================================
-
-@api_router.post("/users/onboarding")
-async def onboarding(inp: OnboardingIn, user: dict = Depends(get_current_user)):
-    await db.users.update_one(
-        {"user_id": user["user_id"]},
-        {"$set": {
-            "onboarded": True,
-            "goal": inp.goal,
-            "onboarding_subjects": inp.subjects,
-            "daily_time": inp.daily_time,
-            "level": inp.level,
-            "learning_style": inp.learning_style,
-            "exam_level": inp.exam_level,
-        }},
-    )
-    return {"ok": True}
-
-# ============================================================
-# Analytics Routes
-# ============================================================
-
-@api_router.get("/analytics/student")
-async def analytics_student(user: dict = Depends(get_current_user)):
-    uid = user["user_id"]
-    papers = await db.user_answers.distinct("paper_id", {"user_id": uid})
-    answers = await db.user_answers.find({"user_id": uid}, {"_id": 0}).to_list(5000)
-    total = len(answers)
-    correct = sum(1 for a in answers if a.get("is_correct"))
-    accuracy = round((correct / total) * 100, 1) if total else 0.0
-    total_seconds = sum(a.get("time_taken", 0) for a in answers)
-    
-    today = date.today()
-    days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
-    sessions = await db.study_sessions.find(
-        {"user_id": uid, "day": {"$in": [d.isoformat() for d in days]}}, {"_id": 0}
-    ).to_list(50)
-    smap = {s["day"]: s for s in sessions}
-    weekly = []
-    for d in days:
-        s = smap.get(d.isoformat(), {})
-        weekly.append({
-            "day": d.strftime("%a"),
-            "minutes": round(s.get("seconds", 0) / 60, 1),
-            "attempted": s.get("attempted", 0),
-        })
-    return {
-        "study_hours": round(total_seconds / 3600, 1),
-        "accuracy_rate": accuracy,
-        "papers_completed": len(papers),
-        "target_papers": 20,
-        "questions_attempted": total,
-        "xp": user.get("xp", 0),
-        "streak": user.get("streak", 0),
-        "weekly": weekly,
-    }
-
-# ============================================================
-# Subjects & Exam Structure
-# ============================================================
-
-EXAM_STRUCTURE = {
-    "GCE O Level": ["Mathematics", "English Language", "French", "Physics", "Chemistry",
-                    "Biology", "History", "Geography", "Economics", "Literature", "Additional Mathematics"],
-    "GCE A Level": ["Pure Mathematics", "Further Mathematics", "Physics", "Chemistry", "Biology",
-                    "Economics", "Accounting", "Business Studies", "French", "English Literature"],
-    "HND": ["Computer Science", "Business Management", "Accounting", "Marketing", "Law", "Engineering"],
-    "Concours": ["General Knowledge", "Mathematics", "French", "English", "Sciences"],
-}
-
-@api_router.get("/exam/structure")
-async def exam_structure():
-    years = list(range(2026, 2009, -1))
-    return {"levels": EXAM_STRUCTURE, "years": years, "papers": [1, 2, 3]}
-
-@api_router.get("/subjects")
-async def list_subjects(exam_level: Optional[str] = None):
-    q = {"exam_level": exam_level} if exam_level else {}
-    items = await db.subjects.find(q, {"_id": 0}).to_list(500)
-    return {"items": items}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 @api_router.post("/auth/register-with-pin")
 async def register_with_pin(
@@ -880,7 +851,7 @@ async def register_with_pin(
             detail="An account already exists for this email",
         )
 
-    # Reject a few especially weak PINs.
+    # Reject weak PINs
     weak_pins = {
         "000000",
         "111111",
@@ -904,9 +875,7 @@ async def register_with_pin(
         "email": email,
         "password_hash": hash_pw(req.password),
         "pin_hash": hash_pin(req.pin),
-        "biometric_token_hash": hash_biometric_token(
-            biometric_token
-        ),
+        "biometric_token_hash": hash_biometric_token(biometric_token),
         "full_name": req.name.strip(),
         "role": req.role,
         "onboarded": False,
@@ -997,7 +966,309 @@ async def pin_login(
                 datetime.now(timezone.utc) + timedelta(minutes=15)
             )
 
-        await db.users.update
+        await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": updates}
+        )
+
+        # Log failed attempt
+        await db.pin_login_audit.insert_one({
+            "user_id": user["user_id"],
+            "success": False,
+            "ip": request.client.host if request.client else None,
+            "user_agent": request.headers.get("user-agent"),
+            "created_at": datetime.now(timezone.utc),
+        })
+
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid PIN",
+        )
+
+    # Successful PIN login - reset failed attempts
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"failed_pin_attempts": 0, "pin_locked_until": None}}
+    )
+
+    # Log successful attempt
+    await db.pin_login_audit.insert_one({
+        "user_id": user["user_id"],
+        "success": True,
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "created_at": datetime.now(timezone.utc),
+    })
+
+    # Create session
+    session_token = await create_user_session(user["user_id"])
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60,
+    )
+
+    return {
+        "token": session_token,
+        "user": public_user(user),
+    }
+
+
+@api_router.post("/auth/biometric-login")
+async def biometric_login(
+    req: BiometricLoginRequest,
+    request: Request,
+    response: Response,
+):
+    # Find user by biometric token hash
+    token_hash = hash_biometric_token(req.biometric_token)
+    user = await db.users.find_one({"biometric_token_hash": token_hash})
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid biometric token",
+        )
+
+    # Log biometric login attempt
+    await db.pin_login_audit.insert_one({
+        "user_id": user["user_id"],
+        "success": True,
+        "method": "biometric",
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "created_at": datetime.now(timezone.utc),
+    })
+
+    # Create session
+    session_token = await create_user_session(user["user_id"])
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/",
+        max_age=7 * 24 * 60 * 60,
+    )
+
+    return {
+        "token": session_token,
+        "user": public_user(user),
+    }
+
+
+@api_router.post("/auth/setup-pin")
+async def setup_pin(
+    req: PinSetupRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Set up or change PIN for an authenticated user."""
+    
+    # Reject weak PINs
+    weak_pins = {
+        "000000",
+        "111111",
+        "123456",
+        "654321",
+        "121212",
+        "112233",
+    }
+
+    if req.pin in weak_pins:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a less predictable PIN",
+        )
+
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "pin_hash": hash_pin(req.pin),
+            "pin_created_at": datetime.now(timezone.utc),
+            "failed_pin_attempts": 0,
+            "pin_locked_until": None,
+        }}
+    )
+
+    return {"ok": True, "message": "PIN set successfully"}
+
+
+@api_router.post("/auth/setup-biometric")
+async def setup_biometric(
+    req: BiometricSetupRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Enable or disable biometric authentication for a user."""
+    
+    if req.enable:
+        # Generate new biometric token
+        biometric_token = new_biometric_token()
+        await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {
+                "biometric_token_hash": hash_biometric_token(biometric_token),
+                "biometric_enabled": True,
+            }}
+        )
+        return {
+            "ok": True,
+            "biometric_token": biometric_token,
+            "message": "Biometric authentication enabled",
+        }
+    else:
+        # Disable biometric authentication
+        await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {
+                "biometric_token_hash": None,
+                "biometric_enabled": False,
+            }}
+        )
+        return {
+            "ok": True,
+            "message": "Biometric authentication disabled",
+        }
+
+
+@api_router.get("/auth/pin-status")
+async def pin_status(
+    user: dict = Depends(get_current_user),
+):
+    """Check if a user has PIN set up."""
+    has_pin = user.get("pin_hash") is not None
+    has_biometric = user.get("biometric_enabled", False)
+    
+    return {
+        "has_pin": has_pin,
+        "has_biometric": has_biometric,
+        "biometric_available": True,  # Client will check hardware
+    }
+
+
+@api_router.post("/auth/reset-pin")
+async def reset_pin(
+    req: PinSetupRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Reset PIN for an authenticated user."""
+    
+    # Reject weak PINs
+    weak_pins = {
+        "000000",
+        "111111",
+        "123456",
+        "654321",
+        "121212",
+        "112233",
+    }
+
+    if req.pin in weak_pins:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a less predictable PIN",
+        )
+
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "pin_hash": hash_pin(req.pin),
+            "pin_created_at": datetime.now(timezone.utc),
+            "failed_pin_attempts": 0,
+            "pin_locked_until": None,
+        }}
+    )
+
+    return {"ok": True, "message": "PIN reset successfully"}
+
+# ============================================================
+# Onboarding
+# ============================================================
+
+@api_router.post("/users/onboarding")
+async def onboarding(inp: OnboardingIn, user: dict = Depends(get_current_user)):
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "onboarded": True,
+            "goal": inp.goal,
+            "onboarding_subjects": inp.subjects,
+            "daily_time": inp.daily_time,
+            "level": inp.level,
+            "learning_style": inp.learning_style,
+            "exam_level": inp.exam_level,
+        }},
+    )
+    return {"ok": True}
+
+# ============================================================
+# Analytics Routes
+# ============================================================
+
+@api_router.get("/analytics/student")
+async def analytics_student(user: dict = Depends(get_current_user)):
+    uid = user["user_id"]
+    papers = await db.user_answers.distinct("paper_id", {"user_id": uid})
+    answers = await db.user_answers.find({"user_id": uid}, {"_id": 0}).to_list(5000)
+    total = len(answers)
+    correct = sum(1 for a in answers if a.get("is_correct"))
+    accuracy = round((correct / total) * 100, 1) if total else 0.0
+    total_seconds = sum(a.get("time_taken", 0) for a in answers)
+    
+    today = date.today()
+    days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
+    sessions = await db.study_sessions.find(
+        {"user_id": uid, "day": {"$in": [d.isoformat() for d in days]}}, {"_id": 0}
+    ).to_list(50)
+    smap = {s["day"]: s for s in sessions}
+    weekly = []
+    for d in days:
+        s = smap.get(d.isoformat(), {})
+        weekly.append({
+            "day": d.strftime("%a"),
+            "minutes": round(s.get("seconds", 0) / 60, 1),
+            "attempted": s.get("attempted", 0),
+        })
+    return {
+        "study_hours": round(total_seconds / 3600, 1),
+        "accuracy_rate": accuracy,
+        "papers_completed": len(papers),
+        "target_papers": 20,
+        "questions_attempted": total,
+        "xp": user.get("xp", 0),
+        "streak": user.get("streak", 0),
+        "weekly": weekly,
+    }
+
+# ============================================================
+# Subjects & Exam Structure
+# ============================================================
+
+EXAM_STRUCTURE = {
+    "GCE O Level": ["Mathematics", "English Language", "French", "Physics", "Chemistry",
+                    "Biology", "History", "Geography", "Economics", "Literature", "Additional Mathematics"],
+    "GCE A Level": ["Pure Mathematics", "Further Mathematics", "Physics", "Chemistry", "Biology",
+                    "Economics", "Accounting", "Business Studies", "French", "English Literature"],
+    "HND": ["Computer Science", "Business Management", "Accounting", "Marketing", "Law", "Engineering"],
+    "Concours": ["General Knowledge", "Mathematics", "French", "English", "Sciences"],
+}
+
+@api_router.get("/exam/structure")
+async def exam_structure():
+    years = list(range(2026, 2009, -1))
+    return {"levels": EXAM_STRUCTURE, "years": years, "papers": [1, 2, 3]}
+
+@api_router.get("/subjects")
+async def list_subjects(exam_level: Optional[str] = None):
+    q = {"exam_level": exam_level} if exam_level else {}
+    items = await db.subjects.find(q, {"_id": 0}).to_list(500)
+    return {"items": items}
 
 # ============================================================
 # Past Papers (Mobile & Web compatible)
@@ -1803,7 +2074,7 @@ async def root():
         "status": "running",
         "database": "MongoDB",
         "endpoints": {
-            "auth": "/api/auth/register, /api/auth/login, /api/auth/session, /api/auth/me",
+            "auth": "/api/auth/register, /api/auth/login, /api/auth/session, /api/auth/me, /api/auth/register-with-pin, /api/auth/pin-login, /api/auth/biometric-login, /api/auth/setup-pin, /api/auth/setup-biometric, /api/auth/pin-status, /api/auth/reset-pin",
             "subjects": "/api/subjects",
             "papers": "/api/papers",
             "past-papers": "/api/past-papers",
