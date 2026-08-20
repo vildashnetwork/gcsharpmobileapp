@@ -94,9 +94,13 @@ async def lifespan(app: FastAPI):
         await db.users.create_index("biometric_token_hash", unique=True, sparse=True)
         await db.pin_login_audit.create_index([("user_id", 1), ("created_at", -1)])
         
-        # Password reset OTP index (TTL for expiry)
+        # Password reset OTP index
         await db.password_reset_otps.create_index("email", 1)
         await db.password_reset_otps.create_index("expires_at", expireAfterSeconds=0)
+        
+        # PIN reset OTP index
+        await db.pin_reset_otps.create_index("email", 1)
+        await db.pin_reset_otps.create_index("expires_at", expireAfterSeconds=0)
         
         print("Indexes created successfully")
     except Exception as e:
@@ -411,6 +415,36 @@ class ResetPasswordWithOtpRequest(BaseModel):
     email: EmailStr
     otp: str
     new_password: str = Field(min_length=8, max_length=128)
+
+# ============================================================
+# Pydantic Models for PIN Reset OTP
+# ============================================================
+
+class RequestPinResetOtpRequest(BaseModel):
+    email: EmailStr
+
+class ResetPinWithOtpRequest(BaseModel):
+    email: EmailStr
+    otp: str
+    new_pin: str = Field(min_length=6, max_length=6)
+
+    @field_validator("new_pin")
+    @classmethod
+    def validate_new_pin(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("PIN must contain exactly 6 digits")
+        # Reject weak PINs
+        weak_pins = {
+            "000000",
+            "111111",
+            "123456",
+            "654321",
+            "121212",
+            "112233",
+        }
+        if value in weak_pins:
+            raise ValueError("Choose a less predictable PIN")
+        return value
 
 # ============================================================
 # Local Math Solver (unchanged)
@@ -1234,17 +1268,13 @@ async def reset_pin(
 async def request_reset_otp(req: RequestResetOtpRequest):
     email = req.email.lower().strip()
 
-    # Check if user exists – we still send a generic response to avoid enumeration
     user = await db.users.find_one({"email": email})
     if not user:
-        # Still simulate success to avoid leaking user existence
         return {"ok": True, "message": "If an account exists, an OTP has been sent."}
 
-    # Generate OTP
     otp = generate_otp()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
-    # Store OTP in DB (overwrite any previous)
     await db.password_reset_otps.update_one(
         {"email": email},
         {"$set": {
@@ -1256,7 +1286,6 @@ async def request_reset_otp(req: RequestResetOtpRequest):
         upsert=True,
     )
 
-    # Send email via Brevo
     subject = "Password Reset OTP - GC Sharp"
     html_content = f"""
     <html>
@@ -1277,7 +1306,6 @@ async def request_reset_otp(req: RequestResetOtpRequest):
     sent = await send_brevo_email(email, subject, html_content, text_content)
 
     if not sent:
-        # Log error but don't expose to client
         logger.error(f"Failed to send OTP email to {email}")
 
     return {"ok": True, "message": "If an account exists, an OTP has been sent."}
@@ -1287,7 +1315,6 @@ async def request_reset_otp(req: RequestResetOtpRequest):
 async def reset_password_with_otp(req: ResetPasswordWithOtpRequest):
     email = req.email.lower().strip()
 
-    # Find the OTP record
     record = await db.password_reset_otps.find_one({"email": email})
     if not record:
         raise HTTPException(status_code=400, detail="No OTP request found for this email.")
@@ -1301,25 +1328,115 @@ async def reset_password_with_otp(req: ResetPasswordWithOtpRequest):
     if record["otp"] != req.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP.")
 
-    # Find the user
     user = await db.users.find_one({"email": email})
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    # Hash the new password and update
     new_hash = hash_pw(req.new_password)
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$set": {"password_hash": new_hash}}
     )
 
-    # Mark OTP as used
     await db.password_reset_otps.update_one(
         {"_id": record["_id"]},
         {"$set": {"used": True}}
     )
 
     return {"ok": True, "message": "Password reset successful."}
+
+
+# ============================================================
+# PIN Reset with OTP (Brevo) Routes
+# ============================================================
+
+@api_router.post("/auth/request-pin-reset-otp")
+async def request_pin_reset_otp(req: RequestPinResetOtpRequest):
+    email = req.email.lower().strip()
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        return {"ok": True, "message": "If an account exists, an OTP has been sent."}
+
+    otp = generate_otp()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    await db.pin_reset_otps.update_one(
+        {"email": email},
+        {"$set": {
+            "otp": otp,
+            "expires_at": expires_at,
+            "used": False,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+
+    subject = "PIN Reset OTP - GC Sharp"
+    html_content = f"""
+    <html>
+    <body>
+        <h2>PIN Reset Request</h2>
+        <p>Hi there,</p>
+        <p>You requested to reset your PIN for your GC Sharp account.</p>
+        <p>Your OTP is: <strong>{otp}</strong></p>
+        <p>This code will expire in 10 minutes.</p>
+        <p>If you did not request this, please ignore this email.</p>
+        <br>
+        <p>GC Sharp Team</p>
+    </body>
+    </html>
+    """
+    text_content = f"Your OTP is: {otp}. It expires in 10 minutes."
+
+    sent = await send_brevo_email(email, subject, html_content, text_content)
+
+    if not sent:
+        logger.error(f"Failed to send OTP email to {email}")
+
+    return {"ok": True, "message": "If an account exists, an OTP has been sent."}
+
+
+@api_router.post("/auth/reset-pin-with-otp")
+async def reset_pin_with_otp(req: ResetPinWithOtpRequest):
+    email = req.email.lower().strip()
+
+    record = await db.pin_reset_otps.find_one({"email": email})
+    if not record:
+        raise HTTPException(status_code=400, detail="No OTP request found for this email.")
+
+    if record.get("used", False):
+        raise HTTPException(status_code=400, detail="This OTP has already been used.")
+
+    if datetime.now(timezone.utc) > record["expires_at"]:
+        raise HTTPException(status_code=400, detail="OTP has expired. Request a new one.")
+
+    if record["otp"] != req.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP.")
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # Hash the new PIN and update
+    new_pin_hash = hash_pin(req.new_pin)
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {
+            "pin_hash": new_pin_hash,
+            "failed_pin_attempts": 0,
+            "pin_locked_until": None,
+            "pin_created_at": datetime.now(timezone.utc),
+        }}
+    )
+
+    # Mark OTP as used
+    await db.pin_reset_otps.update_one(
+        {"_id": record["_id"]},
+        {"$set": {"used": True}}
+    )
+
+    return {"ok": True, "message": "PIN reset successful."}
 
 
 # ============================================================
@@ -1463,7 +1580,7 @@ async def root():
         "status": "running",
         "database": "MongoDB",
         "endpoints": {
-            "auth": "/api/auth/register, /api/auth/login, /api/auth/session, /api/auth/me, /api/auth/register-with-pin, /api/auth/pin-login, /api/auth/biometric-login, /api/auth/setup-pin, /api/auth/setup-biometric, /api/auth/pin-status, /api/auth/reset-pin, /api/auth/request-reset-otp, /api/auth/reset-password-with-otp",
+            "auth": "/api/auth/register, /api/auth/login, /api/auth/session, /api/auth/me, /api/auth/register-with-pin, /api/auth/pin-login, /api/auth/biometric-login, /api/auth/setup-pin, /api/auth/setup-biometric, /api/auth/pin-status, /api/auth/reset-pin, /api/auth/request-reset-otp, /api/auth/reset-password-with-otp, /api/auth/request-pin-reset-otp, /api/auth/reset-pin-with-otp",
             "subjects": "/api/subjects",
             "papers": "/api/papers",
             "past-papers": "/api/past-papers",
