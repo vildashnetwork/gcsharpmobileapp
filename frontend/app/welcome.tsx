@@ -287,8 +287,6 @@
 
 
 
-
-
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -337,9 +335,12 @@ type OnboardingItem = {
   artwork: "students" | "papers" | "ai" | "explore";
 };
 
+// NOTE: previously this fallback ended in "...onrender.com/api)" — a
+// stray closing paren that made EVERY request (including PIN
+// registration/login) hit an invalid path and 404. Fixed below.
 const API_URL =
   process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, "") ??
-  "[localhost](http://localhost:8000/api)";
+  "https://gcsharpmobileapp.onrender.com/api";
 
 const FIRST_LAUNCH_KEY = "gcsharp_onboarding_completed";
 const SAVED_EMAIL_KEY = "gcsharp_saved_email";
