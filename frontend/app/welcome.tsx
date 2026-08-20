@@ -1072,7 +1072,6 @@
 
 
 
-
 import { useEffect, useMemo, useState, useRef } from "react";
 import {
   ActivityIndicator,
@@ -1112,7 +1111,7 @@ type Screen =
   | "authChoice"
   | "register"
   | "login"
-  | "resetPassword";
+  | "resetPin"; // changed from "resetPassword"
 
 type RegisterStep = "email" | "name" | "password" | "pin";
 
@@ -1126,7 +1125,7 @@ type OnboardingItem = {
 type ResetStep = "email" | "otp";
 
 const API_URL =
-  process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, "") ??
+  process.env.EXPO_PUBLIC_API_URL ??
   "https://gcsharpmobileapp.onrender.com/api";
 
 const FIRST_LAUNCH_KEY = "gcsharp_onboarding_completed";
@@ -1184,8 +1183,11 @@ async function readError(response: Response) {
   try {
     const body = await response.json();
     return body.detail || body.message || "Something went wrong";
-  } catch {
+
+  } catch (err) {
+    console.log(err?.toString() || "Error reading response body");
     return "Unable to connect to the server";
+
   }
 }
 
@@ -1459,13 +1461,12 @@ export default function Welcome() {
   const [loadProgress, setLoadProgress] = useState(0);
   const progressAnim = useRef(new Animated.Value(0)).current;
 
-  // ---------- Reset Password OTP state ----------
+  // ---------- Reset PIN OTP state ----------
   const [resetStep, setResetStep] = useState<ResetStep>("email");
   const [resetEmail, setResetEmail] = useState("");
   const [resetOtp, setResetOtp] = useState("");
-  const [resetNewPassword, setResetNewPassword] = useState("");
-  const [resetConfirmPassword, setResetConfirmPassword] = useState("");
-  const [resetShowPassword, setResetShowPassword] = useState(false);
+  const [resetNewPin, setResetNewPin] = useState("");
+  const [resetConfirmPin, setResetConfirmPin] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetSuccess, setResetSuccess] = useState(false);
@@ -1742,7 +1743,7 @@ export default function Welcome() {
     pin: 4,
   }[registerStep];
 
-  // ---------- Reset Password OTP Handlers ----------
+  // ---------- Reset PIN OTP Handlers ----------
   const requestOtp = async () => {
     setResetError(null);
     setResetSuccess(false);
@@ -1754,7 +1755,8 @@ export default function Welcome() {
 
     setResetBusy(true);
     try {
-      const response = await fetch(`${API_URL}/auth/request-reset-otp`, {
+      // Use PIN reset OTP endpoint
+      const response = await fetch(`${API_URL}/auth/request-pin-reset-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: resetEmail.trim().toLowerCase() }),
@@ -1784,7 +1786,7 @@ export default function Welcome() {
     }
   };
 
-  const resetPasswordWithOtp = async () => {
+  const resetPinWithOtp = async () => {
     setResetError(null);
     setResetSuccess(false);
 
@@ -1792,24 +1794,30 @@ export default function Welcome() {
       setResetError("Please enter the 6-digit OTP.");
       return;
     }
-    if (resetNewPassword.length < 8) {
-      setResetError("Password must be at least 8 characters.");
+    if (resetNewPin.length !== 6) {
+      setResetError("PIN must be exactly 6 digits.");
       return;
     }
-    if (resetNewPassword !== resetConfirmPassword) {
-      setResetError("Passwords do not match.");
+    if (resetNewPin !== resetConfirmPin) {
+      setResetError("PINs do not match.");
+      return;
+    }
+    // Weak PIN check
+    const weakPins = ["000000", "111111", "123456", "654321", "121212", "112233"];
+    if (weakPins.includes(resetNewPin)) {
+      setResetError("Choose a less predictable PIN.");
       return;
     }
 
     setResetBusy(true);
     try {
-      const response = await fetch(`${API_URL}/auth/reset-password-with-otp`, {
+      const response = await fetch(`${API_URL}/auth/reset-pin-with-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: resetEmail.trim().toLowerCase(),
           otp: resetOtp,
-          new_password: resetNewPassword,
+          new_pin: resetNewPin,
         }),
       });
       if (!response.ok) {
@@ -1821,15 +1829,15 @@ export default function Welcome() {
         // Clear reset fields
         setResetEmail("");
         setResetOtp("");
-        setResetNewPassword("");
-        setResetConfirmPassword("");
+        setResetNewPin("");
+        setResetConfirmPin("");
         setOtpSent(false);
         setResetStep("email");
         if (countdownInterval.current) clearInterval(countdownInterval.current);
         setCountdown(0);
       }, 3000);
     } catch (e: any) {
-      setResetError(e.message || "Failed to reset password.");
+      setResetError(e.message || "Failed to reset PIN.");
     } finally {
       setResetBusy(false);
     }
@@ -1839,8 +1847,8 @@ export default function Welcome() {
     if (countdownInterval.current) clearInterval(countdownInterval.current);
     setResetEmail("");
     setResetOtp("");
-    setResetNewPassword("");
-    setResetConfirmPassword("");
+    setResetNewPin("");
+    setResetConfirmPin("");
     setResetError(null);
     setResetSuccess(false);
     setOtpSent(false);
@@ -2013,31 +2021,32 @@ export default function Welcome() {
           <Pressable onPress={clearSavedAccount} style={styles.linkButton}>
             <Text style={styles.linkText}>Use another account</Text>
           </Pressable>
+          {/* Forgot PIN link */}
           <Pressable
             onPress={() => {
               setResetEmail("");
               setResetOtp("");
-              setResetNewPassword("");
-              setResetConfirmPassword("");
+              setResetNewPin("");
+              setResetConfirmPin("");
               setResetError(null);
               setResetSuccess(false);
               setOtpSent(false);
               setResetStep("email");
               setCountdown(0);
               if (countdownInterval.current) clearInterval(countdownInterval.current);
-              setScreen("resetPassword");
+              setScreen("resetPin");
             }}
-            style={styles.forgotPasswordLink}
+            style={styles.forgotPinLink}
           >
-            <Text style={styles.forgotPasswordText}>Forgot password?</Text>
+            <Text style={styles.forgotPinText}>Forgot PIN?</Text>
           </Pressable>
         </ScrollView>
       </View>
     );
   }
 
-  // ---------- Reset Password with OTP ----------
-  if (screen === "resetPassword") {
+  // ---------- Reset PIN with OTP ----------
+  if (screen === "resetPin") {
     return (
       <KeyboardAvoidingView
         style={styles.root}
@@ -2053,14 +2062,14 @@ export default function Welcome() {
             <Pressable onPress={goBackToLogin} hitSlop={12}>
               <Ionicons name="arrow-back" size={28} color={BLUE} />
             </Pressable>
-            <Text style={styles.resetTitle}>Reset Password</Text>
+            <Text style={styles.resetTitle}>Reset PIN</Text>
             <View style={{ width: 28 }} />
           </View>
 
           {resetStep === "email" && (
             <>
               <Text style={styles.resetDescription}>
-                Enter your email address and we will send you a 6‑digit OTP to reset your password.
+                Enter your email address and we will send you a 6‑digit OTP to reset your PIN.
               </Text>
               <Text style={styles.inputLabel}>Email address</Text>
               <TextInput
@@ -2091,7 +2100,7 @@ export default function Welcome() {
             <>
               <Text style={styles.resetDescription}>
                 A 6‑digit OTP has been sent to <Text style={{ fontWeight: "700" }}>{resetEmail}</Text>.
-                Enter the code and your new password below.
+                Enter the code and your new PIN below.
               </Text>
 
               <Text style={styles.inputLabel}>OTP Code</Text>
@@ -2105,49 +2114,38 @@ export default function Welcome() {
                 style={styles.input}
               />
 
-              <Text style={styles.inputLabel}>New Password</Text>
-              <View style={styles.passwordWrap}>
-                <TextInput
-                  value={resetNewPassword}
-                  onChangeText={setResetNewPassword}
-                  placeholder="At least 8 characters"
-                  placeholderTextColor="#94A3B8"
-                  secureTextEntry={!resetShowPassword}
-                  style={[styles.input, { paddingRight: 52 }]}
-                />
-                <Pressable onPress={() => setResetShowPassword((v) => !v)} style={styles.passwordEye}>
-                  <Ionicons name={resetShowPassword ? "eye-off-outline" : "eye-outline"} size={22} color={MUTED} />
-                </Pressable>
-              </View>
+              <Text style={styles.inputLabel}>New PIN</Text>
+              <PinInput
+                value={resetNewPin}
+                onChange={setResetNewPin}
+                disabled={resetBusy}
+              />
 
-              <Text style={styles.inputLabel}>Confirm Password</Text>
-              <TextInput
-                value={resetConfirmPassword}
-                onChangeText={setResetConfirmPassword}
-                placeholder="Confirm new password"
-                placeholderTextColor="#94A3B8"
-                secureTextEntry
-                style={styles.input}
+              <Text style={styles.inputLabel}>Confirm PIN</Text>
+              <PinInput
+                value={resetConfirmPin}
+                onChange={setResetConfirmPin}
+                disabled={resetBusy}
               />
 
               {resetError && <Text style={styles.error}>{resetError}</Text>}
               {resetSuccess && (
                 <View style={styles.successContainer}>
                   <Ionicons name="checkmark-circle" size={24} color="#22C55E" />
-                  <Text style={styles.successText}>Password reset successful! Redirecting...</Text>
+                  <Text style={styles.successText}>PIN reset successful! Redirecting...</Text>
                 </View>
               )}
 
               <View style={{ gap: 12 }}>
                 <Pressable
-                  onPress={resetPasswordWithOtp}
+                  onPress={resetPinWithOtp}
                   disabled={resetBusy || resetSuccess}
                   style={[styles.primaryButton, (resetBusy || resetSuccess) && styles.disabledButton]}
                 >
                   {resetBusy ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
-                    <Text style={styles.primaryButtonText}>Reset Password</Text>
+                    <Text style={styles.primaryButtonText}>Reset PIN</Text>
                   )}
                 </Pressable>
 
@@ -2467,10 +2465,10 @@ const styles = StyleSheet.create({
   biometricText: { color: BLUE, fontSize: 15, fontWeight: "700" },
   linkButton: { marginTop: 12, padding: 12 },
   linkText: { color: BLUE, fontWeight: "700" },
-  forgotPasswordLink: { marginTop: 8, padding: 8 },
-  forgotPasswordText: { color: MUTED, fontSize: 14, textDecorationLine: "underline" },
+  forgotPinLink: { marginTop: 8, padding: 8 },
+  forgotPinText: { color: MUTED, fontSize: 14, textDecorationLine: "underline" },
 
-  // Reset Password with OTP
+  // Reset PIN with OTP
   resetHeader: {
     flexDirection: "row",
     alignItems: "center",
