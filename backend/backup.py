@@ -310,12 +310,12 @@ def new_biometric_token() -> str:
 
 async def create_user_session(user_id: str) -> str:
     session_token = f"tok_{uuid.uuid4().hex}"
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    expires_at = datetime.utcnow() + timedelta(days=7)
     await db.user_sessions.insert_one({
         "user_id": user_id,
         "session_token": session_token,
         "expires_at": expires_at.isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
     })
     return session_token
 
@@ -332,7 +332,8 @@ def pin_lock_remaining(user: dict) -> int:
         return 0
     if isinstance(locked_until, str):
         locked_until = datetime.fromisoformat(locked_until)
-    remaining = (locked_until - datetime.now(timezone.utc)).total_seconds()
+    # locked_until is naive; use datetime.utcnow()
+    remaining = (locked_until - datetime.utcnow()).total_seconds()
     return max(0, int(remaining))
 
 def public_user(user: dict) -> dict:
@@ -609,8 +610,8 @@ def check_pw(pw: str, hashed: str) -> bool:
 def make_jwt(user_id: str) -> str:
     payload = {
         "sub": user_id,
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(days=7),
     }
     return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
@@ -641,9 +642,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
                         exp = datetime.fromisoformat(exp)
                     except:
                         pass
-                if hasattr(exp, 'tzinfo') and exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
-                if hasattr(exp, 'tzinfo') and exp > datetime.now(timezone.utc):
+                # exp is naive; compare with naive UTC
+                if exp and exp > datetime.utcnow():
                     user_id = session["user_id"]
                 else:
                     raise HTTPException(status_code=401, detail="Session expired")
@@ -761,7 +761,7 @@ async def register_user(req: RegisterRequest):
         "level": 1,
         "streak": 0,
         "profile_photo": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
     }
     await db.users.insert_one(user)
     token = make_jwt(user_id)
@@ -776,12 +776,12 @@ async def login_user(req: LoginRequest, response: Response):
         raise HTTPException(401, "Invalid credentials")
     
     session_token = f"tok_{uuid.uuid4().hex}"
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    expires_at = datetime.utcnow() + timedelta(days=7)
     await db.user_sessions.insert_one({
         "user_id": user["user_id"],
         "session_token": session_token,
         "expires_at": expires_at.isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
     })
     
     response.set_cookie(
@@ -863,16 +863,16 @@ async def process_session(request: Request, response: Response):
             "xp": 0,
             "level": 1,
             "streak": 0,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
         }
         await db.users.insert_one(dict(user))
     
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    expires_at = datetime.utcnow() + timedelta(days=7)
     await db.user_sessions.insert_one({
         "session_token": session_token,
         "user_id": user_id,
         "expires_at": expires_at.isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
     })
 
     response.set_cookie(
@@ -970,8 +970,8 @@ async def register_with_pin(
         "profile_photo": None,
         "failed_pin_attempts": 0,
         "pin_locked_until": None,
-        "pin_created_at": datetime.now(timezone.utc),
-        "created_at": datetime.now(timezone.utc),
+        "pin_created_at": datetime.utcnow(),
+        "created_at": datetime.utcnow(),
     }
 
     try:
@@ -1035,7 +1035,7 @@ async def pin_login(
         if attempts >= 5:
             updates["failed_pin_attempts"] = 0
             updates["pin_locked_until"] = (
-                datetime.now(timezone.utc) + timedelta(minutes=15)
+                datetime.utcnow() + timedelta(minutes=15)
             )
 
         await db.users.update_one(
@@ -1048,7 +1048,7 @@ async def pin_login(
             "success": False,
             "ip": request.client.host if request.client else None,
             "user_agent": request.headers.get("user-agent"),
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.utcnow(),
         })
 
         raise HTTPException(
@@ -1072,7 +1072,7 @@ async def pin_login(
         "success": True,
         "ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.utcnow(),
     })
 
     session_token = await create_user_session(user["user_id"])
@@ -1125,7 +1125,7 @@ async def biometric_login(
         "method": "biometric",
         "ip": request.client.host if request.client else None,
         "user_agent": request.headers.get("user-agent"),
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.utcnow(),
     })
 
     session_token = await create_user_session(user["user_id"])
@@ -1170,7 +1170,7 @@ async def setup_pin(
         {"user_id": user["user_id"]},
         {"$set": {
             "pin_hash": hash_pin(req.pin),
-            "pin_created_at": datetime.now(timezone.utc),
+            "pin_created_at": datetime.utcnow(),
             "failed_pin_attempts": 0,
             "pin_locked_until": None,
         }}
@@ -1251,7 +1251,7 @@ async def reset_pin(
         {"user_id": user["user_id"]},
         {"$set": {
             "pin_hash": hash_pin(req.pin),
-            "pin_created_at": datetime.now(timezone.utc),
+            "pin_created_at": datetime.utcnow(),
             "failed_pin_attempts": 0,
             "pin_locked_until": None,
         }}
@@ -1273,7 +1273,7 @@ async def request_reset_otp(req: RequestResetOtpRequest):
         return {"ok": True, "message": "If an account exists, an OTP has been sent."}
 
     otp = generate_otp()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
 
     await db.password_reset_otps.update_one(
         {"email": email},
@@ -1281,7 +1281,7 @@ async def request_reset_otp(req: RequestResetOtpRequest):
             "otp": otp,
             "expires_at": expires_at,
             "used": False,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.utcnow(),
         }},
         upsert=True,
     )
@@ -1344,6 +1344,7 @@ async def reset_password_with_otp(req: ResetPasswordWithOtpRequest):
     )
 
     return {"ok": True, "message": "Password reset successful."}
+
 # ============================================================
 # PIN Reset with OTP (Brevo) Routes
 # ============================================================
@@ -1357,7 +1358,7 @@ async def request_pin_reset_otp(req: RequestPinResetOtpRequest):
         return {"ok": True, "message": "If an account exists, an OTP has been sent."}
 
     otp = generate_otp()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
 
     await db.pin_reset_otps.update_one(
         {"email": email},
@@ -1365,7 +1366,7 @@ async def request_pin_reset_otp(req: RequestPinResetOtpRequest):
             "otp": otp,
             "expires_at": expires_at,
             "used": False,
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.utcnow(),
         }},
         upsert=True,
     )
@@ -1406,7 +1407,7 @@ async def reset_pin_with_otp(req: ResetPinWithOtpRequest):
     if record.get("used", False):
         raise HTTPException(status_code=400, detail="This OTP has already been used.")
 
-    if datetime.now(timezone.utc) > record["expires_at"]:
+    if datetime.utcnow() > record["expires_at"]:
         raise HTTPException(status_code=400, detail="OTP has expired. Request a new one.")
 
     if record["otp"] != req.otp:
@@ -1424,7 +1425,7 @@ async def reset_pin_with_otp(req: ResetPinWithOtpRequest):
             "pin_hash": new_pin_hash,
             "failed_pin_attempts": 0,
             "pin_locked_until": None,
-            "pin_created_at": datetime.now(timezone.utc),
+            "pin_created_at": datetime.utcnow(),
         }}
     )
 
@@ -1631,7 +1632,7 @@ async def seed_all_data():
             "xp": 320,
             "level": 4,
             "streak": 5,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
         })
     
     if not await db.users.find_one({"email": "teacher@gcsmart.cm"}):
@@ -1646,7 +1647,7 @@ async def seed_all_data():
             "xp": 0,
             "level": 1,
             "streak": 0,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
         })
     
     pmath = await db.subjects.find_one({"code": "PMATH-A"})
@@ -1666,7 +1667,7 @@ async def seed_all_data():
                 "paper_number": 1,
                 "pdf_url": STAT1,
                 "description": "Official 2025 A-Level multiple choice paper.",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.utcnow().isoformat(),
             },
             {
                 "paper_id": f"pap_{uuid.uuid4().hex[:12]}",
@@ -1678,7 +1679,7 @@ async def seed_all_data():
                 "paper_number": 2,
                 "pdf_url": STAT2,
                 "description": "Official 2025 A-Level structured/theory paper.",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.utcnow().isoformat(),
             },
             {
                 "paper_id": f"pap_{uuid.uuid4().hex[:12]}",
@@ -1690,7 +1691,7 @@ async def seed_all_data():
                 "paper_number": 2,
                 "pdf_url": MECH2,
                 "description": "Official 2025 A-Level mechanics paper.",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.utcnow().isoformat(),
             },
         ])
         
@@ -1771,7 +1772,7 @@ async def seed_all_data():
             "duration": "05:12",
             "views": 843,
             "rating": 4.8,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
         }
     ])
     
