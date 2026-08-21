@@ -1878,7 +1878,7 @@ async def analytics_student(user: dict = Depends(get_current_user)):
 EXAM_STRUCTURE = {
     "GCE O Level": ["Mathematics", "English Language", "French", "Physics", "Chemistry",
                     "Biology", "History", "Geography", "Economics", "Literature", "Additional Mathematics"],
-    "GCE A Level": ["Pure Mathematics", "Further Mathematics", "Physics", "Chemistry", "Biology",
+    "GCE A Level": ["Pure Mathematics with stat", "Pure Mathematics with mech", "Further Mathematics", "Physics", "Chemistry", "Biology",
                     "Economics", "Accounting", "Business Studies", "French", "English Literature"],
     "HND": ["Computer Science", "Business Management", "Accounting", "Marketing", "Law", "Engineering"],
     "Concours": ["General Knowledge", "Mathematics", "French", "English", "Sciences"],
