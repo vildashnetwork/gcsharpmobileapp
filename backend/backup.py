@@ -7,22 +7,46 @@ import uuid
 import logging
 import secrets
 import random
+import hashlib
+import asyncio
+import requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 from contextlib import asynccontextmanager
 
 from pydantic import field_validator
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response
+from fastapi import (
+    FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response,
+    WebSocket, WebSocketDisconnect,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response as FastResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr, Field
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 import bcrypt
 import jwt as pyjwt
 import httpx
+
+# Optional integrations (SMS OTP + scheduled jobs). Guarded so the app still
+# boots if these packages aren't installed yet — install with:
+#   pip install twilio apscheduler
+try:
+    from twilio.rest import Client as TwilioClient
+    from twilio.base.exceptions import TwilioRestException
+except Exception:
+    TwilioClient = None
+    TwilioRestException = Exception
+
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+except Exception:
+    AsyncIOScheduler = None
+    IntervalTrigger = None
 
 # ============================================================
 #MOBILE 
@@ -47,12 +71,57 @@ BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
 BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "noreply@gcsmart.cm")
 BREVO_SENDER_NAME = os.environ.get("BREVO_SENDER_NAME", "GC Smart")
 
+# Twilio (SMS OTP) - optional; phone login is disabled automatically if unset
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
+TWILIO_MESSAGING_SERVICE_SID = os.environ.get("TWILIO_MESSAGING_SERVICE_SID")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
+
+twilio_client = None
+if TwilioClient and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+    try:
+        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        print("Twilio client initialized successfully")
+    except Exception as e:
+        print(f"Failed to initialize Twilio client: {e}")
+else:
+    print("Twilio credentials not configured - phone OTP login disabled")
+
 # Initialize MongoDB
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
 print(f"Connected to MongoDB: {MONGO_URL[:40]}...")
 print(f"Database: {DB_NAME}")
+
+# Scheduler for background jobs (daily streak reminder email/notification)
+scheduler = AsyncIOScheduler() if AsyncIOScheduler else None
+
+# ============================================================
+# WebSocket Connection Manager for real-time notifications
+# ============================================================
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def connect(self, user_id: str, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+
+    def disconnect(self, user_id: str):
+        self.active_connections.pop(user_id, None)
+
+    async def send_personal_message(self, message: dict, user_id: str):
+        websocket = self.active_connections.get(user_id)
+        if websocket:
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                self.disconnect(user_id)
+
+manager = ConnectionManager()
 
 # ============================================================
 # Lifespan Events
@@ -102,6 +171,18 @@ async def lifespan(app: FastAPI):
         # PIN reset OTP index
         await db.pin_reset_otps.create_index("email", 1)
         await db.pin_reset_otps.create_index("expires_at", expireAfterSeconds=0)
+
+        # Phone OTP index
+        await db.phone_otps.create_index("expires_at", expireAfterSeconds=0)
+
+        # Notifications / streak / reading-time / video-interaction indexes
+        await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+        await db.paper_reading_time.create_index([("user_id", 1), ("paper_id", 1)], unique=True)
+        await db.watch_history.create_index([("user_id", 1), ("course_id", 1)], unique=True)
+        await db.video_likes.create_index([("user_id", 1), ("course_id", 1)], unique=True)
+        await db.video_saves.create_index([("user_id", 1), ("course_id", 1)], unique=True)
+        await db.reminder_log.create_index([("user_id", 1), ("date", 1)])
+        await db.ai_sessions.create_index([("user_id", 1), ("updated_at", -1)])
         
         print("Indexes created successfully")
     except Exception as e:
@@ -111,9 +192,24 @@ async def lifespan(app: FastAPI):
         await seed_all_data()
     except Exception as e:
         print(f"Seed data warning: {e}")
+
+    if AsyncIOScheduler and IntervalTrigger:
+        try:
+            scheduler.add_job(daily_reminder_job, IntervalTrigger(hours=1), id="daily_reminder", replace_existing=True)
+            scheduler.start()
+            print("Scheduler started for daily reminders")
+        except Exception as e:
+            print(f"Scheduler warning: {e}")
+    else:
+        print("APScheduler not installed - daily reminder job disabled (pip install apscheduler)")
     
     yield
-    
+
+    if AsyncIOScheduler and IntervalTrigger:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
     client.close()
     print("Server shutting down")
 
@@ -285,6 +381,40 @@ def generate_otp() -> str:
     return f"{random.randint(100000, 999999)}"
 
 # ============================================================
+# Twilio SMS Helper (for phone OTP login)
+# ============================================================
+
+def send_sms_via_twilio(to_number: str, message: str) -> dict:
+    """Send SMS using Twilio. Returns {'success': bool, 'sid'?: str, 'error'?: str}."""
+    if not twilio_client:
+        return {"success": False, "error": "Twilio client not initialized. Check your credentials."}
+
+    if not TWILIO_PHONE_NUMBER and not TWILIO_MESSAGING_SERVICE_SID:
+        return {"success": False, "error": "No sending phone number or messaging service configured."}
+
+    try:
+        if not to_number.startswith("+"):
+            to_number = "+" + to_number
+
+        logger.info(f"Sending SMS to: {to_number}")
+
+        if TWILIO_MESSAGING_SERVICE_SID:
+            msg = twilio_client.messages.create(
+                body=message, messaging_service_sid=TWILIO_MESSAGING_SERVICE_SID, to=to_number
+            )
+        else:
+            msg = twilio_client.messages.create(body=message, from_=TWILIO_PHONE_NUMBER, to=to_number)
+
+        logger.info(f"SMS sent successfully. SID: {msg.sid}")
+        return {"success": True, "sid": msg.sid, "status": msg.status}
+    except TwilioRestException as e:
+        logger.error(f"Twilio error: {e}")
+        return {"success": False, "error": f"Twilio error: {getattr(e, 'msg', str(e))}"}
+    except Exception as e:
+        logger.error(f"Failed to send SMS: {e}")
+        return {"success": False, "error": str(e)}
+
+# ============================================================
 # PIN Auth Helper Functions
 # ============================================================
 
@@ -358,6 +488,9 @@ def public_user(user: dict) -> dict:
     safe.setdefault("proficiency", "")
     safe.setdefault("learning_style", "")
     safe.setdefault("specialization", "")
+    safe.setdefault("accuracy", 0.0)
+    safe.setdefault("settings", DEFAULT_SETTINGS)
+    safe.setdefault("last_goal_met_date", None)
     return safe
 
 # ============================================================
@@ -594,6 +727,55 @@ class LessonIn(BaseModel):
     duration: Optional[str] = None
 
 # ============================================================
+# Pydantic Models - Phone OTP Auth (Twilio)
+# ============================================================
+
+class PhoneLoginRequest(BaseModel):
+    phone: str
+    country_code: str = "+237"
+
+class PhoneVerifyRequest(BaseModel):
+    phone: str
+    country_code: str = "+237"
+    otp: str
+
+# ============================================================
+# Pydantic Models - Settings
+# ============================================================
+
+DEFAULT_SETTINGS = {
+    "autoplay_next": True,
+    "default_playback_speed": 1.0,
+    "default_video_quality": "auto",
+    "captions_enabled": False,
+    "notifications_enabled": True,
+    "email_notifications": True,
+    "theme": "system",
+    "language": "en",
+}
+
+class SettingsUpdate(BaseModel):
+    autoplay_next: Optional[bool] = None
+    default_playback_speed: Optional[float] = None
+    default_video_quality: Optional[str] = None
+    captions_enabled: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
+    email_notifications: Optional[bool] = None
+    theme: Optional[str] = None
+    language: Optional[str] = None
+
+# ============================================================
+# Pydantic Models - Reading Time / Highlight Video
+# ============================================================
+
+class ReadingTimeRequest(BaseModel):
+    seconds: int  # delta seconds since last heartbeat
+
+class HighlightVideoRequest(BaseModel):
+    text: str
+    context: Optional[str] = None
+
+# ============================================================
 # Auth Helpers
 # ============================================================
 
@@ -677,6 +859,9 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user.setdefault("proficiency", "")
     user.setdefault("learning_style", "")
     user.setdefault("specialization", "")
+    user.setdefault("accuracy", 0.0)
+    user.setdefault("settings", DEFAULT_SETTINGS)
+    user.setdefault("last_goal_met_date", None)
     
     return user
 
@@ -906,6 +1091,28 @@ async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_curren
     fresh.pop("_id", None)
     fresh.pop("password_hash", None)
     return fresh
+
+# ============================================================
+# User Settings
+# ============================================================
+
+@api_router.get("/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    stored = user.get("settings") or {}
+    return {**DEFAULT_SETTINGS, **stored}
+
+@api_router.put("/settings")
+async def update_settings(payload: SettingsUpdate, user: dict = Depends(get_current_user)):
+    updates = {k: v for k, v in payload.model_dump().items() if v is not None}
+    current = user.get("settings") or {}
+    merged = {**DEFAULT_SETTINGS, **current, **updates}
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"settings": merged}})
+    return merged
+
+@api_router.post("/settings/reset")
+async def reset_settings(user: dict = Depends(get_current_user)):
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"settings": DEFAULT_SETTINGS}})
+    return dict(DEFAULT_SETTINGS)
 
 # ============================================================
 # PIN Authentication Routes
@@ -1259,6 +1466,174 @@ async def reset_pin(
 
 
 # ============================================================
+# Phone Authentication (Twilio SMS OTP)
+# ============================================================
+
+@api_router.post("/auth/phone/send-otp")
+async def send_phone_otp(req: PhoneLoginRequest):
+    """Send a 6-digit OTP to a phone number via Twilio SMS."""
+    try:
+        otp_code = generate_otp()
+        expires_at = datetime.utcnow() + timedelta(minutes=5)
+        await db.phone_otps.insert_one({
+            "phone": req.phone,
+            "country_code": req.country_code,
+            "otp": otp_code,
+            "expires_at": expires_at.isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
+            "verified": False,
+        })
+
+        full_number = f"{req.country_code}{req.phone}"
+        sms_message = f"Your GCSMART verification code is: {otp_code}. Valid for 5 minutes."
+        result = send_sms_via_twilio(full_number, sms_message)
+
+        if result["success"]:
+            logger.info(f"OTP sent to {full_number} via SMS. SID: {result.get('sid')}")
+            return {"success": True, "message": "Verification code sent via SMS", "expires_in": 300}
+
+        logger.error(f"SMS failed for {full_number}: {result.get('error')}")
+        if ENVIRONMENT == "development":
+            logger.info(f"Development mode: OTP for {full_number} is {otp_code}")
+            return {
+                "success": True,
+                "message": "OTP generated (development mode - SMS not sent)",
+                "otp": otp_code,
+                "expires_in": 300,
+                "warning": "SMS not sent - " + result.get("error", "Unknown error"),
+            }
+        return {"success": False, "message": "Failed to send verification code. Please try again.",
+                "error": "SMS delivery failed"}
+    except Exception as e:
+        logger.error(f"Send phone OTP error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send verification code")
+
+
+@api_router.post("/auth/phone/verify")
+async def verify_phone_otp(req: PhoneVerifyRequest, response: Response):
+    """Verify a phone OTP and log in / register the user."""
+    try:
+        otp_record = await db.phone_otps.find_one({
+            "phone": req.phone, "country_code": req.country_code,
+            "otp": req.otp, "verified": False,
+        })
+        if not otp_record:
+            raise HTTPException(status_code=401, detail="Invalid verification code")
+
+        expires_at = otp_record["expires_at"]
+        if isinstance(expires_at, str):
+            expires_at = datetime.fromisoformat(expires_at)
+        if expires_at < datetime.utcnow():
+            raise HTTPException(status_code=401, detail="Verification code expired")
+
+        await db.phone_otps.update_one({"_id": otp_record["_id"]}, {"$set": {"verified": True}})
+
+        phone_full = f"{req.country_code}{req.phone}"
+        user = await db.users.find_one({"phone": phone_full})
+
+        if not user:
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            user = {
+                "user_id": user_id,
+                "phone": phone_full,
+                "email": f"user_{uuid.uuid4().hex[:8]}@gcsmart.temp",
+                "full_name": f"User {phone_full[-4:]}",
+                "role": "student",
+                "onboarded": False,
+                "bio": "", "institution": "", "exam_level": "", "study_year": None,
+                "subjects": [], "goals": [], "daily_commitment": "", "proficiency": "",
+                "learning_style": "", "specialization": "",
+                "xp": 0, "level": 1, "streak": 0, "profile_photo": None,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            await db.users.insert_one(dict(user))
+
+        session_token = await create_user_session(user["user_id"])
+
+        response.set_cookie(
+            key="session_token", value=session_token,
+            httponly=True, secure=True, samesite="none", path="/",
+            max_age=7 * 24 * 60 * 60,
+        )
+
+        user.pop("_id", None)
+        user.pop("password_hash", None)
+        return {"success": True, "token": session_token, "user": public_user(user)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Verify phone OTP error: {e}")
+        raise HTTPException(status_code=500, detail="Verification failed")
+
+
+@api_router.post("/auth/exchange-session")
+async def exchange_session(request: Request, response: Response):
+    """Alternate OAuth session exchange endpoint (mirrors /auth/session, JSON body form)."""
+    try:
+        body = await request.json()
+        session_id = body.get("sessionId") or body.get("session_id")
+        if not session_id:
+            raise HTTPException(status_code=400, detail="Missing session_id")
+
+        async with httpx.AsyncClient(timeout=15) as hc:
+            r = await hc.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": session_id},
+            )
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Authentication failed")
+
+        data = r.json()
+        email = data.get("email", "").lower()
+        if not email:
+            raise HTTPException(status_code=400, detail="No email in session data")
+
+        existing = await db.users.find_one({"email": email})
+        if existing:
+            user = existing
+            user_id = user["user_id"]
+        else:
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            user = {
+                "user_id": user_id,
+                "email": email,
+                "full_name": data.get("name", ""),
+                "profile_photo": data.get("picture"),
+                "password_hash": "",
+                "role": "student",
+                "onboarded": False,
+                "bio": "", "institution": "", "exam_level": "", "study_year": None,
+                "subjects": [], "goals": [], "daily_commitment": "", "proficiency": "",
+                "learning_style": "", "specialization": "",
+                "xp": 0, "level": 1, "streak": 0,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            await db.users.insert_one(dict(user))
+
+        session_token = data.get("session_token") or f"tok_{uuid.uuid4().hex}"
+        expires_at = datetime.utcnow() + timedelta(days=7)
+        await db.user_sessions.insert_one({
+            "session_token": session_token, "user_id": user_id,
+            "expires_at": expires_at.isoformat(), "created_at": datetime.utcnow().isoformat(),
+        })
+
+        response.set_cookie(
+            key="session_token", value=session_token,
+            httponly=True, secure=True, samesite="none", path="/",
+            max_age=7 * 24 * 60 * 60,
+        )
+
+        user.pop("_id", None)
+        user.pop("password_hash", None)
+        return {"session_token": session_token, "user": user}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Exchange session error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
 # Password Reset with OTP (Brevo) Routes
 # ============================================================
 
@@ -1503,7 +1878,7 @@ async def analytics_student(user: dict = Depends(get_current_user)):
 EXAM_STRUCTURE = {
     "GCE O Level": ["Mathematics", "English Language", "French", "Physics", "Chemistry",
                     "Biology", "History", "Geography", "Economics", "Literature", "Additional Mathematics"],
-    "GCE A Level": ["Pure Mathematics", "Further Mathematics", "Physics", "Chemistry", "Biology",
+    "GCE A Level": ["Pure Mathematics with stat", "Pure Mathematics with mech", "Further Mathematics", "Physics", "Chemistry", "Biology",
                     "Economics", "Accounting", "Business Studies", "French", "English Literature"],
     "HND": ["Computer Science", "Business Management", "Accounting", "Marketing", "Law", "Engineering"],
     "Concours": ["General Knowledge", "Mathematics", "French", "English", "Sciences"],
@@ -1745,7 +2120,14 @@ async def submit_attempt(req: SubmitAttemptRequest, user: dict = Depends(get_cur
     await db.users.update_one({"user_id": user["user_id"]},
                               {"$set": {"xp": new_xp, "level": new_level}})
     attempt.pop("_id", None)
-    return {"attempt": attempt, "xp_gain": xp_gain, "new_xp": new_xp, "new_level": new_level}
+
+    # Keep the profile's overall accuracy in sync with every new attempt.
+    overall_accuracy = await recompute_user_accuracy(user["user_id"])
+
+    return {
+        "attempt": attempt, "xp_gain": xp_gain, "new_xp": new_xp,
+        "new_level": new_level, "accuracy": overall_accuracy,
+    }
 
 @api_router.get("/attempts")
 async def list_attempts(user: dict = Depends(get_current_user)):
@@ -1918,11 +2300,9 @@ async def ai_history(session_id: str, user: dict = Depends(get_current_user)):
 
 @api_router.post("/ai/solution")
 async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-    except Exception as e:
-        raise HTTPException(500, f"AI unavailable: {e}")
-
+    """
+    Generate a step‑by‑step solution with narration using OpenRouter.
+    """
     system = (
         "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
         "- title: short problem title (max 8 words)\n"
@@ -1936,16 +2316,14 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
         "reads them well.\n"
         "Return ONLY valid JSON, no markdown, no code fences."
     )
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"sol_{uuid.uuid4().hex[:8]}",
-        system_message=system,
-    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+    chat = _new_chat(f"sol_{uuid.uuid4().hex[:8]}", system)
     try:
-        reply = await chat.send_message(UserMessage(text=inp.question))
+        reply = await chat.send_message(inp.question)
     except Exception as e:
+        logger.exception("AI solution generation error")
         raise HTTPException(500, f"AI error: {e}")
 
+    # Strip any markdown code fences
     reply_clean = reply.strip()
     if reply_clean.startswith("```"):
         reply_clean = reply_clean.strip("`")
@@ -1953,10 +2331,21 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
             reply_clean = reply_clean[4:].strip()
     try:
         data = json.loads(reply_clean)
+        # Ensure required keys exist
+        if "title" not in data:
+            data["title"] = "Solution"
+        if "steps" not in data or not data["steps"]:
+            data["steps"] = [{"heading": "Solution", "body": reply}]
+        if "narration" not in data:
+            data["narration"] = reply
+        return data
     except Exception:
-        data = {"title": "Solution", "steps": [{"heading": "Solution", "body": reply}], "narration": reply}
-    return data
-
+        # Fallback structure if parsing fails
+        return {
+            "title": "Solution",
+            "steps": [{"heading": "Solution", "body": reply}],
+            "narration": reply,
+        }
 
 # ============================================================
 # AI Tutor (Streaming with OpenRouter)
@@ -1973,6 +2362,39 @@ async def ai_session_detail(session_id: str, user: dict = Depends(get_current_us
     if not s:
         raise HTTPException(404, "Not found")
     return s
+
+@api_router.put("/ai/sessions/{session_id}/title")
+async def update_session_title(session_id: str, request: Request, user: dict = Depends(get_current_user)):
+    body = await request.json()
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "Title cannot be empty")
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"title": title, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True, "title": title}
+
+@api_router.delete("/ai/sessions/{session_id}")
+async def delete_ai_session(session_id: str, user: dict = Depends(get_current_user)):
+    result = await db.ai_sessions.delete_one({"session_id": session_id, "user_id": user["user_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+@api_router.put("/ai/sessions/{session_id}/pin")
+async def toggle_pin_ai_session(session_id: str, request: Request, user: dict = Depends(get_current_user)):
+    body = await request.json()
+    pinned = bool(body.get("pinned", False))
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"pinned": pinned, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True, "pinned": pinned}
 
 @api_router.post("/ai/chat")
 async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
@@ -2210,6 +2632,173 @@ async def teacher_stats(user: dict = Depends(get_current_user)):
 
 
 # ============================================================
+# Video Interactions: Likes, Saves, Recently Watched
+# ============================================================
+
+# ---------- Likes ----------
+
+@api_router.post("/courses/{course_id}/like")
+async def toggle_like_video(course_id: str, user: dict = Depends(get_current_user)):
+    course = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    if not course:
+        raise HTTPException(404, "Video not found")
+
+    existing = await db.video_likes.find_one({"course_id": course_id, "user_id": user["user_id"]})
+    if existing:
+        await db.video_likes.delete_one({"_id": existing["_id"]})
+        await db.courses.update_one({"course_id": course_id}, {"$inc": {"likes": -1}})
+        liked = False
+    else:
+        await db.video_likes.insert_one({
+            "like_id": f"lk_{uuid.uuid4().hex[:12]}",
+            "course_id": course_id,
+            "user_id": user["user_id"],
+            "created_at": datetime.utcnow().isoformat(),
+        })
+        await db.courses.update_one({"course_id": course_id}, {"$inc": {"likes": 1}})
+        liked = True
+
+    fresh = await db.courses.find_one({"course_id": course_id}, {"_id": 0, "likes": 1})
+    return {"liked": liked, "likes": max(0, (fresh or {}).get("likes", 0))}
+
+@api_router.get("/videos/liked")
+async def list_liked_videos(user: dict = Depends(get_current_user)):
+    likes = await db.video_likes.find(
+        {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1, "created_at": 1}
+    ).sort("created_at", -1).to_list(500)
+    if not likes:
+        return []
+    ids = [l["course_id"] for l in likes]
+    courses = await db.courses.find({"course_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+    cmap = {c["course_id"]: c for c in courses}
+    result = []
+    for l in likes:
+        c = cmap.get(l["course_id"])
+        if c:
+            c = dict(c)
+            c["liked"] = True
+            c["liked_at"] = l["created_at"]
+            result.append(c)
+    return result
+
+# ---------- Saved videos ----------
+
+@api_router.post("/courses/{course_id}/save")
+async def toggle_save_video(course_id: str, user: dict = Depends(get_current_user)):
+    course = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    if not course:
+        raise HTTPException(404, "Video not found")
+
+    existing = await db.video_saves.find_one({"course_id": course_id, "user_id": user["user_id"]})
+    if existing:
+        await db.video_saves.delete_one({"_id": existing["_id"]})
+        return {"saved": False}
+
+    await db.video_saves.insert_one({
+        "save_id": f"sv_{uuid.uuid4().hex[:12]}",
+        "course_id": course_id,
+        "user_id": user["user_id"],
+        "created_at": datetime.utcnow().isoformat(),
+    })
+    return {"saved": True}
+
+@api_router.get("/videos/saved")
+async def list_saved_videos(user: dict = Depends(get_current_user)):
+    saves = await db.video_saves.find(
+        {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1, "created_at": 1}
+    ).sort("created_at", -1).to_list(500)
+    if not saves:
+        return []
+    ids = [s["course_id"] for s in saves]
+    courses = await db.courses.find({"course_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+    cmap = {c["course_id"]: c for c in courses}
+    result = []
+    for s in saves:
+        c = cmap.get(s["course_id"])
+        if c:
+            c = dict(c)
+            c["saved"] = True
+            c["saved_at"] = s["created_at"]
+            result.append(c)
+    return result
+
+# ---------- Recently watched ----------
+
+@api_router.post("/courses/{course_id}/watch")
+async def record_watch(course_id: str, user: dict = Depends(get_current_user)):
+    course = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    if not course:
+        raise HTTPException(404, "Video not found")
+
+    now_iso = datetime.utcnow().isoformat()
+    await db.watch_history.update_one(
+        {"course_id": course_id, "user_id": user["user_id"]},
+        {
+            "$set": {"watched_at": now_iso},
+            "$setOnInsert": {
+                "history_id": f"wh_{uuid.uuid4().hex[:12]}",
+                "course_id": course_id,
+                "user_id": user["user_id"],
+            },
+        },
+        upsert=True,
+    )
+    return {"ok": True}
+
+@api_router.get("/videos/recently-watched")
+async def list_recently_watched(limit: int = 20, user: dict = Depends(get_current_user)):
+    capped_limit = max(1, min(limit, 100))
+    history = await db.watch_history.find(
+        {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1, "watched_at": 1}
+    ).sort("watched_at", -1).to_list(capped_limit)
+    if not history:
+        return []
+    ids = [h["course_id"] for h in history]
+    courses = await db.courses.find({"course_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+    cmap = {c["course_id"]: c for c in courses}
+    result = []
+    for h in history:
+        c = cmap.get(h["course_id"])
+        if c:
+            c = dict(c)
+            c["watched_at"] = h["watched_at"]
+            result.append(c)
+    return result
+
+@api_router.delete("/videos/recently-watched")
+async def clear_recently_watched(user: dict = Depends(get_current_user)):
+    await db.watch_history.delete_many({"user_id": user["user_id"]})
+    return {"ok": True}
+
+@api_router.delete("/videos/recently-watched/{course_id}")
+async def remove_recently_watched(course_id: str, user: dict = Depends(get_current_user)):
+    await db.watch_history.delete_one({"course_id": course_id, "user_id": user["user_id"]})
+    return {"ok": True}
+
+
+# ============================================================
+# PDF Upload (extract text from an uploaded PDF, e.g. homework scan)
+# ============================================================
+
+@api_router.post("/upload/pdf")
+async def upload_pdf(request: Request, user: dict = Depends(get_current_user)):
+    try:
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            raise HTTPException(400, "No file uploaded")
+
+        content = await file.read()
+        text = extract_pdf_text(content, max_chars=5000)
+        return {"text": text, "filename": file.filename}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PDF upload error: {e}")
+        raise HTTPException(500, str(e))
+
+
+# ============================================================
 # Drafts
 # ============================================================
 
@@ -2323,6 +2912,494 @@ def extract_pdf_text(data: bytes, max_chars: int = 9000) -> str:
     except:
         return ""
 
+async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retries: int = 1) -> dict:
+    last_resp = ""
+    for attempt in range(retries + 1):
+        this_prompt = prompt if attempt == 0 else (
+            prompt + "\n\nIMPORTANT: Your previous reply could not be parsed as JSON. "
+            "Reply again with ONLY the JSON object — no markdown code fences, "
+            "no explanation, nothing before or after it."
+        )
+        resp = await chat.send_message(this_prompt)
+        last_resp = resp
+        try:
+            parsed = _clean_json(resp)
+            if parsed.get(required_key):
+                return parsed
+        except Exception:
+            continue
+    logger.error(f"AI JSON generation failed for key '{required_key}'. Last raw (truncated): {last_resp[:500]!r}")
+    raise ValueError(f"Could not get valid JSON with key '{required_key}' from AI")
+
+def _strip_reasoning_preamble(text: str) -> str:
+    match = re.search(r'##\s*(Given|Solution)', text)
+    if match and match.start() > 0:
+        return text[match.start():].strip()
+    return text
+
+
+# ============================================================
+# AI-Generated Paper Solutions (Ask / Step-by-step QA / Video walkthroughs)
+# ============================================================
+
+@api_router.post("/papers/ask")
+async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user_optional)):
+    p = await db.papers.find_one({"paper_id": req.paper_id}, {"_id": 0})
+    subject = p["subject"] if p else "General"
+    system = (
+        f"You are GC AI, an expert {subject} exam tutor writing a final worked solution for a student. "
+        "CRITICAL: Do NOT show your internal reasoning process. Never write phrases like "
+        "'We are given', 'We need to find', 'Let's define', 'Let's assume', or any narration of "
+        "how you are thinking through the problem. Go straight to the structured solution as if "
+        "writing model answers for an exam mark scheme.\n\n"
+        "Format your answer using these markdown sections:\n"
+        "## Given\n"
+        "A short bullet list of the known quantities from the question.\n\n"
+        "## Solution\n"
+        "Clearly numbered steps (1., 2., 3. ...), each showing the working, not the thought process. "
+        "Use $ ... $ for inline math and $$ ... $$ for standalone equations.\n\n"
+        "## Answer\n"
+        "The final numeric or symbolic result, stated in one line.\n\n"
+        "Be concise. Do not restate the question. Do not apologize or hedge."
+    )
+    chat = _new_chat(f"ask_{uuid.uuid4().hex}", system)
+    resp = await chat.send_message(f"Question:\n\n{req.question}")
+    resp = _strip_reasoning_preamble(resp)
+    return {"answer": resp}
+
+
+@api_router.post("/papers/{paper_id}/qa")
+async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user)):
+    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Paper not found")
+    cached = await db.paper_qa_cache.find_one({"paper_id": paper_id}, {"_id": 0})
+    if cached:
+        return {"items": cached["items"], "cached": True}
+
+    data = await fetch_pdf_bytes(p["pdf_url"])
+    text = extract_pdf_text(data)
+    system = ("You are a senior Cameroon GCE examiner. Read the exam paper text and produce a clear, "
+              "step-by-step worked solution section. Return STRICT JSON only, with no reasoning or thinking text before or after it.")
+    prompt = (
+        f"This is {p['level']} {p['subject']} {p['year']} Paper {p['paper_number']}.\n\n"
+        f"PAPER TEXT:\n{text}\n\n"
+        "Extract the individual questions and for each return a JSON object. "
+        "Return JSON: {\"items\":[{\"number\":\"1\",\"question\":\"...\",\"steps\":[\"step 1\",\"step 2\"],\"answer\":\"final answer\"}]}. "
+        "Solve at least the first 8 questions you can identify. Keep steps concise and mathematically correct. Return ONLY JSON."
+    )
+    chat = _new_chat(f"qa_{uuid.uuid4().hex}", system)
+    resp = await chat.send_message(prompt)
+    try:
+        parsed = _clean_json(resp)
+        items = parsed.get("items", [])
+        if not items:
+            raise ValueError("empty items")
+    except Exception:
+        logger.error(f"QA parse fail: {resp[:200]}")
+        raise HTTPException(502, "Couldn't generate a solution for this paper right now. Please try again shortly.")
+    await db.paper_qa_cache.insert_one({"paper_id": paper_id, "items": items,
+                                        "created_at": datetime.utcnow().isoformat()})
+    return {"items": items, "cached": False}
+
+
+@api_router.post("/papers/{paper_id}/video")
+async def generate_video_solution(paper_id: str, user: dict = Depends(get_current_user)):
+    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Paper not found")
+    cached = await db.paper_video_cache.find_one({"paper_id": paper_id}, {"_id": 0})
+    if cached:
+        return {"scenes": cached["scenes"], "cached": True}
+
+    data = await fetch_pdf_bytes(p["pdf_url"])
+    text = extract_pdf_text(data, max_chars=7000)
+    system = ("You are a master teacher creating a narrated video lesson that solves an exam question "
+              "step by step on a virtual whiteboard. Return STRICT JSON only, with no reasoning or thinking text before or after it.")
+    prompt = (
+        f"This is {p['level']} {p['subject']} {p['year']} Paper {p['paper_number']}.\n\n"
+        f"PAPER TEXT:\n{text}\n\n"
+        "Pick the FIRST substantial question and create a video walkthrough that solves it. "
+        "Return JSON: {\"title\":\"...\",\"question\":\"...\",\"scenes\":[{\"heading\":\"Step title\","
+        "\"board\":[\"line shown on whiteboard\",\"another line\"],\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
+        "Create 4 to 6 scenes ending with the final answer. Narration must be natural spoken English. Return ONLY JSON."
+    )
+    chat = _new_chat(f"vid_{uuid.uuid4().hex}", system)
+    resp = await chat.send_message(prompt)
+    try:
+        parsed = _clean_json(resp)
+        raw_scenes = parsed.get("scenes", [])
+        if not raw_scenes:
+            raise ValueError("empty scenes")
+    except Exception:
+        logger.error(f"Video parse fail: {resp[:200]}")
+        raise HTTPException(502, "Couldn't build a video solution right now. Please try again shortly.")
+
+    scenes = []
+    for i, sc in enumerate(raw_scenes[:6]):
+        narration = (sc.get("narration") or sc.get("heading") or "")[:900]
+        scenes.append({
+            "heading": sc.get("heading", f"Step {i+1}"),
+            "board": sc.get("board", []),
+            "narration": narration,
+            "audio": "",
+        })
+    doc = {"paper_id": paper_id, "title": parsed.get("title", p["title"]),
+           "question": parsed.get("question", ""), "scenes": scenes,
+           "created_at": datetime.utcnow().isoformat()}
+    await db.paper_video_cache.insert_one(dict(doc))
+    return {"scenes": scenes, "title": doc["title"], "question": doc["question"], "cached": False}
+
+
+@api_router.post("/papers/{paper_id}/video/highlight")
+async def generate_video_from_highlight(paper_id: str, req: HighlightVideoRequest, user: dict = Depends(get_current_user)):
+    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Paper not found")
+
+    text_hash = hashlib.sha256(req.text.encode("utf-8")).hexdigest()[:16]
+    cache_key = f"{paper_id}_{text_hash}"
+    cached = await db.highlight_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if cached:
+        return {"scenes": cached["scenes"], "title": cached["title"], "question": cached["question"], "cached": True}
+
+    data = await fetch_pdf_bytes(p["pdf_url"])
+    full_text = extract_pdf_text(data, max_chars=3000)
+
+    system = (
+        "You are a master teacher creating a narrated video lesson that solves a specific "
+        "exam question that a student has highlighted. Return STRICT JSON only, "
+        "with no reasoning or thinking text before or after it."
+    )
+    prompt = (
+        f"This is {p['level']} {p['subject']} {p['year']} Paper {p['paper_number']}.\n\n"
+        f"STUDENT HIGHLIGHTED THIS TEXT:\n{req.text}\n\n"
+        f"PAPER CONTEXT (for reference):\n{full_text[:1500]}\n\n"
+        "Create a video walkthrough that solves the question or explains the concept "
+        "the student highlighted. If it's a question, solve it step by step. "
+        "If it's a concept, explain it clearly with examples. "
+        "Return JSON: {\"title\":\"...\",\"question\":\"...\","
+        "\"scenes\":[{\"heading\":\"Step title\","
+        "\"board\":[\"line shown on whiteboard\",\"another line\"],"
+        "\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
+        "Create 3-6 scenes. Narration must be natural spoken English. Return ONLY JSON."
+    )
+    chat = _new_chat(f"highlight_vid_{uuid.uuid4().hex}", system)
+
+    try:
+        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=1)
+        raw_scenes = parsed["scenes"]
+    except Exception as e:
+        logger.error(f"Highlight video generation failed for paper {paper_id}: {e}")
+        raise HTTPException(502, "Couldn't build a video solution for your selection. Please try again.")
+
+    scenes = []
+    for i, sc in enumerate(raw_scenes[:8]):
+        narration = (sc.get("narration") or sc.get("heading") or "")[:900]
+        scenes.append({
+            "heading": sc.get("heading", f"Step {i+1}"),
+            "board": sc.get("board", []),
+            "narration": narration,
+            "audio": "",
+        })
+
+    doc = {
+        "cache_key": cache_key, "paper_id": paper_id,
+        "title": parsed.get("title", "Solution for highlighted text"),
+        "question": parsed.get("question", req.text[:200]),
+        "scenes": scenes, "created_at": datetime.utcnow().isoformat(),
+    }
+    await db.highlight_video_cache.insert_one(dict(doc))
+    return {"scenes": scenes, "title": doc["title"], "question": doc["question"], "cached": False}
+
+
+# ============================================================
+# Reading Time Tracking
+# ============================================================
+
+@api_router.post("/papers/{paper_id}/reading-time")
+async def record_reading_time(paper_id: str, req: ReadingTimeRequest, user: dict = Depends(get_current_user)):
+    seconds = max(0, min(req.seconds, 120))
+    now = datetime.utcnow()
+    now_iso = now.isoformat()
+    today_key = now.date().isoformat()
+
+    await db.paper_reading_time.update_one(
+        {"paper_id": paper_id, "user_id": user["user_id"]},
+        {
+            "$inc": {"total_seconds": seconds, f"daily_seconds.{today_key}": seconds},
+            "$set": {"last_updated": now_iso},
+            "$setOnInsert": {
+                "record_id": f"rt_{uuid.uuid4().hex[:12]}",
+                "paper_id": paper_id, "user_id": user["user_id"],
+                "created_at": now_iso,
+            },
+        },
+        upsert=True,
+    )
+    doc = await db.paper_reading_time.find_one({"paper_id": paper_id, "user_id": user["user_id"]}, {"_id": 0})
+    # Fire-and-forget streak check — recomputes from fresh DB state so
+    # overlapping pings can't double-credit the same day.
+    asyncio.create_task(update_user_streak(user))
+    return {"ok": True, "total_seconds": doc.get("total_seconds", 0) if doc else seconds}
+
+@api_router.get("/papers/{paper_id}/reading-time")
+async def get_reading_time(paper_id: str, user: dict = Depends(get_current_user)):
+    doc = await db.paper_reading_time.find_one({"paper_id": paper_id, "user_id": user["user_id"]}, {"_id": 0})
+    return {"total_seconds": (doc or {}).get("total_seconds", 0)}
+
+
+# ============================================================
+# Streak, XP and Accuracy System
+# ============================================================
+# - A calendar day (UTC) counts as "complete" once the user's total study
+#   time that day (reading time + quiz time_spent) reaches their
+#   daily_commitment target.
+# - Completing a day earns a flat STREAK_XP_PER_DAY XP.
+# - A day can only ever be credited once (tracked via last_goal_met_date).
+# - Missing a day resets the streak to 0 (caught by the hourly job).
+# - Level is the higher of the XP-based level and the streak-based level.
+# - `accuracy` is the overall percentage of quiz questions answered
+#   correctly across all /attempts, recomputed on submit and daily.
+
+STREAK_XP_PER_DAY = 5
+
+def parse_daily_commitment(commitment_str: str) -> int:
+    """Return required study seconds, default 3600 if unparsable."""
+    if not commitment_str:
+        return 3600
+    commitment_str = commitment_str.lower().strip()
+    match = re.match(r'(\d+)\s*(hour|hours|minute|minutes|min|mins|h|m)', commitment_str)
+    if not match:
+        return 3600
+    value = int(match.group(1))
+    unit = match.group(2)
+    if unit.startswith('hour') or unit == 'h':
+        return value * 3600
+    return value * 60
+
+async def create_notification(user_id: str, message: str, type: str = "info", link: Optional[str] = None) -> dict:
+    notif = {
+        "user_id": user_id,
+        "message": message,
+        "type": type,
+        "link": link,
+        "read": False,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    result = await db.notifications.insert_one(notif)
+    notif["_id"] = str(result.inserted_id)
+    await manager.send_personal_message(notif, user_id)
+    return notif
+
+async def get_study_time_for_date(user_id: str, target_date: date) -> int:
+    start = datetime.combine(target_date, datetime.min.time())
+    end = datetime.combine(target_date, datetime.max.time())
+
+    attempt_seconds = 0
+    async for att in db.attempts.find({
+        "user_id": user_id,
+        "created_at": {"$gte": start.isoformat(), "$lte": end.isoformat()}
+    }):
+        attempt_seconds += att.get("time_spent", 0)
+
+    reading_seconds = 0
+    date_str = target_date.isoformat()
+    async for doc in db.paper_reading_time.find({"user_id": user_id}):
+        daily = doc.get("daily_seconds", {})
+        reading_seconds += daily.get(date_str, 0)
+
+    return attempt_seconds + reading_seconds
+
+async def recompute_user_accuracy(user_id: str) -> float:
+    attempts = await db.attempts.find(
+        {"user_id": user_id}, {"_id": 0, "score": 1, "total": 1}
+    ).to_list(2000)
+    total_q = sum(a.get("total", 0) for a in attempts)
+    correct = sum(a.get("score", 0) for a in attempts)
+    accuracy = round((correct / total_q) * 100, 1) if total_q else 0.0
+    await db.users.update_one({"user_id": user_id}, {"$set": {"accuracy": accuracy}})
+    return accuracy
+
+async def _credit_streak_day(user_id: str, new_streak: int, credited_date: date) -> int:
+    """Persists a newly-credited streak day exactly once. Both the
+    real-time path (update_user_streak) and the daily fallback job
+    (daily_reminder_job) route through this function so a day can never
+    be double-credited or double-paid."""
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "xp": 1})
+    new_xp = (user_doc.get("xp", 0) if user_doc else 0) + STREAK_XP_PER_DAY
+    xp_level = 1 + new_xp // 500
+    streak_level = 1 + new_streak // 7
+    new_level = max(xp_level, streak_level)
+
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "streak": new_streak,
+            "last_goal_met_date": credited_date.isoformat(),
+            "xp": new_xp,
+            "level": new_level,
+        }},
+    )
+    await recompute_user_accuracy(user_id)
+    logger.info(
+        f"Streak credited: user={user_id} date={credited_date.isoformat()} "
+        f"streak={new_streak} +{STREAK_XP_PER_DAY}xp level={new_level}"
+    )
+    await create_notification(
+        user_id, f"🔥 You've reached a {new_streak}-day study streak!",
+        type="streak", link="/dashboard"
+    )
+    return new_level
+
+async def update_user_streak(user: dict) -> dict:
+    """Real-time check, called after every reading-time ping. Re-reads
+    streak state fresh from the DB rather than trusting the possibly
+    stale `user` snapshot, so overlapping pings can't race each other."""
+    user_id = user["user_id"]
+    today = datetime.utcnow().date()
+    today_seconds = await get_study_time_for_date(user_id, today)
+    goal_seconds = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
+    met_goal = today_seconds >= goal_seconds
+
+    fresh = await db.users.find_one(
+        {"user_id": user_id}, {"_id": 0, "streak": 1, "last_goal_met_date": 1, "level": 1}
+    ) or {}
+    streak = fresh.get("streak", 0)
+    last_met = fresh.get("last_goal_met_date")
+    last_met_date = date.fromisoformat(last_met) if last_met else None
+    level = fresh.get("level", 1)
+
+    if met_goal and last_met_date != today:
+        new_streak = streak + 1 if last_met_date == today - timedelta(days=1) else 1
+        level = await _credit_streak_day(user_id, new_streak, today)
+        streak = new_streak
+
+    return {
+        "streak": streak, "level": level, "met_goal": met_goal,
+        "today_seconds": today_seconds, "goal_seconds": goal_seconds,
+    }
+
+async def daily_reminder_job():
+    """Runs hourly, only doing real work at hour==15 UTC (4pm WAT). Safety
+    net for anyone the real-time path missed crediting for yesterday, and
+    sends a reminder email/notification to anyone who missed their goal."""
+    now = datetime.utcnow()
+    if now.hour != 15:
+        return
+
+    logger.info("Running daily reminder check")
+    yesterday = (now - timedelta(days=1)).date()
+    users = await db.users.find({}).to_list(1000)
+
+    for user in users:
+        user_id = user["user_id"]
+        email = user.get("email")
+        if not email:
+            continue
+
+        log = await db.reminder_log.find_one({"user_id": user_id, "date": yesterday.isoformat()})
+        if log:
+            continue
+
+        seconds = await get_study_time_for_date(user_id, yesterday)
+        goal = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
+
+        last_met = user.get("last_goal_met_date")
+        last_met_date = date.fromisoformat(last_met) if last_met else None
+
+        if seconds >= goal:
+            if last_met_date != yesterday:
+                streak = user.get("streak", 0)
+                new_streak = streak + 1 if last_met_date == yesterday - timedelta(days=1) else 1
+                await _credit_streak_day(user_id, new_streak, yesterday)
+        else:
+            await db.users.update_one({"user_id": user_id}, {"$set": {"streak": 0}})
+            await recompute_user_accuracy(user_id)
+
+            name = user.get("full_name", "Student")
+            subject = "Don't break your study streak!"
+            html = f"""
+            <h2>Hi {name},</h2>
+            <p>We noticed you didn't study yesterday. Your current streak is <strong>{user.get('streak', 0)}</strong> days.</p>
+            <p>Remember, your daily goal is <strong>{user.get('daily_commitment', '1 hour')}</strong>.</p>
+            <p>Keep going and don't break the chain!</p>
+            <a href="{APP_URL}/dashboard" style="background:#4F46E5;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">Go to Dashboard</a>
+            """
+            await send_brevo_email(email, subject, html, f"Your current streak is {user.get('streak', 0)} days.")
+            await create_notification(
+                user_id,
+                f"⏰ Don't forget to study today! Your daily goal is {user.get('daily_commitment', '1 hour')}.",
+                type="reminder", link="/study"
+            )
+
+        await db.reminder_log.insert_one({
+            "user_id": user_id, "date": yesterday.isoformat(), "sent_at": now.isoformat(),
+        })
+
+
+@api_router.get("/user/streak")
+async def get_user_streak(user: dict = Depends(get_current_user)):
+    today = datetime.utcnow().date()
+    today_seconds = await get_study_time_for_date(user["user_id"], today)
+    goal = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
+    progress_percent = min(100, int((today_seconds / goal) * 100)) if goal > 0 else 0
+    return {
+        "streak": user.get("streak", 0),
+        "level": user.get("level", 1),
+        "xp": user.get("xp", 0),
+        "accuracy": user.get("accuracy", 0),
+        "today_seconds": today_seconds,
+        "goal_seconds": goal,
+        "progress_percent": progress_percent,
+        "last_goal_met_date": user.get("last_goal_met_date"),
+        "daily_commitment": user.get("daily_commitment", "1 hour"),
+    }
+
+
+# ============================================================
+# WebSocket + REST Notifications
+# ============================================================
+# Mounted on api_router (prefix="/api"), so the path to connect to is:
+#     ws(s)://<host>/api/ws/notifications?user_id=<user_id>
+
+@api_router.websocket("/ws/notifications")
+async def websocket_notifications(websocket: WebSocket, user_id: str = None):
+    if not user_id:
+        await websocket.close(code=1008)
+        return
+    await manager.connect(user_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+
+@api_router.get("/notifications")
+async def get_notifications(user: dict = Depends(get_current_user)):
+    notifs = await db.notifications.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return notifs
+
+@api_router.put("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user: dict = Depends(get_current_user)):
+    try:
+        obj_id = ObjectId(notification_id)
+    except Exception:
+        raise HTTPException(400, "Invalid notification ID")
+    result = await db.notifications.update_one(
+        {"_id": obj_id, "user_id": user["user_id"]}, {"$set": {"read": True}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Notification not found")
+    return {"ok": True}
+
+@api_router.put("/notifications/read-all")
+async def mark_all_notifications_read(user: dict = Depends(get_current_user)):
+    await db.notifications.update_many(
+        {"user_id": user["user_id"], "read": False}, {"$set": {"read": True}}
+    )
+    return {"ok": True}
+
 
 # ============================================================
 # Root Endpoints
@@ -2343,7 +3420,12 @@ async def root():
             "courses": "/api/courses",
             "library": "/api/library/courses",
             "analytics": "/api/analytics/student",
-            "ai": "/api/ai/chat, /api/ai/chat/emergent, /api/ai/solution",
+            "ai": "/api/ai/chat, /api/ai/chat/emergent, /api/ai/solution, /api/papers/ask, /api/papers/{id}/qa, /api/papers/{id}/video",
+            "settings": "/api/settings",
+            "streak": "/api/user/streak",
+            "notifications": "/api/notifications, /api/ws/notifications",
+            "video_interactions": "/api/courses/{id}/like, /api/courses/{id}/save, /api/courses/{id}/watch",
+            "phone_auth": "/api/auth/phone/send-otp, /api/auth/phone/verify",
             "docs": "/docs"
         }
     }
@@ -2551,6 +3633,8 @@ if __name__ == "__main__":
     print(f"OpenRouter: {'Enabled' if OPENROUTER_API_KEY else 'Disabled'}")
     print(f"Emergent LLM: {'Enabled' if EMERGENT_LLM_KEY else 'Disabled'}")
     print(f"Brevo Email: {'Enabled' if BREVO_API_KEY else 'Disabled'}")
+    print(f"Twilio SMS: {'Enabled' if twilio_client else 'Disabled'}")
+    print(f"Scheduler (daily reminders): {'Enabled' if scheduler else 'Disabled (pip install apscheduler)'}")
     print(f"API: {APP_URL}")
     print(f"Docs: {APP_URL}/docs")
     print(f"CORS Origins: {CORS_ORIGINS}")

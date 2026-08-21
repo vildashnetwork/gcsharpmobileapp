@@ -1,0 +1,80 @@
+// components/StreakBadge.tsx
+import { useEffect, useState } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { api } from '@/src/api';
+import { theme } from '@/src/theme';
+
+type StreakData = {
+    streak: number;
+    level: number;
+    progress_percent: number;
+    today_seconds: number;
+    goal_seconds: number;
+};
+
+export function StreakBadge() {
+    const [data, setData] = useState<StreakData | null>(null);
+
+    const fetchStreak = async () => {
+        try {
+            const res = await api.get('/user/streak');
+            setData(res.data);
+        } catch {
+            // ignore
+        }
+    };
+
+    useEffect(() => {
+        fetchStreak();
+        const interval = setInterval(fetchStreak, 60000); // refresh every minute
+        return () => clearInterval(interval);
+    }, []);
+
+    if (!data) return null;
+
+    const progressWidth = Math.min(100, data.progress_percent);
+
+    return (
+        <View style={styles.badge}>
+            <View style={styles.item}>
+                <Ionicons name="flame" size={16} color={data.streak > 0 ? theme.warning : theme.muted} />
+                <Text style={styles.value}>{data.streak}</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.item}>
+                <Ionicons name="trophy" size={16} color={theme.warning} />
+                <Text style={styles.value}>{data.level}</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.progressWrapper}>
+                <Ionicons name="target" size={14} color={theme.muted} />
+                <View style={styles.progressBar}>
+                    <View style={[styles.progressFill, { width: `${progressWidth}%` }]} />
+                </View>
+                <Text style={styles.percent}>{Math.round(data.progress_percent)}%</Text>
+            </View>
+        </View>
+    );
+}
+
+const styles = StyleSheet.create({
+    badge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: theme.surfaceSecondary,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        borderRadius: 20,
+        borderWidth: 1,
+        borderColor: theme.border,
+        gap: 8,
+    },
+    item: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+    value: { fontWeight: '600', fontSize: 13, color: theme.onSurface },
+    divider: { width: 1, height: 16, backgroundColor: theme.border },
+    progressWrapper: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    progressBar: { width: 50, height: 4, backgroundColor: theme.surfaceTertiary, borderRadius: 2, overflow: 'hidden' },
+    progressFill: { height: '100%', backgroundColor: theme.brandPrimary },
+    percent: { fontSize: 9, color: theme.onSurfaceMuted },
+});

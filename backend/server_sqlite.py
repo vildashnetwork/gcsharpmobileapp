@@ -2234,7 +2234,7 @@ async def teacher_overview(user: dict = Depends(get_current_user)):
 
 
 # ============================================================
-# AI Chat with Emergent
+# AI Chat with Emergent (kept as is, not used by PDF viewer)
 # ============================================================
 
 @api_router.post("/ai/chat/emergent")
@@ -2298,13 +2298,15 @@ async def ai_history(session_id: str, user: dict = Depends(get_current_user)):
     ).sort("created_at", 1).to_list(200)
     return {"messages": [serialize(m) for m in msgs]}
 
+# ============================================================
+# AI Solution – Now using OpenRouter (SimpleLLM)
+# ============================================================
+
 @api_router.post("/ai/solution")
 async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-    except Exception as e:
-        raise HTTPException(500, f"AI unavailable: {e}")
-
+    """
+    Generate a step‑by‑step solution with narration using OpenRouter.
+    """
     system = (
         "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
         "- title: short problem title (max 8 words)\n"
@@ -2318,16 +2320,14 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
         "reads them well.\n"
         "Return ONLY valid JSON, no markdown, no code fences."
     )
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"sol_{uuid.uuid4().hex[:8]}",
-        system_message=system,
-    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+    chat = _new_chat(f"sol_{uuid.uuid4().hex[:8]}", system)
     try:
-        reply = await chat.send_message(UserMessage(text=inp.question))
+        reply = await chat.send_message(inp.question)
     except Exception as e:
+        logger.exception("AI solution generation error")
         raise HTTPException(500, f"AI error: {e}")
 
+    # Strip any markdown code fences
     reply_clean = reply.strip()
     if reply_clean.startswith("```"):
         reply_clean = reply_clean.strip("`")
@@ -2335,9 +2335,21 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
             reply_clean = reply_clean[4:].strip()
     try:
         data = json.loads(reply_clean)
+        # Ensure required keys exist
+        if "title" not in data:
+            data["title"] = "Solution"
+        if "steps" not in data or not data["steps"]:
+            data["steps"] = [{"heading": "Solution", "body": reply}]
+        if "narration" not in data:
+            data["narration"] = reply
+        return data
     except Exception:
-        data = {"title": "Solution", "steps": [{"heading": "Solution", "body": reply}], "narration": reply}
-    return data
+        # Fallback structure if parsing fails
+        return {
+            "title": "Solution",
+            "steps": [{"heading": "Solution", "body": reply}],
+            "narration": reply,
+        }
 
 
 # ============================================================
