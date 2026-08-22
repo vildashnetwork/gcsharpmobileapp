@@ -843,6 +843,7 @@ const styles = StyleSheet.create({
   startPracticeText: { color: "#fff", fontWeight: "700", fontSize: 16 },
   card: {
     marginHorizontal: spacing.lg,
+    marginBottom: 12,
     backgroundColor: "#fff",
     borderRadius: radii.md,
     padding: spacing.md,
@@ -892,7 +893,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
   },
   aiBtnText: { fontSize: 13, color: theme.brandPrimary, fontWeight: "600" },
-  ringRow: { paddingHorizontal: spacing.lg },
+  ringRow: { paddingHorizontal: spacing.lg, marginTop: 19 },
   ringCard: { alignItems: "center", paddingVertical: spacing.lg },
   ringTitle: { fontWeight: "700", fontSize: 15, color: theme.onSurface, marginBottom: spacing.sm },
   ringContainer: { position: "relative", alignItems: "center", justifyContent: "center" },

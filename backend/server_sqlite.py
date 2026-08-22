@@ -2134,13 +2134,103 @@ async def list_attempts(user: dict = Depends(get_current_user)):
     items = await db.attempts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
     return items
 
+
+
+
+
+
+
+
+
+
+# @api_router.get("/dashboard/stats")
+# async def dashboard_stats(user: dict = Depends(get_current_user)):
+#     attempts = await db.attempts.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+#     questions_attempted = sum(a["total"] for a in attempts)
+#     correct = sum(a["score"] for a in attempts)
+#     accuracy = round((correct / questions_attempted) * 100) if questions_attempted else 0
+#     study_seconds = sum(a.get("time_spent", 0) for a in attempts)
+#     study_hours = round(study_seconds / 3600, 1)
+
+#     weak_counter, strong_counter = {}, {}
+#     for a in attempts:
+#         for t in a.get("weak_topics", []):
+#             weak_counter[t] = weak_counter.get(t, 0) + 1
+#         for t in a.get("strong_topics", []):
+#             strong_counter[t] = strong_counter.get(t, 0) + 1
+#     weak = sorted(weak_counter, key=weak_counter.get, reverse=True)[:4]
+#     strong = sorted(strong_counter, key=strong_counter.get, reverse=True)[:4]
+
+#     # --- Build the last 7 real calendar days, using the SAME source
+#     # of truth as the streak system (attempts + reading time), instead
+#     # of scanning `attempts` alone. ---
+#     today = datetime.utcnow().date()
+#     days_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+#     consistency = []
+#     for i in range(6, -1, -1):
+#         d = today - timedelta(days=i)
+#         seconds = await get_study_time_for_date(user["user_id"], d)
+#         consistency.append({
+#             "day": days_labels[d.weekday()],
+#             "minutes": round(seconds / 60),
+#         })
+
+#     return {
+#         "study_hours": study_hours,
+#         "questions_attempted": questions_attempted,
+#         "accuracy": accuracy,
+#         "streak": user.get("streak", 0),
+#         "xp": user.get("xp", 0),
+#         "level": user.get("level", 1),
+#         "xp_to_next": 500 - (user.get("xp", 0) % 500),
+#         "weak_topics": weak,
+#         "strong_topics": strong,
+#         "recent_attempts": sorted(attempts, key=lambda a: a["created_at"], reverse=True)[:5],
+#         "consistency": consistency,
+#         "total_attempts": len(attempts),
+#     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(get_current_user)):
-    attempts = await db.attempts.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
+    uid = user["user_id"]
+    attempts = await db.attempts.find({"user_id": uid}, {"_id": 0}).to_list(500)
     questions_attempted = sum(a["total"] for a in attempts)
     correct = sum(a["score"] for a in attempts)
     accuracy = round((correct / questions_attempted) * 100) if questions_attempted else 0
-    study_seconds = sum(a.get("time_spent", 0) for a in attempts)
+
+    attempt_seconds = sum(a.get("time_spent", 0) for a in attempts)
+
+    # Same pattern as the web backend: one query against paper_reading_time
+    # gives us both the reading-time total AND the distinct-papers count,
+    # since this collection has exactly one doc per (user_id, paper_id).
+    reading_docs_full = await db.paper_reading_time.find(
+        {"user_id": uid},
+        {"_id": 0, "total_seconds": 1, "daily_seconds": 1}
+    ).to_list(2000)
+    reading_seconds = sum(d.get("total_seconds", 0) for d in reading_docs_full)
+
+    practice_docs = await db.study_sessions.find({"user_id": uid}, {"_id": 0, "seconds": 1}).to_list(1000)
+    practice_seconds = sum(d.get("seconds", 0) for d in practice_docs)
+
+    study_seconds = attempt_seconds + reading_seconds + practice_seconds
     study_hours = round(study_seconds / 3600, 1)
 
     weak_counter, strong_counter = {}, {}
@@ -2152,15 +2242,12 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     weak = sorted(weak_counter, key=weak_counter.get, reverse=True)[:4]
     strong = sorted(strong_counter, key=strong_counter.get, reverse=True)[:4]
 
-    # --- Build the last 7 real calendar days, using the SAME source
-    # of truth as the streak system (attempts + reading time), instead
-    # of scanning `attempts` alone. ---
     today = datetime.utcnow().date()
     days_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     consistency = []
     for i in range(6, -1, -1):
         d = today - timedelta(days=i)
-        seconds = await get_study_time_for_date(user["user_id"], d)
+        seconds = await get_study_time_for_date(uid, d)
         consistency.append({
             "day": days_labels[d.weekday()],
             "minutes": round(seconds / 60),
@@ -2179,7 +2266,17 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
         "recent_attempts": sorted(attempts, key=lambda a: a["created_at"], reverse=True)[:5],
         "consistency": consistency,
         "total_attempts": len(attempts),
+        "total_papers_viewed": len(reading_docs_full),
     }
+
+
+
+
+
+
+
+
+
 
 
 
