@@ -49,7 +49,7 @@ except Exception:
     IntervalTrigger = None
 
 # ============================================================
-#MOBILE 
+# MOBILE
 # ============================================================
 
 ROOT_DIR = Path(__file__).parent
@@ -580,6 +580,91 @@ class ResetPinWithOtpRequest(BaseModel):
         return value
 
 # ============================================================
+# PUSH NOTIFICATION HELPERS
+# ============================================================
+
+EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/push/send"
+
+async def send_expo_push(token: str, title: str, body: str, data: Optional[dict] = None):
+    """
+    Send a push notification to a single Expo push token.
+    """
+    if not token:
+        return
+    payload = {
+        "to": token,
+        "sound": "default",
+        "title": title,
+        "body": body,
+        "data": data or {},
+        "priority": "high",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(EXPO_PUSH_API_URL, json=payload)
+            if response.status_code != 200:
+                logger.error(f"Expo push failed: {response.text}")
+            else:
+                logger.info(f"Push sent to {token[:10]}...")
+    except Exception as e:
+        logger.error(f"Expo push error: {e}")
+
+# ============================================================
+# MODIFIED create_notification – now sends push too
+# ============================================================
+
+async def create_notification(user_id: str, message: str, type: str = "info", link: Optional[str] = None) -> dict:
+    notif = {
+        "user_id": user_id,
+        "message": message,
+        "type": type,
+        "link": link,
+        "read": False,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    result = await db.notifications.insert_one(notif)
+    notif["_id"] = str(result.inserted_id)
+
+    # WebSocket real‑time
+    await manager.send_personal_message(notif, user_id)
+
+    # Push notification (Expo)
+    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "expo_push_token": 1})
+    if user_doc and user_doc.get("expo_push_token"):
+        title = "GC Smart"
+        if type == "streak":
+            title = "🔥 Streak Update"
+        elif type == "reminder":
+            title = "⏰ Study Reminder"
+        elif type == "ai_reply":
+            title = "🤖 AI Reply"
+        await send_expo_push(user_doc["expo_push_token"], title, message, {"link": link})
+
+    return notif
+
+# ============================================================
+# PUSH TOKEN REGISTRATION ENDPOINT
+# ============================================================
+
+class PushTokenRequest(BaseModel):
+    token: str
+
+@api_router.post("/notifications/register-push-token")
+async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_current_user)):
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"expo_push_token": req.token}}
+    )
+    # Send a welcome push as a test
+    await create_notification(
+        user["user_id"],
+        "Push notifications enabled! You'll get study reminders and updates.",
+        "info",
+        "/dashboard"
+    )
+    return {"ok": True}
+
+# ============================================================
 # Local Math Solver
 # ============================================================
 
@@ -913,7 +998,7 @@ def _clean_json(text: str):
     raise ValueError("Could not extract valid JSON")
 
 # ============================================================
-# Authentication Routes
+# Authentication Routes (with login notification)
 # ============================================================
 
 @api_router.post("/auth/register")
@@ -974,6 +1059,14 @@ async def login_user(req: LoginRequest, response: Response):
     )
     user.pop("password_hash", None)
     user.pop("_id", None)
+
+    # Send login notification
+    await create_notification(
+        user["user_id"],
+        f"Welcome back, {user.get('full_name', 'Student')}! Keep up your study streak.",
+        "info",
+        "/dashboard"
+    )
     return {"token": session_token, "user": user}
 
 @api_router.post("/auth/session")
@@ -1068,6 +1161,13 @@ async def process_session(request: Request, response: Response):
     user.pop("_id", None)
     user.setdefault("onboarded", False)
     
+    # Login notification
+    await create_notification(
+        user_id,
+        f"Welcome back, {user.get('full_name', 'Student')}! Ready to learn?",
+        "info",
+        "/dashboard"
+    )
     return {"session_token": session_token, "user": user}
 
 @api_router.get("/auth/me")
@@ -1196,9 +1296,12 @@ async def register_with_pin(
         httponly=True,
         secure=True,
         samesite="none",
-        path="/",
+        path="/,
         max_age=7 * 24 * 60 * 60,
     )
+
+    # Send welcome notification
+    await create_notification(user_id, "Account created! Start your learning journey.", "info", "/dashboard")
 
     return {
         "token": session_token,
@@ -1294,6 +1397,14 @@ async def pin_login(
 
     fresh_user = await db.users.find_one({"user_id": user["user_id"]})
 
+    # Login notification
+    await create_notification(
+        user["user_id"],
+        f"Welcome back, {fresh_user.get('full_name', 'Student')}!",
+        "info",
+        "/dashboard"
+    )
+
     return {
         "token": session_token,
         "biometric_token": biometric_token,
@@ -1343,6 +1454,14 @@ async def biometric_login(
         samesite="none",
         path="/",
         max_age=7 * 24 * 60 * 60,
+    )
+
+    # Login notification
+    await create_notification(
+        user["user_id"],
+        f"Welcome back, {user.get('full_name', 'Student')}!",
+        "info",
+        "/dashboard"
     )
 
     return {
@@ -1558,6 +1677,15 @@ async def verify_phone_otp(req: PhoneVerifyRequest, response: Response):
 
         user.pop("_id", None)
         user.pop("password_hash", None)
+
+        # Login notification
+        await create_notification(
+            user["user_id"],
+            f"Welcome, {user.get('full_name', 'Student')}!",
+            "info",
+            "/dashboard"
+        )
+
         return {"success": True, "token": session_token, "user": public_user(user)}
     except HTTPException:
         raise
@@ -1625,6 +1753,15 @@ async def exchange_session(request: Request, response: Response):
 
         user.pop("_id", None)
         user.pop("password_hash", None)
+
+        # Login notification
+        await create_notification(
+            user_id,
+            f"Welcome back, {user.get('full_name', 'Student')}!",
+            "info",
+            "/dashboard"
+        )
+
         return {"session_token": session_token, "user": user}
     except HTTPException:
         raise
@@ -2124,6 +2261,22 @@ async def submit_attempt(req: SubmitAttemptRequest, user: dict = Depends(get_cur
     # Keep the profile's overall accuracy in sync with every new attempt.
     overall_accuracy = await recompute_user_accuracy(user["user_id"])
 
+    # Notify about progress
+    if accuracy == 100:
+        await create_notification(
+            user["user_id"],
+            f"🎉 Perfect score! You got 100% on {req.subject} Paper {req.paper}!",
+            "streak",
+            "/attempts"
+        )
+    elif accuracy >= 80:
+        await create_notification(
+            user["user_id"],
+            f"Great job! You scored {accuracy}% on {req.subject} Paper {req.paper}.",
+            "info",
+            "/attempts"
+        )
+
     return {
         "attempt": attempt, "xp_gain": xp_gain, "new_xp": new_xp,
         "new_level": new_level, "accuracy": overall_accuracy,
@@ -2133,79 +2286,6 @@ async def submit_attempt(req: SubmitAttemptRequest, user: dict = Depends(get_cur
 async def list_attempts(user: dict = Depends(get_current_user)):
     items = await db.attempts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
     return items
-
-
-
-
-
-
-
-
-
-
-# @api_router.get("/dashboard/stats")
-# async def dashboard_stats(user: dict = Depends(get_current_user)):
-#     attempts = await db.attempts.find({"user_id": user["user_id"]}, {"_id": 0}).to_list(500)
-#     questions_attempted = sum(a["total"] for a in attempts)
-#     correct = sum(a["score"] for a in attempts)
-#     accuracy = round((correct / questions_attempted) * 100) if questions_attempted else 0
-#     study_seconds = sum(a.get("time_spent", 0) for a in attempts)
-#     study_hours = round(study_seconds / 3600, 1)
-
-#     weak_counter, strong_counter = {}, {}
-#     for a in attempts:
-#         for t in a.get("weak_topics", []):
-#             weak_counter[t] = weak_counter.get(t, 0) + 1
-#         for t in a.get("strong_topics", []):
-#             strong_counter[t] = strong_counter.get(t, 0) + 1
-#     weak = sorted(weak_counter, key=weak_counter.get, reverse=True)[:4]
-#     strong = sorted(strong_counter, key=strong_counter.get, reverse=True)[:4]
-
-#     # --- Build the last 7 real calendar days, using the SAME source
-#     # of truth as the streak system (attempts + reading time), instead
-#     # of scanning `attempts` alone. ---
-#     today = datetime.utcnow().date()
-#     days_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-#     consistency = []
-#     for i in range(6, -1, -1):
-#         d = today - timedelta(days=i)
-#         seconds = await get_study_time_for_date(user["user_id"], d)
-#         consistency.append({
-#             "day": days_labels[d.weekday()],
-#             "minutes": round(seconds / 60),
-#         })
-
-#     return {
-#         "study_hours": study_hours,
-#         "questions_attempted": questions_attempted,
-#         "accuracy": accuracy,
-#         "streak": user.get("streak", 0),
-#         "xp": user.get("xp", 0),
-#         "level": user.get("level", 1),
-#         "xp_to_next": 500 - (user.get("xp", 0) % 500),
-#         "weak_topics": weak,
-#         "strong_topics": strong,
-#         "recent_attempts": sorted(attempts, key=lambda a: a["created_at"], reverse=True)[:5],
-#         "consistency": consistency,
-#         "total_attempts": len(attempts),
-#     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @api_router.get("/dashboard/stats")
@@ -2268,18 +2348,6 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
         "total_attempts": len(attempts),
         "total_papers_viewed": len(reading_docs_full),
     }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @api_router.get("/leaderboard")
@@ -2451,53 +2519,8 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
 
 
 # ============================================================
-# AI Tutor (Streaming with OpenRouter)
+# AI Tutor (Streaming with OpenRouter) – with notification after reply
 # ============================================================
-
-@api_router.get("/ai/sessions")
-async def ai_sessions(user: dict = Depends(get_current_user)):
-    items = await db.ai_sessions.find({"user_id": user["user_id"]}, {"_id": 0, "messages": 0}).sort("updated_at", -1).to_list(100)
-    return items
-
-@api_router.get("/ai/sessions/{session_id}")
-async def ai_session_detail(session_id: str, user: dict = Depends(get_current_user)):
-    s = await db.ai_sessions.find_one({"session_id": session_id, "user_id": user["user_id"]}, {"_id": 0})
-    if not s:
-        raise HTTPException(404, "Not found")
-    return s
-
-@api_router.put("/ai/sessions/{session_id}/title")
-async def update_session_title(session_id: str, request: Request, user: dict = Depends(get_current_user)):
-    body = await request.json()
-    title = (body.get("title") or "").strip()
-    if not title:
-        raise HTTPException(400, "Title cannot be empty")
-    result = await db.ai_sessions.update_one(
-        {"session_id": session_id, "user_id": user["user_id"]},
-        {"$set": {"title": title, "updated_at": datetime.utcnow().isoformat()}}
-    )
-    if result.matched_count == 0:
-        raise HTTPException(404, "Session not found")
-    return {"ok": True, "title": title}
-
-@api_router.delete("/ai/sessions/{session_id}")
-async def delete_ai_session(session_id: str, user: dict = Depends(get_current_user)):
-    result = await db.ai_sessions.delete_one({"session_id": session_id, "user_id": user["user_id"]})
-    if result.deleted_count == 0:
-        raise HTTPException(404, "Session not found")
-    return {"ok": True}
-
-@api_router.put("/ai/sessions/{session_id}/pin")
-async def toggle_pin_ai_session(session_id: str, request: Request, user: dict = Depends(get_current_user)):
-    body = await request.json()
-    pinned = bool(body.get("pinned", False))
-    result = await db.ai_sessions.update_one(
-        {"session_id": session_id, "user_id": user["user_id"]},
-        {"$set": {"pinned": pinned, "updated_at": datetime.utcnow().isoformat()}}
-    )
-    if result.matched_count == 0:
-        raise HTTPException(404, "Session not found")
-    return {"ok": True, "pinned": pinned}
 
 @api_router.post("/ai/chat")
 async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
@@ -2553,6 +2576,14 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             {"$set": {"messages": new_messages, "updated_at": datetime.utcnow().isoformat()}},
         )
         yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
+
+        # Send a notification that AI replied
+        await create_notification(
+            user["user_id"],
+            f"🤖 AI Tutor replied to your question: \"{req.message[:40]}...\"",
+            "ai_reply",
+            f"/ai/chat?s={session_id}"
+        )
 
     return StreamingResponse(
         event_gen(),
@@ -3281,20 +3312,6 @@ def parse_daily_commitment(commitment_str: str) -> int:
         return value * 3600
     return value * 60
 
-async def create_notification(user_id: str, message: str, type: str = "info", link: Optional[str] = None) -> dict:
-    notif = {
-        "user_id": user_id,
-        "message": message,
-        "type": type,
-        "link": link,
-        "read": False,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    result = await db.notifications.insert_one(notif)
-    notif["_id"] = str(result.inserted_id)
-    await manager.send_personal_message(notif, user_id)
-    return notif
-
 async def get_study_time_for_date(user_id: str, target_date: date) -> int:
     start = datetime.combine(target_date, datetime.min.time())
     end = datetime.combine(target_date, datetime.max.time())
@@ -3349,9 +3366,10 @@ async def _credit_streak_day(user_id: str, new_streak: int, credited_date: date)
         f"Streak credited: user={user_id} date={credited_date.isoformat()} "
         f"streak={new_streak} +{STREAK_XP_PER_DAY}xp level={new_level}"
     )
+    # This will also trigger a push notification via create_notification
     await create_notification(
         user_id, f"🔥 You've reached a {new_streak}-day study streak!",
-        type="streak", link="/dashboard"
+        "streak", "/dashboard"
     )
     return new_level
 
@@ -3433,7 +3451,7 @@ async def daily_reminder_job():
             await create_notification(
                 user_id,
                 f"⏰ Don't forget to study today! Your daily goal is {user.get('daily_commitment', '1 hour')}.",
-                type="reminder", link="/study"
+                "reminder", "/study"
             )
 
         await db.reminder_log.insert_one({
