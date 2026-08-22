@@ -22,11 +22,13 @@ export function pdfHtml(pdfUrl: string, page = 1): string {
     position: fixed; z-index: 9999; display:none; flex-direction:row; gap:6px;
     background: #0A192F; color:#fff; border-radius: 12px; padding: 8px;
     box-shadow: 0 4px 16px rgba(0,0,0,0.35);
-    transform: translate(-50%, -100%);
+    left: 50%; top: 12px; max-width: calc(100vw - 16px);
+    transform: translateX(-50%);
   }
   #popup button {
     background: transparent; border: 0; color:#fff; padding: 6px 10px; font-weight:700; font-size:13px;
     border-radius: 8px;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
   }
   #popup button.primary { background:#2563EB; }
   #popup button.warn { background:#F59E0B; color:#0A192F; }
@@ -49,6 +51,7 @@ export function pdfHtml(pdfUrl: string, page = 1): string {
 
   let currentSelection = "";
   let currentPage = START_PAGE;
+  let selectionTimer = null;
 
   async function render() {
     const wrap = document.getElementById("wrap");
@@ -106,14 +109,27 @@ export function pdfHtml(pdfUrl: string, page = 1): string {
     }
   }
 
-  function hidePopup() { document.getElementById("popup").style.display = "none"; currentSelection = ""; }
+  function hidePopup() {
+    if (selectionTimer) clearTimeout(selectionTimer);
+    document.getElementById("popup").style.display = "none";
+    currentSelection = "";
+  }
 
   function showPopupAt(text, x, y) {
     currentSelection = text;
     const p = document.getElementById("popup");
     p.style.display = "flex";
-    p.style.left = x + "px";
-    p.style.top = y + "px";
+    const halfWidth = p.offsetWidth / 2;
+    const horizontalPadding = 8;
+    const safeX = Math.max(
+      halfWidth + horizontalPadding,
+      Math.min(window.innerWidth - halfWidth - horizontalPadding, x)
+    );
+    const aboveY = y - p.offsetHeight - horizontalPadding;
+    const belowY = y + horizontalPadding;
+    const safeY = aboveY >= horizontalPadding ? aboveY : belowY;
+    p.style.left = safeX + "px";
+    p.style.top = safeY + "px";
   }
 
   document.addEventListener("selectionchange", () => {
@@ -124,8 +140,14 @@ export function pdfHtml(pdfUrl: string, page = 1): string {
       const range = sel.getRangeAt(0);
       const rect = range.getBoundingClientRect();
       const x = rect.left + rect.width / 2;
-      const y = rect.top - 6;
-      showPopupAt(text, x, y);
+      const y = rect.top;
+      hidePopup();
+      selectionTimer = setTimeout(() => {
+        const latestSelection = window.getSelection();
+        if (latestSelection && latestSelection.toString().trim() === text) {
+          showPopupAt(text, x, y);
+        }
+      }, 350);
     } catch (e) { hidePopup(); }
   });
 
