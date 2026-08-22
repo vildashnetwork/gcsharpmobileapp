@@ -321,9 +321,6 @@
 
 
 
-
-
-
 import { useEffect, useState, useCallback } from "react";
 import {
   View,
@@ -422,15 +419,21 @@ function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: numb
   );
 }
 
-// ----- Custom Bar Chart with value labels -----
+// ----- Consistency Chart (shows bars even with zero minutes) -----
 function ConsistencyChart({ data }: { data: { day: string; minutes: number }[] }) {
+  // If data is empty, show a placeholder message
+  if (!data || data.length === 0) {
+    return <Text style={styles.emptyChart}>No study data yet</Text>;
+  }
+
   const max = Math.max(1, ...data.map((d) => d.minutes));
   const today = new Date().getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
-  const todayIndex = today === 0 ? 6 : today - 1; // map Sun to index 6 (last)
+  const todayIndex = today === 0 ? 6 : today - 1;
 
   return (
     <View style={styles.chartWrapper}>
       {data.map((item, index) => {
+        // Ensure a minimum visible height for bars (even when minutes = 0)
         const height = Math.max(6, (item.minutes / max) * 80);
         const isToday = index === todayIndex;
         return (
@@ -453,6 +456,7 @@ function ConsistencyChart({ data }: { data: { day: string; minutes: number }[] }
     </View>
   );
 }
+
 export default function Home() {
   const { user } = useAuth();
   const router = useRouter();
@@ -461,8 +465,10 @@ export default function Home() {
   const [courses, setCourses] = useState<Course[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
+    setError(null);
     try {
       const [statsRes, leaderboardRes, coursesRes] = await Promise.all([
         api<DashboardStats>("/dashboard/stats"),
@@ -472,8 +478,10 @@ export default function Home() {
       setStats(statsRes);
       setLeaderboard(leaderboardRes);
       setCourses(coursesRes.slice(0, 4));
-    } catch (error) {
-      console.log("Dashboard load error:", error);
+    } catch (err: any) {
+      console.log("Dashboard load error:", err);
+      setError("Could not load some data. Pull to refresh.");
+      // Keep existing data if possible
     } finally {
       setLoading(false);
     }
@@ -507,6 +515,12 @@ export default function Home() {
         contentContainerStyle={{ paddingBottom: 24 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.brandPrimary} />}
       >
+        {error && (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.avatarRow}>
@@ -591,7 +605,7 @@ export default function Home() {
               <Text style={styles.trendText}>Keep it up</Text>
             </View>
           </View>
-          {data?.consistency && data.consistency.length > 0 ? (
+          {data?.consistency ? (
             <ConsistencyChart data={data.consistency} />
           ) : (
             <Text style={styles.emptyChart}>No data yet</Text>
@@ -639,8 +653,10 @@ export default function Home() {
         <View style={styles.ringRow}>
           <View style={[styles.card, styles.ringCard]}>
             <Text style={styles.ringTitle}>Level Progress</Text>
-            {data && (
+            {data ? (
               <XPRing xp={data.xp} level={data.level} toNext={data.xp_to_next} />
+            ) : (
+              <Text style={styles.ringSub}>No data</Text>
             )}
             <Text style={styles.ringSub}>{data?.xp_to_next ?? 0} XP to next level</Text>
           </View>
@@ -682,25 +698,28 @@ export default function Home() {
         {/* Leaderboard Preview */}
         <Text style={styles.sectionTitle}>Leaderboard</Text>
         <View style={styles.card}>
-          {leaderboard?.my_rank && (
+          {leaderboard?.my_rank ? (
             <View style={styles.leaderboardHeader}>
               <Text style={styles.leaderboardRank}>Your rank: #{leaderboard.my_rank.rank}</Text>
             </View>
+          ) : (
+            <Text style={styles.leaderboardRank}>Complete a quiz to see your rank</Text>
           )}
-          {(leaderboard?.top || []).slice(0, 5).map((entry) => (
-            <View key={entry.rank} style={[styles.leaderboardRow, entry.is_me && styles.leaderboardMe]}>
-              <Text style={[styles.leaderboardRankNum, entry.rank <= 3 && styles.leaderboardTopRank]}>
-                {entry.rank}
-              </Text>
-              <Text style={styles.leaderboardName} numberOfLines={1}>
-                {entry.name}
-                {entry.is_me && <Text style={styles.leaderboardYou}> (You)</Text>}
-              </Text>
-              <Text style={styles.leaderboardLevel}>Lvl {entry.level}</Text>
-              <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
-            </View>
-          ))}
-          {(!leaderboard?.top || leaderboard.top.length === 0) && (
+          {leaderboard?.top && leaderboard.top.length > 0 ? (
+            leaderboard.top.slice(0, 5).map((entry) => (
+              <View key={entry.rank} style={[styles.leaderboardRow, entry.is_me && styles.leaderboardMe]}>
+                <Text style={[styles.leaderboardRankNum, entry.rank <= 3 && styles.leaderboardTopRank]}>
+                  {entry.rank}
+                </Text>
+                <Text style={styles.leaderboardName} numberOfLines={1}>
+                  {entry.name}
+                  {entry.is_me && <Text style={styles.leaderboardYou}> (You)</Text>}
+                </Text>
+                <Text style={styles.leaderboardLevel}>Lvl {entry.level}</Text>
+                <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
+              </View>
+            ))
+          ) : (
             <Text style={styles.emptyText}>Be the first on the leaderboard — start practicing!</Text>
           )}
         </View>
@@ -724,6 +743,14 @@ function Action({ icon, label, onPress, testID }: any) {
 // ----- Styles -----
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.surface },
+  errorBanner: {
+    marginHorizontal: spacing.lg,
+    marginTop: spacing.sm,
+    backgroundColor: "#FEE2E2",
+    padding: spacing.sm,
+    borderRadius: radii.sm,
+  },
+  errorText: { color: "#991B1B", fontSize: 14, textAlign: "center" },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",

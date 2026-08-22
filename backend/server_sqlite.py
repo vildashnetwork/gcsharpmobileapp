@@ -2152,22 +2152,19 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     weak = sorted(weak_counter, key=weak_counter.get, reverse=True)[:4]
     strong = sorted(strong_counter, key=strong_counter.get, reverse=True)[:4]
 
-    now = datetime.utcnow()
-    week = [0] * 7
-    for a in attempts:
-        try:
-            d = datetime.fromisoformat(a["created_at"])
-            delta = (now.date() - d.date()).days
-            if 0 <= delta < 7:
-                week[6 - delta] += round(a.get("time_spent", 0) / 60)
-        except Exception:
-            pass
-    days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    weekday_today = now.weekday()
+    # --- Build the last 7 real calendar days, using the SAME source
+    # of truth as the streak system (attempts + reading time), instead
+    # of scanning `attempts` alone. ---
+    today = datetime.utcnow().date()
+    days_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     consistency = []
-    for i in range(7):
-        idx = (weekday_today - 6 + i) % 7
-        consistency.append({"day": days[idx], "minutes": week[i]})
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        seconds = await get_study_time_for_date(user["user_id"], d)
+        consistency.append({
+            "day": days_labels[d.weekday()],
+            "minutes": round(seconds / 60),
+        })
 
     return {
         "study_hours": study_hours,
@@ -2183,6 +2180,10 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
         "consistency": consistency,
         "total_attempts": len(attempts),
     }
+
+
+
+
 
 @api_router.get("/leaderboard")
 async def leaderboard():
