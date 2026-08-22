@@ -2185,25 +2185,15 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
     }
 
 @api_router.get("/leaderboard")
-async def leaderboard(user: dict = Depends(get_current_user_optional)):
+async def leaderboard():
     users = await db.users.find({"role": "student"}, {"_id": 0, "full_name": 1, "xp": 1, "level": 1, "user_id": 1}).to_list(500)
     users.sort(key=lambda u: u.get("xp", 0), reverse=True)
     board = []
-    my_rank = None
     for i, u in enumerate(users):
-        rank = i + 1
-        is_me = user and u["user_id"] == user["user_id"]
-        entry = {
-            "rank": rank,
-            "name": u.get("full_name", "Student"),
-            "xp": u.get("xp", 0),
-            "level": u.get("level", 1),
-            "is_me": is_me,
-        }
+        entry = {"rank": i + 1, "name": u.get("full_name", "Student"), "xp": u.get("xp", 0), "level": u.get("level", 1)}
         board.append(entry)
-        if is_me:
-            my_rank = entry
-    return {"top": board[:10], "my_rank": my_rank}
+    return {"top": board[:10]}
+
 
 # ============================================================
 # Library Routes

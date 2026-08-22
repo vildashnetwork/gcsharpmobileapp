@@ -436,7 +436,16 @@ function ConsistencyChart({ data }: { data: { day: string; minutes: number }[] }
         return (
           <View key={item.day} style={styles.barColumn}>
             <Text style={styles.barValue}>{item.minutes}</Text>
-            <View style={[styles.bar, { height, backgroundColor: isToday ? theme.brandPrimary : theme.brandPrimary + "66" }]} />
+            <View
+              style={[
+                styles.bar,
+                {
+                  height,
+                  backgroundColor: isToday ? theme.brandPrimary : theme.brandPrimary,
+                  opacity: isToday ? 1 : 0.4,
+                },
+              ]}
+            />
             <Text style={styles.barLabel}>{item.day}</Text>
           </View>
         );
@@ -444,7 +453,6 @@ function ConsistencyChart({ data }: { data: { day: string; minutes: number }[] }
     </View>
   );
 }
-
 export default function Home() {
   const { user } = useAuth();
   const router = useRouter();
