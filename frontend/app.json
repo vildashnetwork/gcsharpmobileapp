@@ -10,16 +10,16 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.elearningai.z1288g"
+      "bundleIdentifier": "com.gcsharp"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/gcsharp.gif",
-        "backgroundColor": "#000000"
+        "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "pan",
-      "package": "com.emergent.elearningai.z1288g"
+      "package": "com.gcsharp"
     },
     "web": {
       "bundler": "metro",
@@ -34,7 +34,7 @@
           "image": "./assets/images/gcsharp.gif",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000000"
+          "backgroundColor": "#ffffff"
         }
       ],
       "expo-video",

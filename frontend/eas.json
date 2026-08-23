@@ -12,7 +12,15 @@
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "https://gcsharpmobileapp.onrender.com/api",
+        "EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME": "qsmemy5r",
+        "EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET": "gcsharp"
+      }
     }
   },
   "submit": {
