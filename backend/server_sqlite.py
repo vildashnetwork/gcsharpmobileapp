@@ -2366,18 +2366,40 @@ async def leaderboard():
 # ============================================================
 
 @api_router.get("/library/courses")
-async def list_library_courses():
+async def list_library_courses(user: dict = Depends(get_current_user_optional)):
     items = await db.courses.find({}, {"_id": 0}).to_list(200)
+    if user:
+        liked_docs = await db.video_likes.find(
+            {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1}
+        ).to_list(500)
+        saved_docs = await db.video_saves.find(
+            {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1}
+        ).to_list(500)
+        liked_ids = {d["course_id"] for d in liked_docs}
+        saved_ids = {d["course_id"] for d in saved_docs}
+        for it in items:
+            it["liked"] = it["course_id"] in liked_ids
+            it["saved"] = it["course_id"] in saved_ids
+    else:
+        for it in items:
+            it["liked"] = False
+            it["saved"] = False
     return {"items": items}
 
 @api_router.get("/library/courses/{course_id}")
-async def get_library_course(course_id: str):
+async def get_library_course(course_id: str, user: dict = Depends(get_current_user_optional)):
     c = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Not found")
+    c = dict(c)
+    c["liked"] = False
+    c["saved"] = False
+    if user:
+        liked = await db.video_likes.find_one({"course_id": course_id, "user_id": user["user_id"]})
+        saved = await db.video_saves.find_one({"course_id": course_id, "user_id": user["user_id"]})
+        c["liked"] = bool(liked)
+        c["saved"] = bool(saved)
     return {"course": c}
-
-
 # ============================================================
 # Teacher Overview
 # ============================================================
