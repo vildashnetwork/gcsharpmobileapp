@@ -1,4 +1,4 @@
-# MOBILE BACKEND
+# MOBILE BACKEND (complete)
 import os
 import io
 import re
@@ -2690,6 +2690,67 @@ async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
         logger.error(f"AI explain error: {e}")
         return {"answer": "I'm having trouble connecting to my AI service. Please try again later.", "source": "error"}
 
+# ============================================================
+# AI SESSIONS MANAGEMENT (new routes for frontend)
+# ============================================================
+
+@api_router.get("/ai/sessions")
+async def list_ai_sessions(user: dict = Depends(get_current_user)):
+    """List all AI chat sessions for the authenticated user, ordered by updated_at descending."""
+    sessions = await db.ai_sessions.find(
+        {"user_id": user["user_id"]},
+        {"_id": 0, "session_id": 1, "title": 1, "subject": 1, "updated_at": 1, "pinned": 1}
+    ).sort("updated_at", -1).to_list(100)
+    return sessions
+
+@api_router.get("/ai/sessions/{session_id}")
+async def get_ai_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Get a specific AI session including its messages."""
+    session = await db.ai_sessions.find_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"_id": 0}
+    )
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+@api_router.put("/ai/sessions/{session_id}/title")
+async def update_ai_session_title(session_id: str, req: dict, user: dict = Depends(get_current_user)):
+    """Update the title of an AI session."""
+    title = req.get("title")
+    if not title:
+        raise HTTPException(400, "Title required")
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"title": title, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+@api_router.put("/ai/sessions/{session_id}/pin")
+async def toggle_ai_session_pin(session_id: str, req: dict, user: dict = Depends(get_current_user)):
+    """Pin or unpin an AI session."""
+    pinned = req.get("pinned", False)
+    if not isinstance(pinned, bool):
+        raise HTTPException(400, "pinned must be a boolean")
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"pinned": pinned, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+@api_router.delete("/ai/sessions/{session_id}")
+async def delete_ai_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Delete an AI session."""
+    result = await db.ai_sessions.delete_one(
+        {"session_id": session_id, "user_id": user["user_id"]}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
 
 # ============================================================
 # Teacher: Courses & Earnings
