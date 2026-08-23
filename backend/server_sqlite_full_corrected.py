@@ -874,6 +874,7 @@ class ProfileUpdate(BaseModel):
     proficiency: Optional[str] = None
     learning_style: Optional[str] = None
     specialization: Optional[str] = None
+    full_name: Optional[str] = None
     onboarded: Optional[bool] = None
 
 class OnboardingIn(BaseModel):
@@ -1183,16 +1184,15 @@ async def logout(request: Request, response: Response):
         await db.user_sessions.delete_one({"session_token": token})
     response.delete_cookie("session_token", path="/")
     return {"ok": True}
-
 @api_router.put("/auth/profile")
 async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
     update = {}
-    # Convert payload to dict, excluding None
     for k, v in payload.model_dump().items():
         if v is not None:
-            # Map frontend field names to DB field names
             if k == "full_name":
-                update["name"] = v
+                update["name"] = v      # DB stores name
+            elif k == "picture":
+                update["picture"] = v
             else:
                 update[k] = v
     if update:
@@ -1200,7 +1200,7 @@ async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_curren
     fresh = await db.users.find_one({"user_id": user["user_id"]})
     fresh.pop("_id", None)
     fresh.pop("password_hash", None)
-    # Normalise for frontend (name -> full_name, picture -> profile_photo)
+    # Normalise for frontend
     if "name" in fresh and "full_name" not in fresh:
         fresh["full_name"] = fresh["name"]
     if "picture" in fresh and "profile_photo" not in fresh:
