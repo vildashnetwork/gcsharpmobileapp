@@ -621,6 +621,7 @@ import {
   Modal,
   TouchableWithoutFeedback,
 } from "react-native";
+import { FontAwesome6 } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
@@ -1188,11 +1189,11 @@ export default function AITutor() {
                 </Pressable>
                 <View style={styles.drawerItemActions}>
                   <Pressable onPress={() => togglePin(s.session_id)} style={styles.drawerActionBtn}>
-                    <Ionicons
-                      name={s.pinned ? "pin" : "pin-outline"}
-                      size={18}
-                      color={s.pinned ? theme.brandPrimary : theme.onSurfaceMuted}
-                    />
+                   <FontAwesome6
+  name="thumbtack"
+  size={15}
+  color={s.pinned ? theme.brandPrimary : theme.onSurfaceMuted}
+/>
                   </Pressable>
                   <Pressable onPress={() => deleteChat(s.session_id)} style={styles.drawerActionBtn}>
                     <Ionicons name="trash-outline" size={18} color={theme.error} />

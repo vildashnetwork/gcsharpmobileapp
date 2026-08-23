@@ -3039,16 +3039,15 @@ async def upload_pdf(request: Request, user: dict = Depends(get_current_user)):
 #             result.append(pp)
 #     return result
 
-# @api_router.post("/drafts")
-# async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
-#     existing = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": req.paper_id})
-#     if existing:
-#         await db.drafts.delete_one({"user_id": user["user_id"], "paper_id": req.paper_id})
-#         return {"saved": False}
-#     await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
-#                                 "created_at": datetime.utcnow().isoformat()})
-#     return {"saved": True}
-
+@api_router.post("/drafts")
+async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
+    existing = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": req.paper_id})
+    if existing:
+        await db.drafts.delete_one({"user_id": user["user_id"], "paper_id": req.paper_id})
+        return {"saved": False}
+    await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
+                                "created_at": datetime.utcnow().isoformat()})
+    return {"saved": True}
 
 
 
