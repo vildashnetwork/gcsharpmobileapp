@@ -645,7 +645,140 @@ async def create_notification(user_id: str, message: str, type: str = "info", li
 # ============================================================
 # PUSH TOKEN REGISTRATION ENDPOINT
 # ============================================================
-# Auth Helpers
+
+def hash_pw(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def check_pw(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception:
+        return False
+
+def make_jwt(user_id: str) -> str:
+    payload = {
+        "sub": user_id,
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(days=7),
+    }
+    return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def _new_chat(session_id: str, system: str) -> SimpleLLM:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    chat = SimpleLLM(api_key=api_key)
+    chat.system_message = system
+    chat.session_id = session_id
+    return chat
+
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ", 1)[1]
+    
+    user_id = None
+    
+    try:
+        decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = decoded.get("sub")
+    except:
+        session = await db.user_sessions.find_one({"session_token": token})
+        if session:
+            exp = session.get("expires_at")
+            if exp:
+                if isinstance(exp, str):
+                    try:
+                        exp = datetime.fromisoformat(exp)
+                    except:
+                        pass
+                if exp and exp > datetime.utcnow():
+                    user_id = session["user_id"]
+                else:
+                    raise HTTPException(status_code=401, detail="Session expired")
+            else:
+                user_id = session["user_id"]
+        else:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    user.pop("_id", None)
+    user.pop("password_hash", None)
+    
+    user.setdefault("onboarded", False)
+    user.setdefault("xp", 0)
+    user.setdefault("level", 1)
+    user.setdefault("streak", 0)
+    user.setdefault("profile_photo", None)
+    user.setdefault("exam_level", None)
+    user.setdefault("full_name", user.get("full_name", "User"))
+    user.setdefault("role", "student")
+    user.setdefault("bio", "")
+    user.setdefault("institution", "")
+    user.setdefault("study_year", None)
+    user.setdefault("subjects", [])
+    user.setdefault("goals", [])
+    user.setdefault("daily_commitment", "")
+    user.setdefault("proficiency", "")
+    user.setdefault("learning_style", "")
+    user.setdefault("specialization", "")
+    user.setdefault("accuracy", 0.0)
+    user.setdefault("settings", DEFAULT_SETTINGS)
+    user.setdefault("last_goal_met_date", None)
+    
+    return user
+
+async def get_current_user_optional(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        return await get_current_user(authorization)
+    except HTTPException:
+        return None
+
+def serialize(doc: dict) -> dict:
+    if doc is None:
+        return {}
+    d = {k: v for k, v in doc.items() if k != "_id"}
+    for k, v in list(d.items()):
+        if isinstance(v, datetime):
+            d[k] = v.isoformat()
+    return d
+
+def _clean_json(text: str):
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except:
+        pass
+    
+    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except:
+            pass
+    
+    start = text.find('{')
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except:
+                        break
+    raise ValueError("Could not extract valid JSON")
+
 
 # ============================================================
 
@@ -667,28 +800,8 @@ async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_cu
     )
     return {"ok": True}
 
+
 # ============================================================
-# ============================================================
-
-class PushTokenRequest(BaseModel):
-    token: str
-
-@api_router.post("/notifications/register-push-token")
-async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_current_user)):
-    await db.users.update_one(
-        {"user_id": user["user_id"]},
-        {"$set": {"expo_push_token": req.token}}
-    )
-    # Send a welcome push as a test
-    await create_notification(
-        user["user_id"],
-        "Push notifications enabled! You'll get study reminders and updates.",
-        "info",
-        "/dashboard"
-    )
-    return {"ok": True}
-
-
 # Local Math Solver
 # ============================================================
 
@@ -885,140 +998,7 @@ class HighlightVideoRequest(BaseModel):
     context: Optional[str] = None
 
 # ============================================================
-
-def hash_pw(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-
-def check_pw(pw: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(pw.encode(), hashed.encode())
-    except Exception:
-        return False
-
-def make_jwt(user_id: str) -> str:
-    payload = {
-        "sub": user_id,
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(days=7),
-    }
-    return pyjwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-def _new_chat(session_id: str, system: str) -> SimpleLLM:
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    chat = SimpleLLM(api_key=api_key)
-    chat.system_message = system
-    chat.session_id = session_id
-    return chat
-
-async def get_current_user(authorization: Optional[str] = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = authorization.split(" ", 1)[1]
-    
-    user_id = None
-    
-    try:
-        decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        user_id = decoded.get("sub")
-    except:
-        session = await db.user_sessions.find_one({"session_token": token})
-        if session:
-            exp = session.get("expires_at")
-            if exp:
-                if isinstance(exp, str):
-                    try:
-                        exp = datetime.fromisoformat(exp)
-                    except:
-                        pass
-                if exp and exp > datetime.utcnow():
-                    user_id = session["user_id"]
-                else:
-                    raise HTTPException(status_code=401, detail="Session expired")
-            else:
-                user_id = session["user_id"]
-        else:
-            raise HTTPException(status_code=401, detail="Invalid token")
-    
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    user = await db.users.find_one({"user_id": user_id})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    
-    user.pop("_id", None)
-    user.pop("password_hash", None)
-    
-    user.setdefault("onboarded", False)
-    user.setdefault("xp", 0)
-    user.setdefault("level", 1)
-    user.setdefault("streak", 0)
-    user.setdefault("profile_photo", None)
-    user.setdefault("exam_level", None)
-    user.setdefault("full_name", user.get("full_name", "User"))
-    user.setdefault("role", "student")
-    user.setdefault("bio", "")
-    user.setdefault("institution", "")
-    user.setdefault("study_year", None)
-    user.setdefault("subjects", [])
-    user.setdefault("goals", [])
-    user.setdefault("daily_commitment", "")
-    user.setdefault("proficiency", "")
-    user.setdefault("learning_style", "")
-    user.setdefault("specialization", "")
-    user.setdefault("accuracy", 0.0)
-    user.setdefault("settings", DEFAULT_SETTINGS)
-    user.setdefault("last_goal_met_date", None)
-    
-    return user
-
-async def get_current_user_optional(authorization: Optional[str] = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    try:
-        return await get_current_user(authorization)
-    except HTTPException:
-        return None
-
-def serialize(doc: dict) -> dict:
-    if doc is None:
-        return {}
-    d = {k: v for k, v in doc.items() if k != "_id"}
-    for k, v in list(d.items()):
-        if isinstance(v, datetime):
-            d[k] = v.isoformat()
-    return d
-
-def _clean_json(text: str):
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except:
-        pass
-    
-    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
-    if fence_match:
-        try:
-            return json.loads(fence_match.group(1))
-        except:
-            pass
-    
-    start = text.find('{')
-    if start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            ch = text[i]
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(text[start:i + 1])
-                    except:
-                        break
-    raise ValueError("Could not extract valid JSON")
-
+# Auth Helpers
 # ============================================================
 # Authentication Routes (with login notification)
 # ============================================================
