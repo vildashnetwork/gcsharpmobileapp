@@ -1,4 +1,4 @@
-# MOBILE BACKEND
+# MOBILE BACKEND (complete)
 import os
 import io
 import re
@@ -2690,6 +2690,67 @@ async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
         logger.error(f"AI explain error: {e}")
         return {"answer": "I'm having trouble connecting to my AI service. Please try again later.", "source": "error"}
 
+# ============================================================
+# AI SESSIONS MANAGEMENT (new routes for frontend)
+# ============================================================
+
+@api_router.get("/ai/sessions")
+async def list_ai_sessions(user: dict = Depends(get_current_user)):
+    """List all AI chat sessions for the authenticated user, ordered by updated_at descending."""
+    sessions = await db.ai_sessions.find(
+        {"user_id": user["user_id"]},
+        {"_id": 0, "session_id": 1, "title": 1, "subject": 1, "updated_at": 1, "pinned": 1}
+    ).sort("updated_at", -1).to_list(100)
+    return sessions
+
+@api_router.get("/ai/sessions/{session_id}")
+async def get_ai_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Get a specific AI session including its messages."""
+    session = await db.ai_sessions.find_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"_id": 0}
+    )
+    if not session:
+        raise HTTPException(404, "Session not found")
+    return session
+
+@api_router.put("/ai/sessions/{session_id}/title")
+async def update_ai_session_title(session_id: str, req: dict, user: dict = Depends(get_current_user)):
+    """Update the title of an AI session."""
+    title = req.get("title")
+    if not title:
+        raise HTTPException(400, "Title required")
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"title": title, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+@api_router.put("/ai/sessions/{session_id}/pin")
+async def toggle_ai_session_pin(session_id: str, req: dict, user: dict = Depends(get_current_user)):
+    """Pin or unpin an AI session."""
+    pinned = req.get("pinned", False)
+    if not isinstance(pinned, bool):
+        raise HTTPException(400, "pinned must be a boolean")
+    result = await db.ai_sessions.update_one(
+        {"session_id": session_id, "user_id": user["user_id"]},
+        {"$set": {"pinned": pinned, "updated_at": datetime.utcnow().isoformat()}}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
+
+@api_router.delete("/ai/sessions/{session_id}")
+async def delete_ai_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Delete an AI session."""
+    result = await db.ai_sessions.delete_one(
+        {"session_id": session_id, "user_id": user["user_id"]}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Session not found")
+    return {"ok": True}
 
 # ============================================================
 # Teacher: Courses & Earnings
@@ -2962,21 +3023,21 @@ async def upload_pdf(request: Request, user: dict = Depends(get_current_user)):
 # Drafts
 # ============================================================
 
-@api_router.get("/drafts")
-async def list_drafts(user: dict = Depends(get_current_user)):
-    drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-    ids = [d["paper_id"] for d in drafts]
-    papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
-    pmap = {p["paper_id"]: p for p in papers}
-    result = []
-    for d in drafts:
-        pp = pmap.get(d["paper_id"])
-        if pp:
-            pp = dict(pp)
-            pp["saved"] = True
-            pp["saved_at"] = d["created_at"]
-            result.append(pp)
-    return result
+# @api_router.get("/drafts")
+# async def list_drafts(user: dict = Depends(get_current_user)):
+#     drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+#     ids = [d["paper_id"] for d in drafts]
+#     papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+#     pmap = {p["paper_id"]: p for p in papers}
+#     result = []
+#     for d in drafts:
+#         pp = pmap.get(d["paper_id"])
+#         if pp:
+#             pp = dict(pp)
+#             pp["saved"] = True
+#             pp["saved_at"] = d["created_at"]
+#             result.append(pp)
+#     return result
 
 @api_router.post("/drafts")
 async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
@@ -2987,6 +3048,56 @@ async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
     await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
                                 "created_at": datetime.utcnow().isoformat()})
     return {"saved": True}
+
+
+
+
+
+@api_router.get("/drafts")
+async def list_drafts(user: dict = Depends(get_current_user)):
+    user_id = user["user_id"]
+    print(f"📡 /drafts called for user: {user_id}")
+
+    drafts = await db.drafts.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    print(f"📄 Found {len(drafts)} drafts")
+
+    if not drafts:
+        return []
+
+    ids = [d["paper_id"] for d in drafts]
+    print(f"📋 Paper IDs: {ids}")
+
+    papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+    paper_map = {p["paper_id"]: p for p in papers}
+    print(f"📚 Found {len(papers)} matching papers")
+
+    result = []
+    for d in drafts:
+        pid = d["paper_id"]
+        pp = paper_map.get(pid)
+        if pp:
+            item = dict(pp)
+            item["saved"] = True
+            item["saved_at"] = d["created_at"]
+        else:
+            # Fallback – draft exists but paper is gone
+            print(f"⚠️ Paper {pid} missing – returning placeholder")
+            item = {
+                "paper_id": pid,
+                "title": "Missing paper (draft saved)",
+                "subject": "Unknown",
+                "level": "Unknown",
+                "year": None,
+                "paper_number": None,
+                "pdf_url": None,
+                "saved_at": d["created_at"],
+                "saved": True,
+            }
+        result.append(item)
+
+    print(f" Returning {len(result)} items")
+    return result
+
 
 @api_router.delete("/drafts/{paper_id}")
 async def delete_draft(paper_id: str, user: dict = Depends(get_current_user)):

@@ -33,12 +33,12 @@ const CLOUD_NAME = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME || "qsmemy5r";
 const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || "gcsharp";
 
 export default function EditProfile() {
-    const { user, setUser } = useAuth();
+    const { user, refresh } = useAuth(); // Changed from setUser to refresh
     const router = useRouter();
     const insets = useSafeAreaInsets();
 
     const [form, setForm] = useState({
-        name: "",
+        name: "", // This maps to full_name
         bio: "",
         institution: "",
         exam_level: "",
@@ -161,21 +161,19 @@ export default function EditProfile() {
         setSaving(true);
         try {
             const payload = {
-                name: form.name,
+                full_name: form.name, // Changed from name to full_name
                 bio: form.bio,
                 institution: form.institution,
                 exam_level: form.exam_level,
                 daily_commitment: form.daily_commitment,
                 picture: form.picture,
             };
-            // Matches the api() call signature used everywhere else in this
-            // app (e.g. src/auth.tsx's api<{...}>("/auth/session", { method, body })) —
-            // there is no separate api.put(...) helper.
-            const updatedUser = await api<any>("/auth/profile", {
+            await api<any>("/auth/profile", {
                 method: "PUT",
                 body: payload,
             });
-            setUser(updatedUser);
+            // Refresh user state instead of using setUser
+            await refresh();
             Alert.alert("Success", "Profile updated!");
             router.back();
         } catch (err) {
@@ -433,4 +431,4 @@ const styles = StyleSheet.create({
     },
     saveBtnDisabled: { opacity: 0.6 },
     saveBtnText: { color: "#fff", fontWeight: "700", fontSize: 16 },
-}); 
+});
