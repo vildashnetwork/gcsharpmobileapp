@@ -670,6 +670,76 @@ def _new_chat(session_id: str, system: str) -> SimpleLLM:
     chat.session_id = session_id
     return chat
 
+# async def get_current_user(authorization: Optional[str] = Header(None)):
+#     if not authorization or not authorization.startswith("Bearer "):
+#         raise HTTPException(status_code=401, detail="Missing token")
+#     token = authorization.split(" ", 1)[1]
+    
+#     user_id = None
+    
+#     try:
+#         decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+#         user_id = decoded.get("sub")
+#     except:
+#         session = await db.user_sessions.find_one({"session_token": token})
+#         if session:
+#             exp = session.get("expires_at")
+#             if exp:
+#                 if isinstance(exp, str):
+#                     try:
+#                         exp = datetime.fromisoformat(exp)
+#                     except:
+#                         pass
+#                 if exp and exp > datetime.utcnow():
+#                     user_id = session["user_id"]
+#                 else:
+#                     raise HTTPException(status_code=401, detail="Session expired")
+#             else:
+#                 user_id = session["user_id"]
+#         else:
+#             raise HTTPException(status_code=401, detail="Invalid token")
+    
+#     if not user_id:
+#         raise HTTPException(status_code=401, detail="Invalid token")
+    
+#     user = await db.users.find_one({"user_id": user_id})
+#     if not user:
+#         raise HTTPException(status_code=401, detail="User not found")
+    
+#     user.pop("_id", None)
+#     user.pop("password_hash", None)
+    
+#     user.setdefault("onboarded", False)
+#     user.setdefault("xp", 0)
+#     user.setdefault("level", 1)
+#     user.setdefault("streak", 0)
+#     user.setdefault("profile_photo", None)
+#     user.setdefault("exam_level", None)
+#     user.setdefault("full_name", user.get("full_name", "User"))
+#     user.setdefault("role", "student")
+#     user.setdefault("bio", "")
+#     user.setdefault("institution", "")
+#     user.setdefault("study_year", None)
+#     user.setdefault("subjects", [])
+#     user.setdefault("goals", [])
+#     user.setdefault("daily_commitment", "")
+#     user.setdefault("proficiency", "")
+#     user.setdefault("learning_style", "")
+#     user.setdefault("specialization", "")
+#     user.setdefault("accuracy", 0.0)
+#     user.setdefault("settings", DEFAULT_SETTINGS)
+#     user.setdefault("last_goal_met_date", None)
+    
+#     return user
+
+
+
+
+
+
+
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
@@ -706,6 +776,13 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     
+    # ---- FIX: Override full_name and profile_photo with current DB values ----
+    if "name" in user:
+        user["full_name"] = user["name"]
+    if "picture" in user:
+        user["profile_photo"] = user["picture"]
+    # ---------------------------------------------------------------------
+    
     user.pop("_id", None)
     user.pop("password_hash", None)
     
@@ -731,6 +808,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user.setdefault("last_goal_met_date", None)
     
     return user
+
 
 async def get_current_user_optional(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
