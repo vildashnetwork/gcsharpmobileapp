@@ -645,6 +645,9 @@ async def create_notification(user_id: str, message: str, type: str = "info", li
 # ============================================================
 # PUSH TOKEN REGISTRATION ENDPOINT
 # ============================================================
+# Auth Helpers
+
+# ============================================================
 
 class PushTokenRequest(BaseModel):
     token: str
@@ -665,6 +668,27 @@ async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_cu
     return {"ok": True}
 
 # ============================================================
+# ============================================================
+
+class PushTokenRequest(BaseModel):
+    token: str
+
+@api_router.post("/notifications/register-push-token")
+async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_current_user)):
+    await db.users.update_one(
+        {"user_id": user["user_id"]},
+        {"$set": {"expo_push_token": req.token}}
+    )
+    # Send a welcome push as a test
+    await create_notification(
+        user["user_id"],
+        "Push notifications enabled! You'll get study reminders and updates.",
+        "info",
+        "/dashboard"
+    )
+    return {"ok": True}
+
+
 # Local Math Solver
 # ============================================================
 
@@ -860,8 +884,6 @@ class HighlightVideoRequest(BaseModel):
     text: str
     context: Optional[str] = None
 
-# ============================================================
-# Auth Helpers
 # ============================================================
 
 def hash_pw(pw: str) -> str:
