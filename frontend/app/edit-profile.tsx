@@ -1,3 +1,4 @@
+
 // app/edit-profile.tsx
 import { useState, useEffect } from "react";
 import {
@@ -33,12 +34,12 @@ const CLOUD_NAME = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME || "qsmemy5r";
 const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || "gcsharp";
 
 export default function EditProfile() {
-    const { user, refresh } = useAuth(); // Changed from setUser to refresh
+    const { user, refresh } = useAuth(); // ✅ Use refresh instead of setUser
     const router = useRouter();
     const insets = useSafeAreaInsets();
 
     const [form, setForm] = useState({
-        name: "", // This maps to full_name
+        name: "", // This maps to full_name on the backend
         bio: "",
         institution: "",
         exam_level: "",
@@ -98,11 +99,13 @@ export default function EditProfile() {
         }
     };
 
+    // 🔧 Fixed pickImage with proper guard against undefined ImagePicker
     const pickImage = async (useCamera: boolean) => {
-        if (!ImagePicker?.requestMediaLibraryPermissionsAsync) {
+        // Check if ImagePicker is available (e.g., in Expo Go or dev build)
+        if (!ImagePicker || typeof ImagePicker.requestMediaLibraryPermissionsAsync !== "function") {
             Alert.alert(
                 "Unavailable",
-                "Image picker isn't available in this build. This usually means you're running Expo Go instead of a development build — try a rebuilt dev client."
+                "Image picker is not available. Please use a development build or update the app."
             );
             return;
         }
@@ -161,7 +164,7 @@ export default function EditProfile() {
         setSaving(true);
         try {
             const payload = {
-                full_name: form.name, // Changed from name to full_name
+                full_name: form.name, // ✅ Backend expects full_name
                 bio: form.bio,
                 institution: form.institution,
                 exam_level: form.exam_level,
@@ -172,7 +175,7 @@ export default function EditProfile() {
                 method: "PUT",
                 body: payload,
             });
-            // Refresh user state instead of using setUser
+            // ✅ Refresh user state instead of using setUser
             await refresh();
             Alert.alert("Success", "Profile updated!");
             router.back();

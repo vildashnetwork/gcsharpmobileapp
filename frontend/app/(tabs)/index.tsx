@@ -1,10 +1,6 @@
 
+// import { useEffect, useState, useCallback, useRef } from "react";
 
-
-
-
-
-// import { useEffect, useState, useCallback } from "react";
 // import {
 //   View,
 //   Text,
@@ -17,6 +13,8 @@
 //   Image,
 //   Modal,
 //   TouchableOpacity,
+//   Animated,
+//   Easing,
 // } from "react-native";
 // import { SafeAreaView } from "react-native-safe-area-context";
 // import { Ionicons } from "@expo/vector-icons";
@@ -25,7 +23,7 @@
 // import { useAuth } from "@/src/auth";
 // import { api } from "@/src/api";
 // import Svg, { Circle } from "react-native-svg";
-
+// import { Path } from "react-native-svg";
 // const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 // type DashboardStats = {
@@ -70,6 +68,46 @@
 //   created_at: string;
 // };
 
+
+
+// function GraduationCap({ size = 32, color = theme.brandPrimary }) {
+//   return (
+//     <Svg width={size} height={size} viewBox="0 0 512 512" fill="none">
+//       <Path
+//         d="M256 64L16 176l240 112 240-112L256 64zM16 176v176"
+//         stroke={color}
+//         strokeWidth="32"
+//         strokeLinecap="round"
+//         strokeLinejoin="round"
+//         fill="none"
+//       />
+//       <Path
+//         d="M464 288v128"
+//         stroke={color}
+//         strokeWidth="32"
+//         strokeLinecap="round"
+//         strokeLinejoin="round"
+//         fill="none"
+//       />
+//       <Path
+//         d="M256 400c-88.366 0-160-35.817-160-80s71.634-80 160-80 160 35.817 160 80-71.634 80-160 80z"
+//         stroke={color}
+//         strokeWidth="32"
+//         strokeLinecap="round"
+//         strokeLinejoin="round"
+//         fill="none"
+//       />
+//       <Path
+//         d="M256 400v-80"
+//         stroke={color}
+//         strokeWidth="32"
+//         strokeLinecap="round"
+//         strokeLinejoin="round"
+//         fill="none"
+//       />
+//     </Svg>
+//   );
+// }
 // // ----- XP Progress Ring -----
 // function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: number }) {
 //   const size = 100;
@@ -161,6 +199,34 @@
 //   );
 // }
 
+// // ----- Percentage Loader -----
+// function PercentageLoader({ progress }: { progress: number }) {
+//   const opacity = useRef(new Animated.Value(0)).current;
+
+//   useEffect(() => {
+//     Animated.timing(opacity, {
+//       toValue: 1,
+//       duration: 300,
+//       easing: Easing.inOut(Easing.ease),
+//       useNativeDriver: true,
+//     }).start();
+//   }, []);
+
+//   return (
+//     <Animated.View style={[styles.loaderOverlay, { opacity }]}>
+//       <View style={styles.loaderCard}>
+//         {/* <Ionicons name="sparkles" size={32} color={theme.brandPrimary} /> */}
+//         <GraduationCap size={40} color={theme.brandPrimary} />
+//         <Text style={styles.loaderPercent}>{Math.round(progress)}%</Text>
+//         <View style={styles.loaderBar}>
+//           <View style={[styles.loaderFill, { width: `${Math.min(100, progress)}%` }]} />
+//         </View>
+//         <Text style={styles.loaderText}>Loading dashboard…</Text>
+//       </View>
+//     </Animated.View>
+//   );
+// }
+
 // export default function Home() {
 //   const { user } = useAuth();
 //   const router = useRouter();
@@ -169,6 +235,7 @@
 //   const [courses, setCourses] = useState<Course[]>([]);
 //   const [refreshing, setRefreshing] = useState(false);
 //   const [loading, setLoading] = useState(true);
+//   const [loadingProgress, setLoadingProgress] = useState(0);
 //   const [error, setError] = useState<string | null>(null);
 //   const [unreadCount, setUnreadCount] = useState(0);
 //   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -193,26 +260,56 @@
 
 //   const loadData = useCallback(async () => {
 //     setError(null);
+//     setLoadingProgress(0);
+
+//     // Start with 10% for initializing
+//     setLoadingProgress(10);
+
 //     try {
-//       const [statsRes, leaderboardRes, coursesRes, notificationsRes] = await Promise.all([
-//         api<DashboardStats>("/dashboard/stats"),
-//         api<{ top: LeaderboardEntry[]; my_rank?: LeaderboardEntry }>("/leaderboard"),
-//         api<Course[]>("/courses"),
-//         api<{ notifications: Notification[] }>("/notifications"),
-//       ]);
+//       // Fetch stats (30% after this)
+//       const statsPromise = api<DashboardStats>("/dashboard/stats").then((res) => {
+//         setStats(res);
+//         setLoadingProgress((p) => Math.min(p + 20, 50));
+//         return res;
+//       });
 
-//       setStats(statsRes);
-//       setLeaderboard(leaderboardRes);
-//       setCourses(coursesRes.slice(0, 4));
+//       // Fetch leaderboard (50% after this)
+//       const leaderboardPromise = api<{ top: LeaderboardEntry[]; my_rank?: LeaderboardEntry }>("/leaderboard").then((res) => {
+//         setLeaderboard(res);
+//         setLoadingProgress((p) => Math.min(p + 20, 70));
+//         return res;
+//       });
 
-//       const notifs = notificationsRes.notifications || [];
-//       setNotifications(notifs);
-//       const unread = notifs.filter((n) => !n.read).length;
-//       setUnreadCount(unread);
+//       // Fetch courses (70% after this)
+//       const coursesPromise = api<Course[]>("/courses").then((res) => {
+//         setCourses(res.slice(0, 4));
+//         setLoadingProgress((p) => Math.min(p + 20, 85));
+//         return res;
+//       });
+
+//       // Fetch notifications (90% after this)
+//       const notificationsPromise = api<{ notifications: Notification[] }>("/notifications").then((res) => {
+//         const notifs = res.notifications || [];
+//         setNotifications(notifs);
+//         const unread = notifs.filter((n) => !n.read).length;
+//         setUnreadCount(unread);
+//         setLoadingProgress((p) => Math.min(p + 10, 95));
+//         return res;
+//       });
+
+//       // Wait for all to complete
+//       await Promise.all([statsPromise, leaderboardPromise, coursesPromise, notificationsPromise]);
+
+//       // Complete
+//       setLoadingProgress(100);
+
+//       // Small delay to show 100%
+//       await new Promise((resolve) => setTimeout(resolve, 300));
+
+//       setLoading(false);
 //     } catch (err: any) {
 //       console.log("Dashboard load error:", err);
 //       setError("Could not load some data. Pull to refresh.");
-//     } finally {
 //       setLoading(false);
 //     }
 //   }, []);
@@ -223,6 +320,9 @@
 
 //   const onRefresh = async () => {
 //     setRefreshing(true);
+//     // Reset loading state for refresh
+//     setLoading(true);
+//     setLoadingProgress(0);
 //     await loadData();
 //     setRefreshing(false);
 //   };
@@ -231,11 +331,9 @@
 //   const markAsRead = async (notificationId: string) => {
 //     try {
 //       await api.put(`/notifications/${notificationId}/read`);
-//       // Update local state
 //       setNotifications((prev) =>
 //         prev.map((n) => (n._id === notificationId ? { ...n, read: true } : n))
 //       );
-//       // Update unread count
 //       setUnreadCount((prev) => Math.max(0, prev - 1));
 //     } catch (err) {
 //       console.error("Failed to mark as read:", err);
@@ -246,7 +344,6 @@
 //   const markAllAsRead = async () => {
 //     try {
 //       await api.put("/notifications/read-all");
-//       // Update local state
 //       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
 //       setUnreadCount(0);
 //     } catch (err) {
@@ -271,18 +368,12 @@
 //     .slice(0, 2)
 //     .join("");
 
-//   if (loading) {
-//     return (
-//       <SafeAreaView edges={["top"]} style={[styles.root, { justifyContent: "center", alignItems: "center" }]}>
-//         <Text style={{ color: theme.onSurfaceMuted }}>Loading...</Text>
-//       </SafeAreaView>
-//     );
-//   }
-
 //   const data = stats;
 
 //   return (
 //     <SafeAreaView edges={["top"]} style={styles.root} testID="home-screen">
+//       {loading && <PercentageLoader progress={loadingProgress} />}
+
 //       <ScrollView
 //         contentContainerStyle={{ paddingBottom: 24 }}
 //         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.brandPrimary} />}
@@ -511,10 +602,8 @@
 //       >
 //         <View style={styles.modalOverlay}>
 //           <View style={styles.modalContainer}>
-//             {/* Handle / Drag indicator */}
 //             <View style={styles.modalHandle} />
 
-//             {/* Header */}
 //             <View style={styles.modalHeader}>
 //               <Text style={styles.modalTitle}>Notifications</Text>
 //               <View style={styles.modalHeaderActions}>
@@ -529,7 +618,6 @@
 //               </View>
 //             </View>
 
-//             {/* Notification list */}
 //             {loadingNotifications ? (
 //               <View style={styles.modalLoading}>
 //                 <Text style={styles.modalLoadingText}>Loading notifications...</Text>
@@ -920,7 +1008,58 @@
 //     backgroundColor: theme.brandPrimary,
 //     marginLeft: 4,
 //   },
+
+//   // ---- Percentage Loader styles ----
+//   loaderOverlay: {
+//     position: "absolute",
+//     top: 0,
+//     left: 0,
+//     right: 0,
+//     bottom: 0,
+//     backgroundColor: "rgba(255,255,255,0.9)",
+//     justifyContent: "center",
+//     alignItems: "center",
+//     zIndex: 100,
+//   },
+//   loaderCard: {
+//     backgroundColor: "#fff",
+//     borderRadius: radii.md,
+//     padding: spacing.xl,
+//     alignItems: "center",
+//     gap: 8,
+//     minWidth: 160,
+//     ...shadow1,
+//   },
+//   loaderPercent: {
+//     fontSize: 28,
+//     fontWeight: "800",
+//     color: theme.brand,
+//   },
+//   loaderBar: {
+//     width: 120,
+//     height: 4,
+//     backgroundColor: theme.surfaceTertiary,
+//     borderRadius: 2,
+//     overflow: "hidden",
+//   },
+//   loaderFill: {
+//     height: "100%",
+//     backgroundColor: theme.brandPrimary,
+//     borderRadius: 2,
+//   },
+//   loaderText: {
+//     fontSize: 13,
+//     color: theme.onSurfaceMuted,
+//   },
 // });
+
+
+
+
+
+
+
+
 
 
 
@@ -980,8 +1119,8 @@ import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
-import Svg, { Circle } from "react-native-svg";
-import  { Path } from "react-native-svg";
+import Svg, { Circle, Path } from "react-native-svg";
+
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
 type DashboardStats = {
@@ -1002,6 +1141,7 @@ type DashboardStats = {
 type LeaderboardEntry = {
   rank: number;
   name: string;
+  picture?: string;        // profile picture URL
   xp: number;
   level: number;
   is_me?: boolean;
@@ -1026,8 +1166,7 @@ type Notification = {
   created_at: string;
 };
 
-
-
+// ---- GraduationCap Icon ----
 function GraduationCap({ size = 32, color = theme.brandPrimary }) {
   return (
     <Svg width={size} height={size} viewBox="0 0 512 512" fill="none">
@@ -1066,6 +1205,7 @@ function GraduationCap({ size = 32, color = theme.brandPrimary }) {
     </Svg>
   );
 }
+
 // ----- XP Progress Ring -----
 function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: number }) {
   const size = 100;
@@ -1173,7 +1313,6 @@ function PercentageLoader({ progress }: { progress: number }) {
   return (
     <Animated.View style={[styles.loaderOverlay, { opacity }]}>
       <View style={styles.loaderCard}>
-        {/* <Ionicons name="sparkles" size={32} color={theme.brandPrimary} /> */}
         <GraduationCap size={40} color={theme.brandPrimary} />
         <Text style={styles.loaderPercent}>{Math.round(progress)}%</Text>
         <View style={styles.loaderBar}>
@@ -1185,6 +1324,18 @@ function PercentageLoader({ progress }: { progress: number }) {
   );
 }
 
+// ----- Helper to get initials -----
+const getInitials = (name: string) => {
+  if (!name) return "U";
+  return name
+    .split(" ")
+    .map((n) => n[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+};
+
+// ----- MAIN COMPONENT -----
 export default function Home() {
   const { user } = useAuth();
   const router = useRouter();
@@ -1219,33 +1370,27 @@ export default function Home() {
   const loadData = useCallback(async () => {
     setError(null);
     setLoadingProgress(0);
-
-    // Start with 10% for initializing
     setLoadingProgress(10);
 
     try {
-      // Fetch stats (30% after this)
       const statsPromise = api<DashboardStats>("/dashboard/stats").then((res) => {
         setStats(res);
         setLoadingProgress((p) => Math.min(p + 20, 50));
         return res;
       });
 
-      // Fetch leaderboard (50% after this)
       const leaderboardPromise = api<{ top: LeaderboardEntry[]; my_rank?: LeaderboardEntry }>("/leaderboard").then((res) => {
         setLeaderboard(res);
         setLoadingProgress((p) => Math.min(p + 20, 70));
         return res;
       });
 
-      // Fetch courses (70% after this)
       const coursesPromise = api<Course[]>("/courses").then((res) => {
         setCourses(res.slice(0, 4));
         setLoadingProgress((p) => Math.min(p + 20, 85));
         return res;
       });
 
-      // Fetch notifications (90% after this)
       const notificationsPromise = api<{ notifications: Notification[] }>("/notifications").then((res) => {
         const notifs = res.notifications || [];
         setNotifications(notifs);
@@ -1255,15 +1400,9 @@ export default function Home() {
         return res;
       });
 
-      // Wait for all to complete
       await Promise.all([statsPromise, leaderboardPromise, coursesPromise, notificationsPromise]);
-
-      // Complete
       setLoadingProgress(100);
-
-      // Small delay to show 100%
       await new Promise((resolve) => setTimeout(resolve, 300));
-
       setLoading(false);
     } catch (err: any) {
       console.log("Dashboard load error:", err);
@@ -1278,7 +1417,6 @@ export default function Home() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    // Reset loading state for refresh
     setLoading(true);
     setLoadingProgress(0);
     await loadData();
@@ -1320,12 +1458,6 @@ export default function Home() {
     }
   };
 
-  const initials = (user?.full_name || "U")
-    .split(" ")
-    .map((s) => s[0])
-    .slice(0, 2)
-    .join("");
-
   const data = stats;
 
   return (
@@ -1342,15 +1474,21 @@ export default function Home() {
           </View>
         )}
 
-        {/* Header */}
+        {/* ===== HEADER with profile image or fallback ===== */}
         <View style={styles.header}>
           <View style={styles.avatarRow}>
-            <View style={styles.avatar}>
-              <Text style={styles.avatarTxt}>{initials}</Text>
-            </View>
-            <View>
-              <Text style={styles.greet}>Hello, {user?.full_name?.split(" ")[0] || "Student"}</Text>
-              <Text style={styles.brandTop}>GCSHARP</Text>
+            <View style={styles.profileRow}>
+              {user?.profile_photo ? (
+                <Image source={{ uri: user.profile_photo }} style={styles.profileImage} />
+              ) : (
+                <View style={styles.profileFallback}>
+                  <Text style={styles.profileInitials}>{getInitials(user?.full_name || "User")}</Text>
+                </View>
+              )}
+              <View>
+                <Text style={styles.greet}>Hello, {user?.full_name?.split(" ")[0] || "Student"}</Text>
+                <Text style={styles.brandTop}>GCSHARP</Text>
+              </View>
             </View>
           </View>
           <Pressable style={styles.bell} onPress={() => setModalVisible(true)} testID="notifications-btn">
@@ -1521,7 +1659,7 @@ export default function Home() {
           <Text style={styles.emptyText}>No lessons yet. Check back soon.</Text>
         )}
 
-        {/* Leaderboard Preview */}
+        {/* ===== LEADERBOARD with profile pictures ===== */}
         <Text style={styles.sectionTitle}>Leaderboard</Text>
         <View style={styles.card}>
           {leaderboard?.my_rank ? (
@@ -1532,19 +1670,32 @@ export default function Home() {
             <Text style={styles.leaderboardRank}>Complete a quiz to see your rank</Text>
           )}
           {leaderboard?.top && leaderboard.top.length > 0 ? (
-            leaderboard.top.slice(0, 5).map((entry) => (
-              <View key={entry.rank} style={[styles.leaderboardRow, entry.is_me && styles.leaderboardMe]}>
-                <Text style={[styles.leaderboardRankNum, entry.rank <= 3 && styles.leaderboardTopRank]}>
-                  {entry.rank}
-                </Text>
-                <Text style={styles.leaderboardName} numberOfLines={1}>
-                  {entry.name}
-                  {entry.is_me && <Text style={styles.leaderboardYou}> (You)</Text>}
-                </Text>
-                <Text style={styles.leaderboardLevel}>Lvl {entry.level}</Text>
-                <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
-              </View>
-            ))
+            leaderboard.top.slice(0, 5).map((entry) => {
+              const isMe = entry.is_me;
+              return (
+                <View key={entry.rank} style={[styles.leaderboardRow, isMe && styles.leaderboardMe]}>
+                  <Text style={[styles.leaderboardRankNum, entry.rank <= 3 && styles.leaderboardTopRank]}>
+                    {entry.rank}
+                  </Text>
+                  {/* Profile picture or fallback initials */}
+                  {entry.picture ? (
+                    <Image source={{ uri: entry.picture }} style={styles.leaderboardAvatar} />
+                  ) : (
+                    <View style={styles.leaderboardAvatarFallback}>
+                      <Text style={styles.leaderboardAvatarText}>
+                        {getInitials(entry.name || "U")}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={[styles.leaderboardName, isMe && styles.leaderboardNameYou]} numberOfLines={1}>
+                    {entry.name}
+                    {isMe && <Text style={styles.leaderboardYou}> (You)</Text>}
+                  </Text>
+                  <Text style={styles.leaderboardLevel}>Lvl {entry.level}</Text>
+                  <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
+                </View>
+              );
+            })
           ) : (
             <Text style={styles.emptyText}>Be the first on the leaderboard — start practicing!</Text>
           )}
@@ -1629,6 +1780,7 @@ export default function Home() {
   );
 }
 
+// ===== STYLES =====
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.surface },
   errorBanner: {
@@ -1639,6 +1791,8 @@ const styles = StyleSheet.create({
     borderRadius: radii.sm,
   },
   errorText: { color: "#991B1B", fontSize: 14, textAlign: "center" },
+
+  // ---- Header ----
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1647,15 +1801,33 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   avatarRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: theme.brandTertiary,
+  profileRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  profileImage: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    borderWidth: 2,
+    borderColor: theme.brandPrimary,
+  },
+  profileFallback: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: theme.brand,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 2,
+    borderColor: theme.brandPrimary,
   },
-  avatarTxt: { color: theme.brand, fontWeight: "800" },
+  profileInitials: {
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: "bold",
+  },
   greet: { color: theme.onSurfaceMuted, fontSize: 12 },
   brandTop: { color: theme.brand, fontWeight: "800", fontSize: 16, letterSpacing: 1 },
   bell: {
@@ -1685,6 +1857,8 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
   },
+
+  // ---- Stats ----
   statsRow: {
     flexDirection: "row",
     gap: spacing.sm,
@@ -1701,6 +1875,8 @@ const styles = StyleSheet.create({
   },
   statValue: { fontSize: 20, fontWeight: "800", color: "#fff", marginTop: 4 },
   statLabel: { fontSize: 11, color: "#DBEAFE" },
+
+  // ---- Sections ----
   sectionTitle: {
     fontSize: 16,
     fontWeight: "800",
@@ -1709,6 +1885,8 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
     marginBottom: spacing.sm,
   },
+
+  // ---- Actions ----
   actions: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1734,6 +1912,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   actionLabel: { fontWeight: "700", color: theme.onSurface, flex: 1 },
+
+  // ---- Start Practice ----
   startPractice: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.md,
@@ -1747,6 +1927,8 @@ const styles = StyleSheet.create({
     ...shadow1,
   },
   startPracticeText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+
+  // ---- Cards ----
   card: {
     marginHorizontal: spacing.lg,
     marginBottom: 12,
@@ -1779,6 +1961,8 @@ const styles = StyleSheet.create({
   emptyChart: { color: theme.onSurfaceMuted, textAlign: "center", padding: spacing.md },
   detailsBtn: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-end", marginTop: 6 },
   detailsText: { color: theme.brandPrimary, fontWeight: "700", fontSize: 13 },
+
+  // ---- AI ----
   aiCard: { gap: spacing.sm },
   aiHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
   aiTitle: { fontWeight: "700", fontSize: 15, color: theme.onSurface },
@@ -1799,6 +1983,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
   },
   aiBtnText: { fontSize: 13, color: theme.brandPrimary, fontWeight: "600" },
+
+  // ---- XP Ring ----
   ringRow: { paddingHorizontal: spacing.lg, marginTop: 19 },
   ringCard: { alignItems: "center", paddingVertical: spacing.lg },
   ringTitle: { fontWeight: "700", fontSize: 15, color: theme.onSurface, marginBottom: spacing.sm },
@@ -1808,6 +1994,8 @@ const styles = StyleSheet.create({
   ringLevel: { fontSize: 28, fontWeight: "800", color: theme.brand, marginTop: -2 },
   ringXp: { fontSize: 11, color: theme.onSurfaceMuted },
   ringSub: { fontSize: 13, color: theme.onSurfaceMuted, marginTop: 6 },
+
+  // ---- Courses ----
   courseCard: {
     width: 140,
     backgroundColor: "#fff",
@@ -1828,6 +2016,8 @@ const styles = StyleSheet.create({
   courseTitle: { fontSize: 13, fontWeight: "600", color: theme.onSurface, paddingHorizontal: 8 },
   courseTeacher: { fontSize: 11, color: theme.onSurfaceMuted, paddingHorizontal: 8, paddingBottom: 8 },
   emptyText: { color: theme.onSurfaceMuted, textAlign: "center", padding: spacing.md },
+
+  // ---- Leaderboard ----
   leaderboardHeader: { flexDirection: "row", justifyContent: "flex-end", marginBottom: 4 },
   leaderboardRank: { fontSize: 13, color: theme.onSurfaceMuted },
   leaderboardRow: {
@@ -1838,15 +2028,43 @@ const styles = StyleSheet.create({
     borderBottomColor: theme.divider,
     gap: 8,
   },
-  leaderboardMe: { backgroundColor: theme.brandTertiary, marginHorizontal: -8, paddingHorizontal: 8, borderRadius: radii.sm },
+  leaderboardMe: {
+    backgroundColor: theme.brandTertiary,
+    marginHorizontal: -8,
+    paddingHorizontal: 8,
+    borderRadius: radii.sm,
+  },
   leaderboardRankNum: { width: 24, fontSize: 14, fontWeight: "700", color: theme.onSurfaceMuted, textAlign: "center" },
   leaderboardTopRank: { color: theme.warning },
   leaderboardName: { flex: 1, fontSize: 14, color: theme.onSurface },
+  leaderboardNameYou: { fontWeight: "700" },
   leaderboardYou: { fontSize: 11, color: theme.brandPrimary, fontWeight: "600" },
   leaderboardLevel: { fontSize: 12, color: theme.onSurfaceMuted },
   leaderboardXp: { fontSize: 13, fontWeight: "700", color: theme.brand },
+  leaderboardAvatar: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  leaderboardAvatarFallback: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: theme.brandTertiary,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: theme.border,
+  },
+  leaderboardAvatarText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: theme.brand,
+  },
 
-  // ---- Modal styles ----
+  // ---- Modal ----
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.5)",
@@ -1967,7 +2185,7 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
 
-  // ---- Percentage Loader styles ----
+  // ---- Percentage Loader ----
   loaderOverlay: {
     position: "absolute",
     top: 0,
