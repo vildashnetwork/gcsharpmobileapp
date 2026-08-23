@@ -2479,15 +2479,30 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
 
 
 @api_router.get("/leaderboard")
-async def leaderboard():
-    users = await db.users.find({"role": "student"}, {"_id": 0, "full_name": 1, "xp": 1, "level": 1, "user_id": 1}).to_list(500)
+async def leaderboard(user: dict = Depends(get_current_user_optional)):
+    users = await db.users.find(
+        {"role": "student"},
+        {"_id": 0, "full_name": 1, "xp": 1, "level": 1, "user_id": 1, "profile_photo": 1, "picture": 1}
+    ).to_list(500)
     users.sort(key=lambda u: u.get("xp", 0), reverse=True)
-    board = []
-    for i, u in enumerate(users):
-        entry = {"rank": i + 1, "name": u.get("full_name", "Student"), "xp": u.get("xp", 0), "level": u.get("level", 1)}
-        board.append(entry)
-    return {"top": board[:10]}
 
+    my_user_id = user["user_id"] if user else None
+    board = []
+    my_rank = None
+    for i, u in enumerate(users):
+        entry = {
+            "rank": i + 1,
+            "name": u.get("full_name", "Student"),
+            "picture": u.get("profile_photo") or u.get("picture") or None,
+            "xp": u.get("xp", 0),
+            "level": u.get("level", 1),
+            "is_me": u["user_id"] == my_user_id if my_user_id else False,
+        }
+        if entry["is_me"]:
+            my_rank = entry
+        board.append(entry)
+
+    return {"top": board[:10], "my_rank": my_rank}
 
 # ============================================================
 # Library Routes

@@ -1678,6 +1678,13 @@ export default function Home() {
                     {entry.rank}
                   </Text>
                   {/* Profile picture or fallback initials */}
+                  {/* {user?.profile_photo ? (
+                    <Image source={{ uri: user.profile_photo }} style={styles.profileImage} />
+                  ) : (
+                    <View style={styles.profileFallback}>
+                      <Text style={styles.profileInitials}>{getInitials(user?.full_name || "User")}</Text>
+                    </View>
+                  )} */}
                   {entry.picture ? (
                     <Image source={{ uri: entry.picture }} style={styles.leaderboardAvatar} />
                   ) : (
