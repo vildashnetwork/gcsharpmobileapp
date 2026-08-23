@@ -3023,31 +3023,82 @@ async def upload_pdf(request: Request, user: dict = Depends(get_current_user)):
 # Drafts
 # ============================================================
 
+# @api_router.get("/drafts")
+# async def list_drafts(user: dict = Depends(get_current_user)):
+#     drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+#     ids = [d["paper_id"] for d in drafts]
+#     papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
+#     pmap = {p["paper_id"]: p for p in papers}
+#     result = []
+#     for d in drafts:
+#         pp = pmap.get(d["paper_id"])
+#         if pp:
+#             pp = dict(pp)
+#             pp["saved"] = True
+#             pp["saved_at"] = d["created_at"]
+#             result.append(pp)
+#     return result
+
+# @api_router.post("/drafts")
+# async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
+#     existing = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": req.paper_id})
+#     if existing:
+#         await db.drafts.delete_one({"user_id": user["user_id"], "paper_id": req.paper_id})
+#         return {"saved": False}
+#     await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
+#                                 "created_at": datetime.utcnow().isoformat()})
+#     return {"saved": True}
+
+
+
+
+
+
 @api_router.get("/drafts")
 async def list_drafts(user: dict = Depends(get_current_user)):
-    drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    user_id = user["user_id"]
+    print(f"📡 /drafts called for user: {user_id}")
+
+    drafts = await db.drafts.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    print(f"📄 Found {len(drafts)} drafts")
+
+    if not drafts:
+        return []
+
     ids = [d["paper_id"] for d in drafts]
+    print(f"📋 Paper IDs: {ids}")
+
     papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
-    pmap = {p["paper_id"]: p for p in papers}
+    paper_map = {p["paper_id"]: p for p in papers}
+    print(f"📚 Found {len(papers)} matching papers")
+
     result = []
     for d in drafts:
-        pp = pmap.get(d["paper_id"])
+        pid = d["paper_id"]
+        pp = paper_map.get(pid)
         if pp:
-            pp = dict(pp)
-            pp["saved"] = True
-            pp["saved_at"] = d["created_at"]
-            result.append(pp)
+            item = dict(pp)
+            item["saved"] = True
+            item["saved_at"] = d["created_at"]
+        else:
+            # Fallback – draft exists but paper is gone
+            print(f"⚠️ Paper {pid} missing – returning placeholder")
+            item = {
+                "paper_id": pid,
+                "title": "Missing paper (draft saved)",
+                "subject": "Unknown",
+                "level": "Unknown",
+                "year": None,
+                "paper_number": None,
+                "pdf_url": None,
+                "saved_at": d["created_at"],
+                "saved": True,
+            }
+        result.append(item)
+
+    print(f" Returning {len(result)} items")
     return result
 
-@api_router.post("/drafts")
-async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
-    existing = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": req.paper_id})
-    if existing:
-        await db.drafts.delete_one({"user_id": user["user_id"], "paper_id": req.paper_id})
-        return {"saved": False}
-    await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
-                                "created_at": datetime.utcnow().isoformat()})
-    return {"saved": True}
 
 @api_router.delete("/drafts/{paper_id}")
 async def delete_draft(paper_id: str, user: dict = Depends(get_current_user)):
