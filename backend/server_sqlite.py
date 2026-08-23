@@ -1296,7 +1296,7 @@ async def register_with_pin(
         httponly=True,
         secure=True,
         samesite="none",
-        path="/,
+        path="/",
         max_age=7 * 24 * 60 * 60,
     )
 
@@ -2400,6 +2400,8 @@ async def get_library_course(course_id: str, user: dict = Depends(get_current_us
         c["liked"] = bool(liked)
         c["saved"] = bool(saved)
     return {"course": c}
+
+
 # ============================================================
 # Teacher Overview
 # ============================================================
