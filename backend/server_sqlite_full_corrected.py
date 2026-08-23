@@ -953,6 +953,7 @@ class ProfileUpdate(BaseModel):
     learning_style: Optional[str] = None
     specialization: Optional[str] = None
     full_name: Optional[str] = None
+    picture: Optional[str] = None
     onboarded: Optional[bool] = None
 
 class OnboardingIn(BaseModel):
