@@ -29,8 +29,8 @@ const DAILY_COMMITMENTS = [
     { label: "2 hours", value: "2 hours" },
 ];
 
-const CLOUD_NAME = process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME || "qsmemy5r";
-const UPLOAD_PRESET = process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || "gcsharp";
+const CLOUD_NAME = "qsmemy5r";
+const UPLOAD_PRESET = "gcsharp";
 
 export default function EditProfile() {
     const { user, refresh } = useAuth(); // ✅ Use refresh instead of setUser

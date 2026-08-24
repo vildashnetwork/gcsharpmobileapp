@@ -15,3 +15,5 @@ eas build:configure
 # 5. Or build for production
 
 eas build --platform android
+
+[expo.dev/accounts/gcsharp/projects/GCSHARP/builds/ef7786e3-91e6-4664-ba1c-8f0b40dc488f](https://expo.dev/accounts/gcsharp/projects/GCSHARP/builds/ef7786e3-91e6-4664-ba1c-8f0b40dc488f)

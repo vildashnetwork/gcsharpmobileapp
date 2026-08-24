@@ -4,8 +4,8 @@
     "slug": "GCSHARP",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/gcsharp.gif",
-    "scheme": "GCSHARP",
+    "icon": "./assets/images/gcsharp.png",
+    "scheme": "gcsharp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -14,7 +14,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/gcsharp.gif",
+        "foregroundImage": "./assets/images/gcsharp.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
@@ -24,21 +24,20 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/images/gcsharp.gif"
+      "favicon": "./assets/images/gcsharp.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/gcsharp.gif",
+          "image": "./assets/images/gcsharp.png",
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-video",
-      "expo-secure-store"
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true
@@ -46,7 +45,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "12f1d71b-9d81-4716-a43c-12e55ed105e2"
+        "projectId": "6d1d7945-b983-432e-af2a-9edc70fd3b63"
       }
     }
   }
