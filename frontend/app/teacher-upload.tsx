@@ -5,11 +5,14 @@ import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 
 const LEVELS = ["GCE O", "GCE A", "HND", "Concours"];
 
 export default function TeacherUpload() {
+  useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -103,25 +106,33 @@ function Field({ label, value, onChange, placeholder, multiline, testID, autoCap
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  title: { fontSize: 18, fontWeight: "800", color: theme.brand },
-  label: { color: theme.onSurfaceMuted, fontWeight: "700", fontSize: 12, textTransform: "uppercase", letterSpacing: 1 },
+  title: { fontSize: 18, fontWeight: "800", color: t.brand },
+  label: { color: t.onSurfaceMuted, fontWeight: "700", fontSize: 12, textTransform: "uppercase", letterSpacing: 1 },
   input: {
-    borderWidth: 1, borderColor: theme.border, backgroundColor: "#fff",
+    borderWidth: 1, borderColor: t.border, backgroundColor: t.surfaceSecondary,
     paddingHorizontal: spacing.md, paddingVertical: 12, borderRadius: radii.md,
-    fontSize: 15, color: theme.onSurface,
+    fontSize: 15, color: t.onSurface,
   },
-  chip: { flexShrink: 0, paddingHorizontal: 16, height: 36, borderRadius: radii.pill, borderWidth: 1, borderColor: theme.border, backgroundColor: "#fff", alignItems: "center", justifyContent: "center" },
-  chipActive: { borderColor: theme.brandPrimary, backgroundColor: theme.brandTertiary },
-  chipTxt: { color: theme.onSurface, fontWeight: "600", fontSize: 13 },
-  chipTxtActive: { color: theme.brand },
-  err: { color: theme.error },
-  ok: { color: theme.success, fontWeight: "700" },
+  chip: { flexShrink: 0, paddingHorizontal: 16, height: 36, borderRadius: radii.pill, borderWidth: 1, borderColor: t.border, backgroundColor: t.surfaceSecondary, alignItems: "center", justifyContent: "center" },
+  chipActive: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
+  chipTxt: { color: t.onSurface, fontWeight: "600", fontSize: 13 },
+  chipTxtActive: { color: t.brand },
+  err: { color: t.error },
+  ok: { color: t.success, fontWeight: "700" },
   submit: {
-    backgroundColor: theme.brand, paddingVertical: 14, borderRadius: radii.md,
+    backgroundColor: t.brand, paddingVertical: 14, borderRadius: radii.md,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, ...shadow1,
   },
-  submitTxt: { color: "#fff", fontWeight: "800" },
+  submitTxt: { color: t.onBrandPrimary, fontWeight: "800" },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

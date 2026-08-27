@@ -38,7 +38,7 @@
 //     return (
 //         <View style={styles.badge}>
 //             <View style={styles.item}>
-//                 <Ionicons name="flame" size={16} color={data.streak > 0 ? theme.warning : theme.muted} />
+//                 <Ionicons name="flame" size={16} color={data.streak > 0 ? theme.warning : theme.onSurfaceMuted} />
 //                 <Text style={styles.value}>{data.streak}</Text>
 //             </View>
 //             <View style={styles.divider} />
@@ -48,7 +48,7 @@
 //             </View>
 //             <View style={styles.divider} />
 //             <View style={styles.progressWrapper}>
-//                 <Ionicons name="target" size={14} color={theme.muted} />
+//                 <Ionicons name="target" size={14} color={theme.onSurfaceMuted} />
 //                 <View style={styles.progressBar}>
 //                     <View style={[styles.progressFill, { width: `${progressWidth}%` }]} />
 //                 </View>
@@ -106,6 +106,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { api } from '@/src/api';
 import { theme } from '@/src/theme';
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { StreakCelebration } from './StreakCelebration';
 
 type StreakData = {
@@ -166,7 +167,7 @@ export function StreakBadge({ onStreakComplete }: StreakBadgeProps = {}) {
         <>
             <View style={styles.badge}>
                 <View style={styles.item}>
-                    <Ionicons name="flame" size={16} color={data.streak > 0 ? theme.warning : theme.muted} />
+                    <Ionicons name="flame" size={16} color={data.streak > 0 ? theme.warning : theme.onSurfaceMuted} />
                     <Text style={styles.value}>{data.streak}</Text>
                 </View>
                 <View style={styles.divider} />
@@ -176,7 +177,7 @@ export function StreakBadge({ onStreakComplete }: StreakBadgeProps = {}) {
                 </View>
                 <View style={styles.divider} />
                 <View style={styles.progressWrapper}>
-                    <Ionicons name="locate-outline" size={14} color={theme.muted} />
+                    <Ionicons name="locate-outline" size={14} color={theme.onSurfaceMuted} />
                     <View style={styles.progressBar}>
                         <View style={[styles.progressFill, { width: `${progressWidth}%` }]} />
                     </View>
@@ -193,23 +194,31 @@ export function StreakBadge({ onStreakComplete }: StreakBadgeProps = {}) {
     );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
     badge: {
         flexDirection: 'row',
         alignItems: 'center',
-        backgroundColor: theme.surfaceSecondary,
+        backgroundColor: t.surfaceSecondary,
         paddingHorizontal: 10,
         paddingVertical: 6,
         borderRadius: 20,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         gap: 8,
     },
     item: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-    value: { fontWeight: '600', fontSize: 13, color: theme.onSurface },
-    divider: { width: 1, height: 16, backgroundColor: theme.border },
+    value: { fontWeight: '600', fontSize: 13, color: t.onSurface },
+    divider: { width: 1, height: 16, backgroundColor: t.border },
     progressWrapper: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-    progressBar: { width: 50, height: 4, backgroundColor: theme.surfaceTertiary, borderRadius: 2, overflow: 'hidden' },
-    progressFill: { height: '100%', backgroundColor: theme.brandPrimary },
-    percent: { fontSize: 9, color: theme.onSurfaceMuted },
+    progressBar: { width: 50, height: 4, backgroundColor: t.surfaceTertiary, borderRadius: 2, overflow: 'hidden' },
+    progressFill: { height: '100%', backgroundColor: t.brandPrimary },
+    percent: { fontSize: 9, color: t.onSurfaceMuted },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

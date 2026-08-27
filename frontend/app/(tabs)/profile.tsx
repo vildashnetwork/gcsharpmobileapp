@@ -1,25 +1,35 @@
 
 
-
-
-
-
-
-
-
-
 // // app/(tabs)/profile.tsx
-// import { View, Text, StyleSheet, Pressable, ScrollView } from "react-native";
+// import { View, Text, StyleSheet, Pressable, ScrollView, Image } from "react-native";
 // import { SafeAreaView } from "react-native-safe-area-context";
 // import { Ionicons } from "@expo/vector-icons";
-// import { useRouter } from "expo-router";
+// import { useRouter, useFocusEffect } from "expo-router";
+// import { useCallback } from "react";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { useAuth } from "@/src/auth";
 
-// export default function Profile() {   // <-- must be Profile, not EditProfile
-//   const { user, logout } = useAuth();
+// export default function Profile() {
+//   const { user, logout, refresh } = useAuth();
 //   const router = useRouter();
-//   const initials = (user?.full_name || "U").split(" ").map((s) => s[0]).slice(0, 2).join("");
+
+//   // 🔄 Re‑fetch user data every time the screen is focused
+//   useFocusEffect(
+//     useCallback(() => {
+//       refresh();
+//     }, [refresh])
+//   );
+
+//   const getInitials = (name?: string) => {
+//     if (!name) return "U";
+//     return name
+//       .split(" ")
+//       .map((s) => s[0])
+//       .slice(0, 2)
+//       .join("")
+//       .toUpperCase();
+//   };
 
 //   const doLogout = async () => {
 //     await logout();
@@ -29,11 +39,22 @@
 //   return (
 //     <SafeAreaView edges={["top"]} style={styles.root} testID="profile-screen">
 //       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 32 }}>
+//         {/* Profile header with image or fallback */}
 //         <View style={styles.head}>
-//           <View style={styles.avatar}><Text style={styles.avatarTxt}>{initials}</Text></View>
+//           <Pressable onPress={() => router.push("/edit-profile")} style={styles.avatarTouch}>
+//             {user?.profile_photo ? (
+//               <Image source={{ uri: user.profile_photo }} style={styles.avatarImage} />
+//             ) : (
+//               <View style={styles.avatarFallback}>
+//                 <Text style={styles.avatarTxt}>{getInitials(user?.full_name)}</Text>
+//               </View>
+//             )}
+//           </Pressable>
 //           <Text style={styles.name}>{user?.full_name}</Text>
 //           <Text style={styles.email}>{user?.email}</Text>
-//           <View style={styles.pill}><Text style={styles.pillTxt}>{user?.exam_level ?? "GCE A Level"}</Text></View>
+//           <View style={styles.pill}>
+//             <Text style={styles.pillTxt}>{user?.exam_level ?? "GCE A Level"}</Text>
+//           </View>
 //         </View>
 
 //         <View style={styles.metricsRow}>
@@ -78,27 +99,54 @@
 // const styles = StyleSheet.create({
 //   root: { flex: 1, backgroundColor: theme.surface },
 //   head: { alignItems: "center", padding: spacing.lg, gap: 6 },
-//   avatar: {
-//     width: 84, height: 84, borderRadius: 42, backgroundColor: theme.brand,
-//     alignItems: "center", justifyContent: "center",
+//   avatarTouch: {},
+//   avatarImage: {
+//     width: 84,
+//     height: 84,
+//     borderRadius: 42,
+//     borderWidth: 2,
+//     borderColor: theme.brandPrimary,
+//   },
+//   avatarFallback: {
+//     width: 84,
+//     height: 84,
+//     borderRadius: 42,
+//     backgroundColor: theme.brand,
+//     alignItems: "center",
+//     justifyContent: "center",
+//     borderWidth: 2,
+//     borderColor: theme.brandPrimary,
 //   },
 //   avatarTxt: { color: "#fff", fontSize: 32, fontWeight: "800" },
 //   name: { fontSize: 20, fontWeight: "800", color: theme.onSurface, marginTop: 4 },
 //   email: { color: theme.onSurfaceMuted },
 //   pill: {
-//     marginTop: 6, paddingHorizontal: 12, paddingVertical: 4, borderRadius: radii.pill,
+//     marginTop: 6,
+//     paddingHorizontal: 12,
+//     paddingVertical: 4,
+//     borderRadius: radii.pill,
 //     backgroundColor: theme.brandTertiary,
 //   },
 //   pillTxt: { color: theme.onBrandTertiary, fontWeight: "700", fontSize: 12 },
 //   metricsRow: { flexDirection: "row", gap: spacing.sm },
 //   metric: {
-//     flex: 1, backgroundColor: "#fff", padding: spacing.md, borderRadius: radii.md, alignItems: "center", ...shadow1,
+//     flex: 1,
+//     backgroundColor: "#fff",
+//     padding: spacing.md,
+//     borderRadius: radii.md,
+//     alignItems: "center",
+//     ...shadow1,
 //   },
 //   metricVal: { fontSize: 20, fontWeight: "800", color: theme.onSurface, marginTop: 4 },
 //   metricLabel: { color: theme.onSurfaceMuted, fontSize: 12 },
 //   row: {
-//     flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "#fff",
-//     padding: spacing.lg, borderRadius: radii.md, ...shadow1,
+//     flexDirection: "row",
+//     alignItems: "center",
+//     gap: 12,
+//     backgroundColor: "#fff",
+//     padding: spacing.lg,
+//     borderRadius: radii.md,
+//     ...shadow1,
 //   },
 //   rowTxt: { flex: 1, fontWeight: "600", color: theme.onSurface, fontSize: 15 },
 // });
@@ -114,18 +162,64 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
 // app/(tabs)/profile.tsx
-import { View, Text, StyleSheet, Pressable, ScrollView, Image } from "react-native";
+import { useCallback, useEffect, useState } from "react";
+import { View, Text, StyleSheet, Pressable, ScrollView, Image, Switch } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
-import { useCallback } from "react";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
+import { useThemeMode, type ThemePref } from "@/src/theme-context";
 import { useAuth } from "@/src/auth";
+import { storage } from "@/src/utils/storage";
+
+const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
 
 export default function Profile() {
+  useTheme(); // re-render this screen when light/dark changes
+  const { pref, setPref } = useThemeMode();
   const { user, logout, refresh } = useAuth();
   const router = useRouter();
+
+  // === Offline mode toggle ===
+  const [isOffline, setIsOffline] = useState(false);
+  const [modeLoading, setModeLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await storage.getItem<boolean>(OFFLINE_MODE_KEY, false);
+        setIsOffline(!!saved);
+      } catch (e) {
+        console.warn("Failed to load offline mode preference", e);
+      } finally {
+        setModeLoading(false);
+      }
+    })();
+  }, []);
+
+  const toggleOfflineMode = async (value: boolean) => {
+    setIsOffline(value); // optimistic update
+    try {
+      await storage.setItem(OFFLINE_MODE_KEY, value);
+    } catch (e) {
+      console.warn("Failed to persist offline mode preference", e);
+      setIsOffline(!value); // revert on failure
+    }
+  };
 
   // 🔄 Re‑fetch user data every time the screen is focused
   useFocusEffect(
@@ -170,6 +264,78 @@ export default function Profile() {
           </View>
         </View>
 
+        {/* Appearance: Light / Dark / System */}
+        <View style={styles.modeCard} testID="theme-toggle-card">
+          <View style={styles.modeLeft}>
+            <View style={[styles.modeIconWrap, { backgroundColor: theme.brandTertiary }]}>
+              <Ionicons
+                name={pref === "dark" ? "moon" : pref === "light" ? "sunny" : "contrast-outline"}
+                size={18}
+                color={theme.onBrandTertiary}
+              />
+            </View>
+            <View>
+              <Text style={styles.modeTitle}>Appearance</Text>
+              <Text style={styles.modeSub}>
+                {pref === "system" ? "Following your device setting" : pref === "dark" ? "Dark theme" : "Light theme"}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.segRow}>
+            {(
+              [
+                { key: "light", icon: "sunny-outline" as const },
+                { key: "dark", icon: "moon-outline" as const },
+                { key: "system", icon: "phone-portrait-outline" as const },
+              ] as { key: ThemePref; icon: any }[]
+            ).map((opt) => {
+              const active = pref === opt.key;
+              return (
+                <Pressable
+                  key={opt.key}
+                  testID={`theme-${opt.key}`}
+                  onPress={() => setPref(opt.key)}
+                  style={[styles.segBtn, active && styles.segBtnActive]}
+                  hitSlop={4}
+                >
+                  <Ionicons
+                    name={opt.icon}
+                    size={15}
+                    color={active ? theme.onBrandPrimary : theme.onSurfaceMuted}
+                  />
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* Online / Offline mode toggle */}
+        <View style={styles.modeCard} testID="mode-toggle-card">
+          <View style={styles.modeLeft}>
+            <View style={[styles.modeIconWrap, { backgroundColor: isOffline ? theme.borderStrong : theme.brandTertiary }]}>
+              <Ionicons
+                name={isOffline ? "cloud-offline-outline" : "cloud-done-outline"}
+                size={18}
+                color={isOffline ? theme.onSurfaceMuted : theme.onBrandTertiary}
+              />
+            </View>
+            <View>
+              <Text style={styles.modeTitle}>{isOffline ? "Offline Mode" : "Online Mode"}</Text>
+              <Text style={styles.modeSub}>
+                {isOffline ? "Using downloaded content only" : "Syncing with the server"}
+              </Text>
+            </View>
+          </View>
+          <Switch
+            testID="offline-mode-switch"
+            value={!isOffline}
+            onValueChange={(online) => toggleOfflineMode(!online)}
+            disabled={modeLoading}
+            trackColor={{ false: theme.borderStrong, true: theme.brandPrimary }}
+            thumbColor="#fff"
+          />
+        </View>
+
         <View style={styles.metricsRow}>
           <Metric icon="flame" label="Streak" value={String(user?.streak ?? 0)} tint={theme.warning} />
           <Metric icon="trophy-outline" label="Level" value={String(user?.level ?? 1)} tint={theme.brandPrimary} />
@@ -209,8 +375,8 @@ function Row({ icon, label, onPress, danger, testID }: any) {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   head: { alignItems: "center", padding: spacing.lg, gap: 6 },
   avatarTouch: {},
   avatarImage: {
@@ -218,48 +384,92 @@ const styles = StyleSheet.create({
     height: 84,
     borderRadius: 42,
     borderWidth: 2,
-    borderColor: theme.brandPrimary,
+    borderColor: t.brandPrimary,
   },
   avatarFallback: {
     width: 84,
     height: 84,
     borderRadius: 42,
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 2,
-    borderColor: theme.brandPrimary,
+    borderColor: t.brandPrimary,
   },
-  avatarTxt: { color: "#fff", fontSize: 32, fontWeight: "800" },
-  name: { fontSize: 20, fontWeight: "800", color: theme.onSurface, marginTop: 4 },
-  email: { color: theme.onSurfaceMuted },
+  avatarTxt: { color: t.onBrandPrimary, fontSize: 32, fontWeight: "800" },
+  name: { fontSize: 20, fontWeight: "800", color: t.onSurface, marginTop: 4 },
+  email: { color: t.onSurfaceMuted },
   pill: {
     marginTop: 6,
     paddingHorizontal: 12,
     paddingVertical: 4,
     borderRadius: radii.pill,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
   },
-  pillTxt: { color: theme.onBrandTertiary, fontWeight: "700", fontSize: 12 },
+  pillTxt: { color: t.onBrandTertiary, fontWeight: "700", fontSize: 12 },
+  modeCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: t.surfaceSecondary,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    ...shadow1,
+  },
+  modeLeft: { flexDirection: "row", alignItems: "center", gap: 10, flexShrink: 1 },
+  modeIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modeTitle: { fontWeight: "700", color: t.onSurface, fontSize: 14 },
+  modeSub: { color: t.onSurfaceMuted, fontSize: 12, marginTop: 1 },
+  segRow: {
+    flexDirection: "row",
+    backgroundColor: t.surfaceTertiary,
+    borderRadius: radii.pill,
+    padding: 2,
+    gap: 2,
+  },
+  segBtn: {
+    width: 32,
+    height: 28,
+    borderRadius: radii.pill,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  segBtnActive: {
+    backgroundColor: t.brandPrimary,
+  },
   metricsRow: { flexDirection: "row", gap: spacing.sm },
   metric: {
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     alignItems: "center",
     ...shadow1,
   },
-  metricVal: { fontSize: 20, fontWeight: "800", color: theme.onSurface, marginTop: 4 },
-  metricLabel: { color: theme.onSurfaceMuted, fontSize: 12 },
+  metricVal: { fontSize: 20, fontWeight: "800", color: t.onSurface, marginTop: 4 },
+  metricLabel: { color: t.onSurfaceMuted, fontSize: 12 },
   row: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.lg,
     borderRadius: radii.md,
     ...shadow1,
   },
-  rowTxt: { flex: 1, fontWeight: "600", color: theme.onSurface, fontSize: 15 },
+  rowTxt: { flex: 1, fontWeight: "600", color: t.onSurface, fontSize: 15 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

@@ -366,13 +366,13 @@
 //                     )}
 //                     {playing && !speaking && !muted && hasNarration && (
 //                         <View style={styles.statusBar}>
-//                             <Ionicons name="timer" size={14} color={theme.muted} />
+//                             <Ionicons name="timer" size={14} color={theme.onSurfaceMuted} />
 //                             <Text style={styles.statusText}>Waiting to narrate...</Text>
 //                         </View>
 //                     )}
 //                     {muted && (
 //                         <View style={styles.statusBar}>
-//                             <Ionicons name="volume-off" size={14} color={theme.muted} />
+//                             <Ionicons name="volume-off" size={14} color={theme.onSurfaceMuted} />
 //                             <Text style={styles.statusText}>Narration muted</Text>
 //                         </View>
 //                     )}
@@ -400,7 +400,7 @@
 //                             pressed && styles.controlButtonPressed,
 //                         ]}
 //                     >
-//                         <Ionicons name="play-skip-back" size={20} color={idx === 0 ? theme.muted : theme.onSurface} />
+//                         <Ionicons name="play-skip-back" size={20} color={idx === 0 ? theme.onSurfaceMuted : theme.onSurface} />
 //                     </Pressable>
 
 //                     <Pressable
@@ -419,7 +419,7 @@
 //                             pressed && styles.controlButtonPressed,
 //                         ]}
 //                     >
-//                         <Ionicons name="play-skip-forward" size={20} color={idx === totalScenes - 1 ? theme.muted : theme.onSurface} />
+//                         <Ionicons name="play-skip-forward" size={20} color={idx === totalScenes - 1 ? theme.onSurfaceMuted : theme.onSurface} />
 //                     </Pressable>
 
 //                     <Pressable
@@ -743,6 +743,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
 import { theme, spacing, radii, shadow1 } from '@/src/theme';
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 
 const RATE_STEPS = [0.75, 1, 1.25, 1.5];
 const { width } = Dimensions.get('window');
@@ -1145,13 +1146,13 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
                     )}
                     {playing && !speaking && !muted && hasNarration && (
                         <View style={styles.statusBar}>
-                            <Ionicons name="timer" size={14} color={theme.muted} />
+                            <Ionicons name="timer" size={14} color={theme.onSurfaceMuted} />
                             <Text style={styles.statusText}>Waiting to narrate...</Text>
                         </View>
                     )}
                     {muted && (
                         <View style={styles.statusBar}>
-                            <Ionicons name="volume-off" size={14} color={theme.muted} />
+                            <Ionicons name="volume-off" size={14} color={theme.onSurfaceMuted} />
                             <Text style={styles.statusText}>Narration muted</Text>
                         </View>
                     )}
@@ -1179,7 +1180,7 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
                             pressed && styles.controlButtonPressed,
                         ]}
                     >
-                        <Ionicons name="play-skip-back" size={20} color={idx === 0 ? theme.muted : theme.onSurface} />
+                        <Ionicons name="play-skip-back" size={20} color={idx === 0 ? theme.onSurfaceMuted : theme.onSurface} />
                     </Pressable>
 
                     <Pressable
@@ -1198,7 +1199,7 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
                             pressed && styles.controlButtonPressed,
                         ]}
                     >
-                        <Ionicons name="play-skip-forward" size={20} color={idx === totalScenes - 1 ? theme.muted : theme.onSurface} />
+                        <Ionicons name="play-skip-forward" size={20} color={idx === totalScenes - 1 ? theme.onSurfaceMuted : theme.onSurface} />
                     </Pressable>
 
                     <Pressable
@@ -1251,12 +1252,12 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
     );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
     container: {
-        backgroundColor: '#fff',
+        backgroundColor: t.surfaceSecondary,
         borderRadius: radii.md,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         overflow: 'hidden',
         ...shadow1,
         marginHorizontal: spacing.md,
@@ -1266,7 +1267,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         gap: 8,
     },
-    loadingText: { color: theme.onSurfaceMuted },
+    loadingText: { color: t.onSurfaceMuted },
     surface: {
         backgroundColor: '#0A192F',
         paddingHorizontal: spacing.md,
@@ -1297,7 +1298,7 @@ const styles = StyleSheet.create({
         paddingVertical: 2,
         borderRadius: 12,
     },
-    badgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
+    badgeText: { color: t.onBrandPrimary, fontSize: 9, fontWeight: '700' },
     sceneCounter: { color: '#94a3b8', fontSize: 10 },
     heading: {
         color: '#93c5fd',
@@ -1354,7 +1355,7 @@ const styles = StyleSheet.create({
     },
     progressFill: {
         height: '100%',
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
     },
     statusBar: {
         position: 'absolute',
@@ -1381,8 +1382,8 @@ const styles = StyleSheet.create({
         height: 6,
         borderRadius: 3,
     },
-    dotActive: { backgroundColor: theme.brandPrimary, width: 12 },
-    dotCompleted: { backgroundColor: theme.brandPrimary, opacity: 0.4 },
+    dotActive: { backgroundColor: t.brandPrimary, width: 12 },
+    dotCompleted: { backgroundColor: t.brandPrimary, opacity: 0.4 },
     dotInactive: { backgroundColor: '#94a3b8' },
     controls: {
         paddingHorizontal: spacing.sm,
@@ -1404,7 +1405,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
     },
     controlButtonDisabled: { opacity: 0.3 },
     controlButtonPressed: { opacity: 0.7 },
@@ -1412,42 +1413,50 @@ const styles = StyleSheet.create({
         width: 48,
         height: 48,
         borderRadius: 24,
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
         alignItems: 'center',
         justifyContent: 'center',
         ...shadow1,
     },
     playButtonPressed: { opacity: 0.8 },
-    rateText: { fontSize: 13, fontWeight: '600', color: theme.onSurface },
-    activeControl: { borderColor: theme.brandPrimary, backgroundColor: theme.brandTertiary },
+    rateText: { fontSize: 13, fontWeight: '600', color: t.onSurface },
+    activeControl: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
     progressBarBottom: {
         marginTop: 4,
         height: 3,
-        backgroundColor: theme.surfaceTertiary,
+        backgroundColor: t.surfaceTertiary,
         borderRadius: 2,
         overflow: 'hidden',
     },
     progressFillBottom: {
         height: '100%',
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
     },
     sceneLabels: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         marginTop: 2,
     },
-    labelText: { fontSize: 9, color: theme.onSurfaceMuted, opacity: 0.5 },
-    labelCenter: { color: theme.brandPrimary, opacity: 0.6 },
+    labelText: { fontSize: 9, color: t.onSurfaceMuted, opacity: 0.5 },
+    labelCenter: { color: t.brandPrimary, opacity: 0.6 },
     questionContainer: {
         flexDirection: 'row',
         gap: 6,
-        backgroundColor: theme.surface,
+        backgroundColor: t.surface,
         padding: 8,
         borderRadius: radii.sm,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         marginTop: 4,
     },
-    questionLabel: { fontWeight: '700', color: theme.onSurface, fontSize: 13 },
-    questionText: { flex: 1, color: theme.onSurfaceMuted, fontSize: 12 },
+    questionLabel: { fontWeight: '700', color: t.onSurface, fontSize: 13 },
+    questionText: { flex: 1, color: t.onSurfaceMuted, fontSize: 12 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

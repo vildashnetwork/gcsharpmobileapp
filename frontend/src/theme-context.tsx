@@ -1,0 +1,94 @@
+/**
+ * Theme context — mode controller (light / dark) with persistence.
+ *
+ * - Persists the user's choice in AsyncStorage ("light" | "dark" | "system").
+ * - "system" follows the OS appearance via useColorScheme().
+ * - Exposes `useTheme()` (current palette) and `useThemeMode()` (mode +
+ *   setter) so any screen can read colors or toggle the mode.
+ */
+
+import React, {
+    createContext,
+    useCallback,
+    useContext,
+    useEffect,
+    useMemo,
+    useState,
+    useSyncExternalStore,
+} from "react";
+import { useColorScheme } from "react-native";
+import {
+    getPaletteSnapshot,
+    setThemeMode,
+    subscribeTheme,
+    type Palette,
+} from "./theme";
+import { storage } from "@/src/utils/storage";
+
+const THEME_PREF_KEY = "gcsmart_theme_pref";
+
+export type ThemePref = "light" | "dark" | "system";
+
+type ModeCtx = {
+    pref: ThemePref;
+    resolved: "light" | "dark";
+    setPref: (p: ThemePref) => void;
+    /** Convenience toggle used by simple switches. */
+    toggle: () => void;
+};
+
+const ModeCtx = createContext<ModeCtx | null>(null);
+
+export function ThemeProvider({ children }: { children: React.ReactNode }) {
+    const systemScheme = useColorScheme();
+    const [pref, setPrefState] = useState<ThemePref>("system");
+
+    // Load the persisted preference once.
+    useEffect(() => {
+        (async () => {
+            const saved = await storage.getItem<ThemePref>(THEME_PREF_KEY, "system");
+            setPrefState(saved === "light" || saved === "dark" ? saved : "system");
+        })();
+    }, []);
+
+    const resolved: "light" | "dark" =
+        pref === "system" ? (systemScheme === "dark" ? "dark" : "light") : pref;
+
+    // Push the resolved mode into the reactive palette singleton.
+    useEffect(() => {
+        setThemeMode(resolved);
+    }, [resolved]);
+
+    const setPref = useCallback((p: ThemePref) => {
+        setPrefState(p);
+        void storage.setItem(THEME_PREF_KEY, p);
+    }, []);
+
+    const toggle = useCallback(() => {
+        setPrefState((prev) => {
+            const next: ThemePref = prev === "dark" ? "light" : "dark";
+            void storage.setItem(THEME_PREF_KEY, next);
+            return next;
+        });
+    }, []);
+
+    const value = useMemo(
+        () => ({ pref, resolved, setPref, toggle }),
+        [pref, resolved, setPref, toggle]
+    );
+
+    // createElement (not JSX) so auto-formatters can't mangle the provider.
+    return React.createElement(ModeCtx.Provider, { value }, children);
+}
+
+/** Current palette — re-renders the caller whenever the mode changes. */
+export function useTheme(): Palette {
+    return useSyncExternalStore(subscribeTheme, getPaletteSnapshot, getPaletteSnapshot);
+}
+
+/** Mode controller — for toggles/segmented controls. */
+export function useThemeMode(): ModeCtx {
+    const ctx = useContext(ModeCtx);
+    if (!ctx) throw new Error("useThemeMode must be used within a ThemeProvider");
+    return ctx;
+}

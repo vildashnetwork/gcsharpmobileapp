@@ -4,6 +4,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 
 // export default function Stats() {
@@ -162,11 +163,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 
 const TARGET_PAPERS = 20;
 
 export default function Stats() {
+  useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
   const [data, setData] = useState<any>(null);
   const [range, setRange] = useState<"Daily" | "Weekly">("Daily");
@@ -254,7 +257,7 @@ export default function Stats() {
             <Text style={styles.cardTitle}>Level {level}</Text>
             <View style={{ flexDirection: "row", gap: 12 }}>
               <View style={styles.streakItem}>
-                <Ionicons name="flame" size={18} color={data.streak > 0 ? theme.warning : theme.muted} />
+                <Ionicons name="flame" size={18} color={data.streak > 0 ? theme.warning : theme.onSurfaceMuted} />
                 <Text style={styles.streakValue}>{data.streak}</Text>
               </View>
               <View style={styles.streakItem}>
@@ -309,8 +312,8 @@ export default function Stats() {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -318,20 +321,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
-  brand: { fontSize: 16, fontWeight: "800", color: theme.brand, letterSpacing: 1 },
-  h1: { fontSize: 24, fontWeight: "800", color: theme.onSurface },
-  sub: { color: theme.onSurfaceMuted, marginTop: 2 },
+  brand: { fontSize: 16, fontWeight: "800", color: t.brand, letterSpacing: 1 },
+  h1: { fontSize: 24, fontWeight: "800", color: t.onSurface },
+  sub: { color: t.onSurfaceMuted, marginTop: 2 },
   card: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.lg,
     borderRadius: radii.md,
     ...shadow1,
     gap: 4,
   },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  cardTitle: { fontWeight: "700", color: theme.onSurface },
+  cardTitle: { fontWeight: "700", color: t.onSurface },
   big: { fontSize: 40, fontWeight: "800", marginTop: 6 },
-  metaMuted: { color: theme.onSurfaceMuted, fontSize: 13 },
+  metaMuted: { color: t.onSurfaceMuted, fontSize: 13 },
   progressContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -341,32 +344,32 @@ const styles = StyleSheet.create({
   progressBg: {
     flex: 1,
     height: 8,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
     borderRadius: 4,
     overflow: "hidden",
   },
   progressFg: {
     height: 8,
     borderRadius: 4,
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
   },
   progressLabel: {
     fontSize: 13,
     fontWeight: "600",
-    color: theme.onSurface,
+    color: t.onSurface,
     minWidth: 40,
     textAlign: "right",
   },
   toggle: {
     flexDirection: "row",
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
     borderRadius: radii.pill,
     padding: 3,
   },
   togItem: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radii.pill },
-  togActive: { backgroundColor: theme.brandTertiary },
-  togTxt: { color: theme.onSurfaceMuted, fontSize: 12, fontWeight: "600" },
-  togTxtActive: { color: theme.brand, fontWeight: "800" },
+  togActive: { backgroundColor: t.brandTertiary },
+  togTxt: { color: t.onSurfaceMuted, fontSize: 12, fontWeight: "600" },
+  togTxtActive: { color: t.brand, fontWeight: "800" },
   chart: {
     flexDirection: "row",
     alignItems: "flex-end",
@@ -375,12 +378,20 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   barCol: { alignItems: "center", flex: 1, justifyContent: "flex-end" },
-  bar: { width: 20, backgroundColor: theme.brandPrimary, borderRadius: 6 },
-  barVal: { fontSize: 10, color: theme.onSurfaceMuted, marginBottom: 4 },
-  barLabel: { fontSize: 11, color: theme.onSurfaceMuted, marginTop: 6 },
+  bar: { width: 20, backgroundColor: t.brandPrimary, borderRadius: 6 },
+  barVal: { fontSize: 10, color: t.onSurfaceMuted, marginBottom: 4 },
+  barLabel: { fontSize: 11, color: t.onSurfaceMuted, marginTop: 6 },
   streakItem: { flexDirection: "row", alignItems: "center", gap: 4 },
-  streakValue: { fontWeight: "700", fontSize: 16, color: theme.onSurface },
+  streakValue: { fontWeight: "700", fontSize: 16, color: t.onSurface },
   xpRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 4 },
-  xpLabel: { fontWeight: "600", color: theme.onSurface },
-  xpToNext: { color: theme.onSurfaceMuted, fontSize: 13 },
+  xpLabel: { fontWeight: "600", color: t.onSurface },
+  xpToNext: { color: t.onSurfaceMuted, fontSize: 13 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

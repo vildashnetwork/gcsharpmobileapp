@@ -20,6 +20,8 @@ import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api, API_BASE, readToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { humanize } from "@/src/format";
@@ -87,6 +89,7 @@ function sortAndDeduplicateSessions(input: Session[]): Session[] {
 }
 
 export default function AITutor() {
+  useTheme(); // re-render this screen when light/dark changes
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ seed?: string }>();
@@ -602,69 +605,69 @@ export default function AITutor() {
 }
 
 // ----- Styles -----
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
   menuBtn: { padding: 4 },
   headerTitle: {
     flex: 1,
     fontSize: 18,
     fontWeight: "700",
-    color: theme.brand,
+    color: t.brand,
     marginLeft: spacing.sm,
     marginRight: spacing.sm,
   },
   newChatBtn: { padding: 4 },
   empty: { alignItems: "center", padding: spacing.xl, gap: 6 },
-  emptyT: { fontWeight: "800", fontSize: 18, color: theme.onSurface, marginTop: 6 },
-  emptyS: { color: theme.onSurfaceMuted, marginBottom: spacing.md },
+  emptyT: { fontWeight: "800", fontSize: 18, color: t.onSurface, marginTop: 6 },
+  emptyS: { color: t.onSurfaceMuted, marginBottom: spacing.md },
   starters: { flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "center" },
   starter: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: radii.pill,
   },
-  starterTxt: { color: theme.onSurface, fontSize: 12 },
+  starterTxt: { color: t.onSurface, fontSize: 12 },
   bubble: { maxWidth: "85%", padding: spacing.md, borderRadius: radii.md },
-  userBubble: { alignSelf: "flex-end", backgroundColor: theme.brand },
-  aiBubble: { alignSelf: "flex-start", backgroundColor: "#fff", ...shadow1 },
-  userTxt: { color: "#fff", fontSize: 15, lineHeight: 21 },
-  aiTxt: { color: theme.onSurface, fontSize: 15, lineHeight: 21 },
+  userBubble: { alignSelf: "flex-end", backgroundColor: t.brand },
+  aiBubble: { alignSelf: "flex-start", backgroundColor: t.surfaceSecondary, ...shadow1 },
+  userTxt: { color: t.onBrandPrimary, fontSize: 15, lineHeight: 21 },
+  aiTxt: { color: t.onSurface, fontSize: 15, lineHeight: 21 },
   inputWrap: {
     flexDirection: "row",
     padding: spacing.md,
     gap: spacing.sm,
     alignItems: "flex-end",
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderTopWidth: 1,
-    borderTopColor: theme.divider,
+    borderTopColor: t.divider,
   },
   input: {
     flex: 1,
-    backgroundColor: theme.surface,
+    backgroundColor: t.surface,
     borderRadius: radii.md,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 15,
-    color: theme.onSurface,
+    color: t.onSurface,
     maxHeight: 120,
   },
   sendBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -688,7 +691,7 @@ const styles = StyleSheet.create({
     left: 0,
     bottom: 0,
     width: DRAWER_WIDTH,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     zIndex: 20,
     ...shadow1,
   },
@@ -698,29 +701,37 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
-  drawerTitle: { fontSize: 18, fontWeight: "700", color: theme.brand },
+  drawerTitle: { fontSize: 18, fontWeight: "700", color: t.brand },
   drawerNewBtn: { flexDirection: "row", alignItems: "center", gap: 4 },
-  drawerNewText: { color: theme.brandPrimary, fontWeight: "600" },
+  drawerNewText: { color: t.brandPrimary, fontWeight: "600" },
   drawerList: { flex: 1 },
   drawerEmpty: { alignItems: "center", padding: spacing.xl, gap: 8 },
-  drawerEmptyText: { color: theme.onSurfaceMuted, fontSize: 14 },
+  drawerEmptyText: { color: t.onSurfaceMuted, fontSize: 14 },
   drawerItem: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
   drawerItemContent: { flex: 1 },
   drawerItemText: { flex: 1 },
-  drawerItemTitle: { fontSize: 14, fontWeight: "500", color: theme.onSurface },
-  drawerItemMeta: { fontSize: 12, color: theme.onSurfaceMuted, marginTop: 2 },
-  drawerItemSubject: { color: theme.brandPrimary, fontWeight: "500" },
+  drawerItemTitle: { fontSize: 14, fontWeight: "500", color: t.onSurface },
+  drawerItemMeta: { fontSize: 12, color: t.onSurfaceMuted, marginTop: 2 },
+  drawerItemSubject: { color: t.brandPrimary, fontWeight: "500" },
   drawerItemActions: { flexDirection: "row", gap: 8, marginLeft: 8 },
   drawerActionBtn: { padding: 4 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });
 
 

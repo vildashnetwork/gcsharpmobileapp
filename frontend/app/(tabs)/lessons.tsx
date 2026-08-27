@@ -5,6 +5,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 // import { useAuth } from "@/src/auth";
 
@@ -190,6 +191,7 @@ import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 
@@ -322,6 +324,7 @@ function LoadingSkeletonList() {
 }
 
 export default function Library() {
+  useTheme(); // re-render this screen when light/dark changes
   const { user } = useAuth();
   const router = useRouter();
   const [items, setItems] = useState<Course[]>([]);
@@ -531,35 +534,35 @@ export default function Library() {
 // changes card content significantly, update this alongside the styles.
 const CARD_HEIGHT = 180 + 112;
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end",
     paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.sm,
   },
-  title: { fontSize: 24, fontWeight: "800", color: theme.onSurface },
-  sub: { color: theme.onSurfaceMuted, marginTop: 2, fontSize: 13 },
+  title: { fontSize: 24, fontWeight: "800", color: t.onSurface },
+  sub: { color: t.onSurfaceMuted, marginTop: 2, fontSize: 13 },
   searchWrap: {
     flexDirection: "row", alignItems: "center", gap: 8,
     marginHorizontal: spacing.lg, marginBottom: spacing.sm,
     height: 40, paddingHorizontal: 12, borderRadius: radii.pill,
-    backgroundColor: "#fff", borderWidth: 1, borderColor: theme.border,
+    backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border,
   },
-  searchInput: { flex: 1, fontSize: 14, color: theme.onSurface, padding: 0 },
+  searchInput: { flex: 1, fontSize: 14, color: t.onSurface, padding: 0 },
   chipRow: { height: 56, alignItems: "center" },
   chip: {
     flexShrink: 0, height: 36, paddingHorizontal: 16, borderRadius: radii.pill,
-    backgroundColor: "#fff", borderWidth: 1, borderColor: theme.border,
+    backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border,
     alignItems: "center", justifyContent: "center",
   },
-  chipActive: { borderColor: theme.brandPrimary, backgroundColor: theme.brandTertiary },
-  chipTxt: { color: theme.onSurface, fontWeight: "600", fontSize: 13 },
-  chipTxtActive: { color: theme.brand },
-  card: { backgroundColor: "#fff", borderRadius: radii.md, overflow: "hidden", ...shadow1 },
-  skeletonBlock: { backgroundColor: theme.surfaceTertiary },
+  chipActive: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
+  chipTxt: { color: t.onSurface, fontWeight: "600", fontSize: 13 },
+  chipTxtActive: { color: t.brand },
+  card: { backgroundColor: t.surfaceSecondary, borderRadius: radii.md, overflow: "hidden", ...shadow1 },
+  skeletonBlock: { backgroundColor: t.surfaceTertiary },
   skeletonPill: { width: 60, height: 20, borderRadius: radii.pill },
   thumbWrap: { position: "relative" },
-  thumb: { width: "100%", height: 180, backgroundColor: theme.surfaceTertiary },
+  thumb: { width: "100%", height: 180, backgroundColor: t.surfaceTertiary },
   playIcon: {
     position: "absolute", top: "50%", left: "50%", marginLeft: -22, marginTop: -22,
     width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(37,99,235,0.9)",
@@ -569,16 +572,16 @@ const styles = StyleSheet.create({
     position: "absolute", right: 8, bottom: 8, backgroundColor: "rgba(0,0,0,0.7)",
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
   },
-  durTxt: { color: "#fff", fontSize: 11, fontWeight: "700" },
-  cardTitle: { fontSize: 16, fontWeight: "700", color: theme.onSurface, marginTop: 4 },
-  cardDesc: { fontSize: 13, color: theme.onSurfaceMuted, marginTop: 2 },
-  pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill, backgroundColor: theme.brandTertiary },
-  pillTxt: { color: theme.onBrandTertiary, fontSize: 11, fontWeight: "700" },
+  durTxt: { color: t.onBrandPrimary, fontSize: 11, fontWeight: "700" },
+  cardTitle: { fontSize: 16, fontWeight: "700", color: t.onSurface, marginTop: 4 },
+  cardDesc: { fontSize: 13, color: t.onSurfaceMuted, marginTop: 2 },
+  pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill, backgroundColor: t.brandTertiary },
+  pillTxt: { color: t.onBrandTertiary, fontSize: 11, fontWeight: "700" },
   row: { flexDirection: "row", alignItems: "center", gap: 4 },
-  meta: { color: theme.onSurfaceMuted, fontSize: 12 },
+  meta: { color: t.onSurfaceMuted, fontSize: 12 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl, gap: 8 },
-  emptyTxt: { color: theme.onSurface, fontSize: 16, fontWeight: "600" },
-  emptySub: { color: theme.onSurfaceMuted, fontSize: 14, textAlign: "center" },
+  emptyTxt: { color: t.onSurface, fontSize: 16, fontWeight: "600" },
+  emptySub: { color: t.onSurfaceMuted, fontSize: 14, textAlign: "center" },
   refreshBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -586,12 +589,20 @@ const styles = StyleSheet.create({
     marginTop: 12,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     borderRadius: radii.pill,
   },
   refreshTxt: {
-    color: theme.brandPrimary,
+    color: t.brandPrimary,
     fontWeight: "600",
     fontSize: 14,
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

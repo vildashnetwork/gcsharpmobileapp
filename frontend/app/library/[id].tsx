@@ -7,6 +7,7 @@
 // import { useLocalSearchParams, useRouter } from "expo-router";
 // import { useVideoPlayer, VideoView } from "expo-video";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 
 // type Course = {
@@ -423,7 +424,10 @@ import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { useEvent } from "expo";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { useNetworkStatus } from "@/src/lib/useNetworkStatus";
+import { getLocalMediaUri, cacheMediaBytes } from "@/src/lib/mediaStore";
 
 type Course = {
   id?: string;
@@ -431,6 +435,8 @@ type Course = {
   title: string;
   description: string;
   subject: string;
+  /** Some backend payloads use subject_name instead of subject. */
+  subject_name?: string;
   level: string;
   teacher_name: string;
   teacher_avatar?: string;
@@ -450,6 +456,7 @@ type SimilarCourse = {
   course_id: string;
   title: string;
   subject: string;
+  subject_name?: string;
   level: string;
   teacher_name: string;
   thumbnail: string;
@@ -516,6 +523,7 @@ function SimilarRowSkeleton() {
 }
 
 export default function CourseDetail() {
+  useTheme(); // re-render this screen when light/dark changes
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
@@ -549,6 +557,29 @@ export default function CourseDetail() {
   // the backend. Explicitly requests auth so the server can identify the
   // user — without this, /library/courses/{id} is treated as anonymous
   // and always comes back with liked:false, saved:false.
+  const isOnline = useNetworkStatus();
+
+  // Resolves what to feed the video player: the remote URL online, or the
+  // locally cached bytes (file:// uri) when offline — so lessons keep
+  // playing with data off if the sync worker already downloaded them.
+  const resolveVideoSource = useCallback(
+    async (remoteUrl: string): Promise<string> => {
+      if (isOnline) {
+        // Best-effort background caching for offline playback later.
+        cacheMediaBytes(remoteUrl, "video").catch(() => { });
+        return remoteUrl;
+      }
+      try {
+        const local = await getLocalMediaUri(remoteUrl);
+        if (local) return local;
+      } catch (e) {
+        console.warn("[CourseDetail] Local video lookup failed:", e);
+      }
+      return remoteUrl; // no cached copy; player will show its own error
+    },
+    [isOnline]
+  );
+
   const loadCourse = useCallback(async () => {
     try {
       const r = await api<{ course: Course }>(`/library/courses/${id}`, { auth: true });
@@ -567,7 +598,8 @@ export default function CourseDetail() {
 
       if (c.video_url) {
         try {
-          await player.replaceAsync(c.video_url);
+          const src = await resolveVideoSource(c.video_url);
+          await player.replaceAsync(src);
         } catch (e) {
           console.error("[CourseDetail] player.replaceAsync failed:", e);
         }
@@ -576,7 +608,7 @@ export default function CourseDetail() {
       console.error("[CourseDetail] Failed to load course:", error);
       Alert.alert("Error", "Could not load course details. Please try again.");
     }
-  }, [id, player]);
+  }, [id, player, resolveVideoSource]);
 
   useEffect(() => {
     setCourse(null);
@@ -617,7 +649,8 @@ export default function CourseDetail() {
   const retryPlayback = async () => {
     if (!course?.video_url) return;
     try {
-      await player.replaceAsync(course.video_url);
+      const src = await resolveVideoSource(course.video_url);
+      await player.replaceAsync(src);
       player.play();
     } catch (e) {
       console.error("[CourseDetail] Retry failed:", e);
@@ -662,12 +695,16 @@ export default function CourseDetail() {
     setLiked(!prevLiked);
     setLikesCount(prevLiked ? Math.max(0, prevCount - 1) : prevCount + 1);
     try {
-      const res = await api<{ liked: boolean; likes: number }>(
+      const res = await api<{ liked: boolean; likes: number; __offlineQueued?: boolean }>(
         `/courses/${courseId}/like`,
         { method: "POST", auth: true }
       );
-      setLiked(res.liked);
-      setLikesCount(res.likes);
+      // Offline: the request was queued for the sync worker — keep the
+      // optimistic state instead of overwriting it with undefined.
+      if (!res.__offlineQueued) {
+        setLiked(res.liked);
+        setLikesCount(res.likes);
+      }
     } catch (error) {
       console.error("[CourseDetail] Like error:", error);
       setLiked(prevLiked);
@@ -681,10 +718,14 @@ export default function CourseDetail() {
     const prevSaved = saved;
     setSaved(!prevSaved);
     try {
-      const res = await api<{ saved: boolean }>(
+      const res = await api<{ saved: boolean; __offlineQueued?: boolean }>(
         `/courses/${courseId}/save`,
         { method: "POST", auth: true }
       );
+      if (res.__offlineQueued) {
+        Alert.alert("Saved offline", "This video will be saved to your library when you're back online.");
+        return;
+      }
       setSaved(res.saved);
       Alert.alert(
         res.saved ? "Saved" : "Removed",
@@ -912,8 +953,8 @@ export default function CourseDetail() {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row",
     alignItems: "center",
@@ -921,64 +962,72 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
   },
-  brand: { fontSize: 16, fontWeight: "800", color: theme.brand, letterSpacing: 1 },
+  brand: { fontSize: 16, fontWeight: "800", color: t.brand, letterSpacing: 1 },
   video: { width: "100%", height: VIDEO_HEIGHT, backgroundColor: "#000" },
   videoErrorBox: { alignItems: "center", justifyContent: "center", paddingHorizontal: spacing.lg },
-  videoErrorText: { color: "#fff", marginTop: 8, fontSize: 13, textAlign: "center" },
+  videoErrorText: { color: t.onBrandPrimary, marginTop: 8, fontSize: 13, textAlign: "center" },
   retryBtn: {
     marginTop: 12, paddingHorizontal: 20, paddingVertical: 8,
-    borderRadius: radii.pill, backgroundColor: theme.brandPrimary,
+    borderRadius: radii.pill, backgroundColor: t.brandPrimary,
   },
-  retryBtnTxt: { color: "#fff", fontWeight: "700", fontSize: 13 },
-  skeletonBlock: { backgroundColor: theme.surfaceTertiary },
-  title: { fontSize: 19, fontWeight: "800", color: theme.onSurface, marginTop: 4 },
+  retryBtnTxt: { color: t.onBrandPrimary, fontWeight: "700", fontSize: 13 },
+  skeletonBlock: { backgroundColor: t.surfaceTertiary },
+  title: { fontSize: 19, fontWeight: "800", color: t.onSurface, marginTop: 4 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 },
-  meta: { color: theme.onSurfaceMuted, fontSize: 12.5 },
-  metaDot: { color: theme.onSurfaceMuted, fontSize: 12, marginHorizontal: 2 },
+  meta: { color: t.onSurfaceMuted, fontSize: 12.5 },
+  metaDot: { color: t.onSurfaceMuted, fontSize: 12, marginHorizontal: 2 },
   channelRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 10 },
-  avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: theme.surfaceTertiary },
-  avatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: theme.brandTertiary },
-  avatarInitial: { color: theme.onBrandTertiary, fontWeight: "800", fontSize: 16 },
-  teacherName: { color: theme.onSurface, fontWeight: "700", fontSize: 14 },
-  teacherSub: { color: theme.onSurfaceMuted, fontSize: 12, marginTop: 1 },
-  descBox: { backgroundColor: theme.surfaceTertiary, borderRadius: radii.md, padding: 12, marginTop: 12, gap: 6 },
-  desc: { color: theme.onSurface, lineHeight: 20, fontSize: 13.5 },
-  showMore: { color: theme.brandPrimary, fontWeight: "700", fontSize: 12.5 },
-  divider: { height: 8, backgroundColor: theme.surfaceTertiary, marginTop: spacing.md },
-  sectionTitle: { fontSize: 15, fontWeight: "800", color: theme.onSurface, paddingHorizontal: spacing.lg, marginBottom: 4 },
-  emptySimilar: { color: theme.onSurfaceMuted, fontSize: 13, paddingHorizontal: spacing.lg, paddingVertical: 12 },
+  avatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.surfaceTertiary },
+  avatarFallback: { alignItems: "center", justifyContent: "center", backgroundColor: t.brandTertiary },
+  avatarInitial: { color: t.onBrandTertiary, fontWeight: "800", fontSize: 16 },
+  teacherName: { color: t.onSurface, fontWeight: "700", fontSize: 14 },
+  teacherSub: { color: t.onSurfaceMuted, fontSize: 12, marginTop: 1 },
+  descBox: { backgroundColor: t.surfaceTertiary, borderRadius: radii.md, padding: 12, marginTop: 12, gap: 6 },
+  desc: { color: t.onSurface, lineHeight: 20, fontSize: 13.5 },
+  showMore: { color: t.brandPrimary, fontWeight: "700", fontSize: 12.5 },
+  divider: { height: 8, backgroundColor: t.surfaceTertiary, marginTop: spacing.md },
+  sectionTitle: { fontSize: 15, fontWeight: "800", color: t.onSurface, paddingHorizontal: spacing.lg, marginBottom: 4 },
+  emptySimilar: { color: t.onSurfaceMuted, fontSize: 13, paddingHorizontal: spacing.lg, paddingVertical: 12 },
   similarRow: { flexDirection: "row", gap: 10, paddingHorizontal: spacing.lg, paddingVertical: 8 },
   similarThumbWrap: { position: "relative", ...shadow1 },
-  similarThumb: { width: 150, height: 84, borderRadius: 8, backgroundColor: theme.surfaceTertiary },
+  similarThumb: { width: 150, height: 84, borderRadius: 8, backgroundColor: t.surfaceTertiary },
   similarDurTag: {
     position: "absolute", right: 4, bottom: 4,
     backgroundColor: "rgba(0,0,0,0.7)", paddingHorizontal: 5, paddingVertical: 1.5, borderRadius: 4,
   },
-  similarDurTxt: { color: "#fff", fontSize: 10, fontWeight: "700" },
-  similarTitle: { color: theme.onSurface, fontWeight: "700", fontSize: 13.5, lineHeight: 18 },
-  similarMeta: { color: theme.onSurfaceMuted, fontSize: 12 },
+  similarDurTxt: { color: t.onBrandPrimary, fontSize: 10, fontWeight: "700" },
+  similarTitle: { color: t.onSurface, fontWeight: "700", fontSize: 13.5, lineHeight: 18 },
+  similarMeta: { color: t.onSurfaceMuted, fontSize: 12 },
   pillContainer: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 4 },
   pill: {
     flexDirection: "row", alignItems: "center", gap: 4,
     paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20,
-    backgroundColor: theme.surfaceTertiary, borderWidth: 1, borderColor: theme.border, ...shadow1,
+    backgroundColor: t.surfaceTertiary, borderWidth: 1, borderColor: t.border, ...shadow1,
   },
-  pillLevel: { backgroundColor: theme.brandTertiary, borderColor: theme.brand },
-  pillSubject: { backgroundColor: theme.surfaceSecondary, borderColor: theme.border },
+  pillLevel: { backgroundColor: t.brandTertiary, borderColor: t.brand },
+  pillSubject: { backgroundColor: t.surfaceSecondary, borderColor: t.border },
   pillLikes: { backgroundColor: "#FFF5F5", borderColor: "#FECACA" },
-  pillTxt: { fontSize: 11, fontWeight: "600", color: theme.onSurface, letterSpacing: 0.3 },
+  pillTxt: { fontSize: 11, fontWeight: "600", color: t.onSurface, letterSpacing: 0.3 },
   stepCard: {
-    flexDirection: "row", backgroundColor: "#fff", padding: spacing.md, borderRadius: radii.md,
+    flexDirection: "row", backgroundColor: t.surfaceSecondary, padding: spacing.md, borderRadius: radii.md,
     ...shadow1, gap: 12, alignItems: "flex-start", marginTop: 8,
   },
-  stepNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: theme.success, alignItems: "center", justifyContent: "center" },
-  stepNumTxt: { color: "#fff", fontWeight: "800" },
-  stepTitle: { fontWeight: "700", color: theme.onSurface, marginBottom: 4 },
-  stepText: { color: theme.onSurfaceMuted, lineHeight: 20, fontSize: 13 },
+  stepNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: t.success, alignItems: "center", justifyContent: "center" },
+  stepNumTxt: { color: t.onBrandPrimary, fontWeight: "800" },
+  stepTitle: { fontWeight: "700", color: t.onSurface, marginBottom: 4 },
+  stepText: { color: t.onSurfaceMuted, lineHeight: 20, fontSize: 13 },
   chapter: {
-    flexDirection: "row", backgroundColor: "#fff", padding: spacing.md, borderRadius: radii.md,
+    flexDirection: "row", backgroundColor: t.surfaceSecondary, padding: spacing.md, borderRadius: radii.md,
     ...shadow1, gap: 12, alignItems: "center", marginTop: 8,
   },
-  chapNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: theme.brandTertiary, alignItems: "center", justifyContent: "center" },
-  chapNumTxt: { color: theme.brand, fontWeight: "800" },
+  chapNum: { width: 28, height: 28, borderRadius: 14, backgroundColor: t.brandTertiary, alignItems: "center", justifyContent: "center" },
+  chapNumTxt: { color: t.brand, fontWeight: "800" },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

@@ -15,6 +15,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter, Stack } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 
 // // ---------- Types ----------
@@ -1290,6 +1291,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, Stack } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 
 // ---------- Types ----------
@@ -1360,6 +1362,7 @@ function HighlightedText({
 
 // ---------- Component ----------
 export default function PastQuestions() {
+  useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
 
   // ---------- State ----------
@@ -1967,10 +1970,10 @@ export default function PastQuestions() {
 }
 
 // ---------- Styles ----------
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: theme.surface,
+    backgroundColor: t.surface,
   },
 
   header: {
@@ -1985,7 +1988,7 @@ const styles = StyleSheet.create({
   headerT: {
     fontSize: 19,
     fontWeight: "800",
-    color: theme.brand,
+    color: t.brand,
     letterSpacing: -0.3,
   },
 
@@ -2004,14 +2007,14 @@ const styles = StyleSheet.create({
   sectionEyebrow: {
     fontSize: 10,
     fontWeight: "800",
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     letterSpacing: 1.1,
   },
 
   sectionContext: {
     fontSize: 11,
     fontWeight: "700",
-    color: theme.brand,
+    color: t.brand,
   },
 
   chipRow: {
@@ -2025,9 +2028,9 @@ const styles = StyleSheet.create({
     minHeight: 38,
     paddingHorizontal: 15,
     borderRadius: radii.pill,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -2035,25 +2038,25 @@ const styles = StyleSheet.create({
   },
 
   chipActive: {
-    borderColor: theme.brandPrimary,
-    backgroundColor: theme.brandTertiary,
+    borderColor: t.brandPrimary,
+    backgroundColor: t.brandTertiary,
   },
 
   chipDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
   },
 
   chipTxt: {
-    color: theme.onSurface,
+    color: t.onSurface,
     fontWeight: "700",
     fontSize: 13,
   },
 
   chipTxtActive: {
-    color: theme.brand,
+    color: t.brand,
   },
 
   // Subject selector stays exactly 5px below the level selector.
@@ -2087,13 +2090,13 @@ const styles = StyleSheet.create({
   subjectTitle: {
     fontSize: 15,
     fontWeight: "800",
-    color: theme.onSurface,
+    color: t.onSurface,
     letterSpacing: -0.2,
   },
 
   subjectHint: {
     fontSize: 11,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     marginTop: 1,
   },
 
@@ -2102,13 +2105,13 @@ const styles = StyleSheet.create({
     height: 28,
     paddingHorizontal: 7,
     borderRadius: 14,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     alignItems: "center",
     justifyContent: "center",
   },
 
   subjectCountText: {
-    color: theme.brand,
+    color: t.brand,
     fontSize: 11,
     fontWeight: "800",
   },
@@ -2130,27 +2133,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 13,
     paddingVertical: 9,
     borderRadius: 12,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
   },
 
   subjectChipActive: {
-    borderColor: theme.brandPrimary,
-    backgroundColor: theme.brandTertiary,
+    borderColor: t.brandPrimary,
+    backgroundColor: t.brandTertiary,
   },
 
   subjectChipText: {
     fontSize: 13,
     fontWeight: "700",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
 
   subjectChipTextActive: {
-    color: theme.brand,
+    color: t.brand,
   },
 
   mainContent: {
@@ -2163,7 +2166,7 @@ const styles = StyleSheet.create({
   sec: {
     fontSize: 14,
     fontWeight: "800",
-    color: theme.onSurface,
+    color: t.onSurface,
     letterSpacing: -0.1,
   },
 
@@ -2176,32 +2179,32 @@ const styles = StyleSheet.create({
 
   resultsCount: {
     fontSize: 12,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     fontWeight: "700",
   },
 
   paper: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: 16,
     padding: 13,
     flexDirection: "row",
     alignItems: "center",
     gap: 11,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     minHeight: 82,
     ...shadow1,
   },
 
   paperT: {
     fontWeight: "800",
-    color: theme.onSurface,
+    color: t.onSurface,
     fontSize: 14,
     lineHeight: 19,
   },
 
   paperS: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     fontSize: 11,
     marginTop: 3,
   },
@@ -2218,21 +2221,21 @@ const styles = StyleSheet.create({
     borderRadius: 11,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
   },
 
   startBtn: {
     flexDirection: "row",
     gap: 4,
     alignItems: "center",
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
     paddingHorizontal: 12,
     minHeight: 36,
     borderRadius: 11,
   },
 
   startTxt: {
-    color: "#fff",
+    color: t.onBrandPrimary,
     fontWeight: "800",
     fontSize: 11,
   },
@@ -2244,7 +2247,7 @@ const styles = StyleSheet.create({
   skeletonBar: {
     height: 14,
     borderRadius: 6,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
   },
 
   errorState: {
@@ -2254,7 +2257,7 @@ const styles = StyleSheet.create({
   },
 
   emptyText: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     textAlign: "center",
     padding: spacing.sm,
     fontSize: 14,
@@ -2264,12 +2267,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 9,
     borderRadius: radii.pill,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
   },
 
   retryBtnText: {
-    color: theme.brand,
+    color: t.brand,
     fontWeight: "800",
     fontSize: 13,
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

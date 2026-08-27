@@ -20,9 +20,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import Svg, { Circle, Path } from "react-native-svg";
+import { OfflineBanner } from "@/src/components/OfflineBanner";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -240,6 +243,7 @@ const getInitials = (name: string) => {
 };
 
 export default function Home() {
+  useTheme(); // re-render this screen when light/dark changes
   const { user } = useAuth();
   const router = useRouter();
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -387,6 +391,7 @@ export default function Home() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="home-screen">
+      <OfflineBanner />
       {loading && <PercentageLoader progress={loadingProgress} />}
 
       <ScrollView
@@ -402,8 +407,12 @@ export default function Home() {
         <View style={styles.header}>
           <View style={styles.avatarRow}>
             <View style={styles.profileRow}>
-              {user?.profile_photo ? (
-                <Image source={{ uri: user.profile_photo }} style={styles.profileImage} />
+              {/* Prefer the on-device cached photo bytes when offline. */}
+              {user?.local_photo_uri || user?.profile_photo ? (
+                <Image
+                  source={{ uri: (user.local_photo_uri || user.profile_photo) as string }}
+                  style={styles.profileImage}
+                />
               ) : (
                 <View style={styles.profileFallback}>
                   <Text style={styles.profileInitials}>{getInitials(user?.full_name || "User")}</Text>
@@ -694,8 +703,8 @@ export default function Home() {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   errorBanner: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.sm,
@@ -713,25 +722,25 @@ const styles = StyleSheet.create({
   },
   avatarRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   profileRow: { flexDirection: "row", alignItems: "center", gap: 12 },
-  profileImage: { width: 50, height: 50, borderRadius: 25, borderWidth: 2, borderColor: theme.brandPrimary },
+  profileImage: { width: 50, height: 50, borderRadius: 25, borderWidth: 2, borderColor: t.brandPrimary },
   profileFallback: {
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 2,
-    borderColor: theme.brandPrimary,
+    borderColor: t.brandPrimary,
   },
-  profileInitials: { color: "#fff", fontSize: 18, fontWeight: "bold" },
-  greet: { color: theme.onSurfaceMuted, fontSize: 12 },
-  brandTop: { color: theme.brand, fontWeight: "800", fontSize: 16, letterSpacing: 1 },
+  profileInitials: { color: t.onBrandPrimary, fontSize: 18, fontWeight: "bold" },
+  greet: { color: t.onSurfaceMuted, fontSize: 12 },
+  brandTop: { color: t.brand, fontWeight: "800", fontSize: 16, letterSpacing: 1 },
   bell: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     alignItems: "center",
     justifyContent: "center",
     ...shadow1,
@@ -741,7 +750,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: -4,
     right: -4,
-    backgroundColor: theme.error,
+    backgroundColor: t.error,
     borderRadius: 10,
     minWidth: 18,
     height: 18,
@@ -749,15 +758,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 4,
   },
-  badgeText: { color: "#fff", fontSize: 10, fontWeight: "700" },
+  badgeText: { color: t.onBrandPrimary, fontSize: 10, fontWeight: "700" },
   statsRow: { flexDirection: "row", gap: spacing.sm, paddingHorizontal: spacing.lg, marginTop: spacing.sm },
-  stat: { flex: 1, backgroundColor: "#fff", borderRadius: radii.md, padding: spacing.md, ...shadow1, gap: 4 },
-  statValue: { fontSize: 20, fontWeight: "800", color: "#fff", marginTop: 4 },
+  stat: { flex: 1, backgroundColor: t.surfaceSecondary, borderRadius: radii.md, padding: spacing.md, ...shadow1, gap: 4 },
+  statValue: { fontSize: 20, fontWeight: "800", color: t.onBrandPrimary, marginTop: 4 },
   statLabel: { fontSize: 11, color: "#DBEAFE" },
   sectionTitle: {
     fontSize: 16,
     fontWeight: "800",
-    color: theme.onSurface,
+    color: t.onSurface,
     paddingHorizontal: spacing.lg,
     marginTop: spacing.xl,
     marginBottom: spacing.sm,
@@ -765,7 +774,7 @@ const styles = StyleSheet.create({
   actions: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, paddingHorizontal: spacing.lg },
   actionItem: {
     width: "48%",
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.lg,
     borderRadius: radii.md,
     flexDirection: "row",
@@ -777,15 +786,15 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 10,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     alignItems: "center",
     justifyContent: "center",
   },
-  actionLabel: { fontWeight: "700", color: theme.onSurface, flex: 1 },
+  actionLabel: { fontWeight: "700", color: t.onSurface, flex: 1 },
   startPractice: {
     marginHorizontal: spacing.lg,
     marginTop: spacing.md,
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
     paddingVertical: 14,
     borderRadius: radii.md,
     flexDirection: "row",
@@ -794,19 +803,19 @@ const styles = StyleSheet.create({
     gap: 8,
     ...shadow1,
   },
-  startPracticeText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+  startPracticeText: { color: t.onBrandPrimary, fontWeight: "700", fontSize: 16 },
   card: {
     marginHorizontal: spacing.lg,
     marginBottom: 12,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: radii.md,
     padding: spacing.md,
     ...shadow1,
   },
   chartHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm },
-  chartSubtitle: { fontSize: 12, color: theme.onSurfaceMuted },
+  chartSubtitle: { fontSize: 12, color: t.onSurfaceMuted },
   trendBadge: { flexDirection: "row", alignItems: "center", gap: 4 },
-  trendText: { fontSize: 12, color: theme.success, fontWeight: "600" },
+  trendText: { fontSize: 12, color: t.success, fontWeight: "600" },
   chartWrapper: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -817,15 +826,15 @@ const styles = StyleSheet.create({
   },
   barColumn: { alignItems: "center", flex: 1 },
   bar: { width: 16, borderRadius: 4 },
-  barLabel: { fontSize: 10, color: theme.onSurfaceMuted, marginTop: 4 },
-  barValue: { fontSize: 10, color: theme.onSurfaceMuted, marginBottom: 2, fontWeight: "600" },
-  emptyChart: { color: theme.onSurfaceMuted, textAlign: "center", padding: spacing.md },
+  barLabel: { fontSize: 10, color: t.onSurfaceMuted, marginTop: 4 },
+  barValue: { fontSize: 10, color: t.onSurfaceMuted, marginBottom: 2, fontWeight: "600" },
+  emptyChart: { color: t.onSurfaceMuted, textAlign: "center", padding: spacing.md },
   detailsBtn: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-end", marginTop: 6 },
-  detailsText: { color: theme.brandPrimary, fontWeight: "700", fontSize: 13 },
+  detailsText: { color: t.brandPrimary, fontWeight: "700", fontSize: 13 },
   aiCard: { gap: spacing.sm },
   aiHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
-  aiTitle: { fontWeight: "700", fontSize: 15, color: theme.onSurface },
-  aiSub: { fontSize: 13, color: theme.onSurfaceMuted },
+  aiTitle: { fontWeight: "700", fontSize: 15, color: t.onSurface },
+  aiSub: { fontSize: 13, color: t.onSurfaceMuted },
   topicTags: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
   weakTag: { backgroundColor: "#FEE2E2", paddingHorizontal: 10, paddingVertical: 4, borderRadius: radii.pill },
   weakTagText: { color: "#991B1B", fontSize: 12, fontWeight: "600" },
@@ -835,63 +844,63 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 6,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: radii.pill,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
   },
-  aiBtnText: { fontSize: 13, color: theme.brandPrimary, fontWeight: "600" },
+  aiBtnText: { fontSize: 13, color: t.brandPrimary, fontWeight: "600" },
   ringRow: { paddingHorizontal: spacing.lg, marginTop: 19 },
   ringCard: { alignItems: "center", paddingVertical: spacing.lg },
-  ringTitle: { fontWeight: "700", fontSize: 15, color: theme.onSurface, marginBottom: spacing.sm },
+  ringTitle: { fontWeight: "700", fontSize: 15, color: t.onSurface, marginBottom: spacing.sm },
   ringContainer: { position: "relative", alignItems: "center", justifyContent: "center" },
   ringContent: { position: "absolute", alignItems: "center" },
-  ringLevelLabel: { fontSize: 10, color: theme.onSurfaceMuted },
-  ringLevel: { fontSize: 28, fontWeight: "800", color: theme.brand, marginTop: -2 },
-  ringXp: { fontSize: 11, color: theme.onSurfaceMuted },
-  ringSub: { fontSize: 13, color: theme.onSurfaceMuted, marginTop: 6 },
-  courseCard: { width: 140, backgroundColor: "#fff", borderRadius: radii.md, overflow: "hidden", ...shadow1, marginRight: spacing.sm },
-  courseThumb: { height: 80, backgroundColor: theme.surfaceTertiary },
+  ringLevelLabel: { fontSize: 10, color: t.onSurfaceMuted },
+  ringLevel: { fontSize: 28, fontWeight: "800", color: t.brand, marginTop: -2 },
+  ringXp: { fontSize: 11, color: t.onSurfaceMuted },
+  ringSub: { fontSize: 13, color: t.onSurfaceMuted, marginTop: 6 },
+  courseCard: { width: 140, backgroundColor: t.surfaceSecondary, borderRadius: radii.md, overflow: "hidden", ...shadow1, marginRight: spacing.sm },
+  courseThumb: { height: 80, backgroundColor: t.surfaceTertiary },
   courseThumbImage: { width: "100%", height: "100%", resizeMode: "cover" },
-  courseThumbPlaceholder: { flex: 1, backgroundColor: theme.brand, alignItems: "center", justifyContent: "center" },
-  courseSubject: { fontSize: 10, color: theme.brandPrimary, paddingHorizontal: 8, paddingTop: 6, fontWeight: "600" },
-  courseTitle: { fontSize: 13, fontWeight: "600", color: theme.onSurface, paddingHorizontal: 8 },
-  courseTeacher: { fontSize: 11, color: theme.onSurfaceMuted, paddingHorizontal: 8, paddingBottom: 8 },
-  emptyText: { color: theme.onSurfaceMuted, textAlign: "center", padding: spacing.md },
+  courseThumbPlaceholder: { flex: 1, backgroundColor: t.brand, alignItems: "center", justifyContent: "center" },
+  courseSubject: { fontSize: 10, color: t.brandPrimary, paddingHorizontal: 8, paddingTop: 6, fontWeight: "600" },
+  courseTitle: { fontSize: 13, fontWeight: "600", color: t.onSurface, paddingHorizontal: 8 },
+  courseTeacher: { fontSize: 11, color: t.onSurfaceMuted, paddingHorizontal: 8, paddingBottom: 8 },
+  emptyText: { color: t.onSurfaceMuted, textAlign: "center", padding: spacing.md },
   leaderboardHeader: { flexDirection: "row", justifyContent: "flex-end", marginBottom: 4 },
-  leaderboardRank: { fontSize: 13, color: theme.onSurfaceMuted },
+  leaderboardRank: { fontSize: 13, color: t.onSurfaceMuted },
   leaderboardRow: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: 8,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
     gap: 8,
   },
-  leaderboardMe: { backgroundColor: theme.brandTertiary, marginHorizontal: -8, paddingHorizontal: 8, borderRadius: radii.sm },
-  leaderboardRankNum: { width: 24, fontSize: 14, fontWeight: "700", color: theme.onSurfaceMuted, textAlign: "center" },
-  leaderboardTopRank: { color: theme.warning },
-  leaderboardName: { flex: 1, fontSize: 14, color: theme.onSurface },
+  leaderboardMe: { backgroundColor: t.brandTertiary, marginHorizontal: -8, paddingHorizontal: 8, borderRadius: radii.sm },
+  leaderboardRankNum: { width: 24, fontSize: 14, fontWeight: "700", color: t.onSurfaceMuted, textAlign: "center" },
+  leaderboardTopRank: { color: t.warning },
+  leaderboardName: { flex: 1, fontSize: 14, color: t.onSurface },
   leaderboardNameYou: { fontWeight: "700" },
-  leaderboardYou: { fontSize: 11, color: theme.brandPrimary, fontWeight: "600" },
-  leaderboardLevel: { fontSize: 12, color: theme.onSurfaceMuted },
-  leaderboardXp: { fontSize: 13, fontWeight: "700", color: theme.brand },
-  leaderboardAvatar: { width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: theme.border },
+  leaderboardYou: { fontSize: 11, color: t.brandPrimary, fontWeight: "600" },
+  leaderboardLevel: { fontSize: 12, color: t.onSurfaceMuted },
+  leaderboardXp: { fontSize: 13, fontWeight: "700", color: t.brand },
+  leaderboardAvatar: { width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: t.border },
   leaderboardAvatarFallback: {
     width: 30,
     height: 30,
     borderRadius: 15,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
   },
-  leaderboardAvatarText: { fontSize: 11, fontWeight: "700", color: theme.brand },
+  leaderboardAvatarText: { fontSize: 11, fontWeight: "700", color: t.brand },
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  modalContainer: { backgroundColor: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingBottom: spacing.lg },
-  modalHandle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: theme.borderStrong, marginTop: 8, marginBottom: 8, opacity: 0.4 },
+  modalContainer: { backgroundColor: t.surfaceSecondary, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingBottom: spacing.lg },
+  modalHandle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: t.borderStrong, marginTop: 8, marginBottom: 8, opacity: 0.4 },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -899,25 +908,25 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: theme.onSurface },
+  modalTitle: { fontSize: 18, fontWeight: "700", color: t.onSurface },
   modalHeaderActions: { flexDirection: "row", alignItems: "center", gap: 12 },
   markAllBtn: { paddingVertical: 4, paddingHorizontal: 8 },
-  markAllText: { fontSize: 13, color: theme.brandPrimary, fontWeight: "600" },
+  markAllText: { fontSize: 13, color: t.brandPrimary, fontWeight: "600" },
   closeBtn: { padding: 4 },
   modalLoading: { padding: spacing.xl, alignItems: "center" },
-  modalLoadingText: { color: theme.onSurfaceMuted },
+  modalLoadingText: { color: t.onSurfaceMuted },
   emptyNotifications: { padding: spacing.xl, alignItems: "center", gap: 8 },
-  emptyNotificationsText: { fontSize: 16, fontWeight: "600", color: theme.onSurface },
-  emptyNotificationsSub: { fontSize: 14, color: theme.onSurfaceMuted },
+  emptyNotificationsText: { fontSize: 16, fontWeight: "600", color: t.onSurface },
+  emptyNotificationsSub: { fontSize: 14, color: t.onSurfaceMuted },
   notificationList: { paddingHorizontal: spacing.lg },
   notificationItem: {
     flexDirection: "row",
     alignItems: "center",
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
     gap: 12,
   },
   notificationRead: { opacity: 0.6 },
@@ -925,15 +934,15 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
     alignItems: "center",
     justifyContent: "center",
   },
   notificationContent: { flex: 1 },
-  notificationMessage: { fontSize: 14, color: theme.onSurface, lineHeight: 20 },
-  notificationMessageRead: { color: theme.onSurfaceMuted },
-  notificationTime: { fontSize: 11, color: theme.onSurfaceMuted, marginTop: 2 },
-  unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.brandPrimary, marginLeft: 4 },
+  notificationMessage: { fontSize: 14, color: t.onSurface, lineHeight: 20 },
+  notificationMessageRead: { color: t.onSurfaceMuted },
+  notificationTime: { fontSize: 11, color: t.onSurfaceMuted, marginTop: 2 },
+  unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: t.brandPrimary, marginLeft: 4 },
   loaderOverlay: {
     position: "absolute",
     top: 0,
@@ -945,9 +954,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     zIndex: 100,
   },
-  loaderCard: { backgroundColor: "#fff", borderRadius: radii.md, padding: spacing.xl, alignItems: "center", gap: 8, minWidth: 160, ...shadow1 },
-  loaderPercent: { fontSize: 28, fontWeight: "800", color: theme.brand },
-  loaderBar: { width: 120, height: 4, backgroundColor: theme.surfaceTertiary, borderRadius: 2, overflow: "hidden" },
-  loaderFill: { height: "100%", backgroundColor: theme.brandPrimary, borderRadius: 2 },
-  loaderText: { fontSize: 13, color: theme.onSurfaceMuted },
+  loaderCard: { backgroundColor: t.surfaceSecondary, borderRadius: radii.md, padding: spacing.xl, alignItems: "center", gap: 8, minWidth: 160, ...shadow1 },
+  loaderPercent: { fontSize: 28, fontWeight: "800", color: t.brand },
+  loaderBar: { width: 120, height: 4, backgroundColor: t.surfaceTertiary, borderRadius: 2, overflow: "hidden" },
+  loaderFill: { height: "100%", backgroundColor: t.brandPrimary, borderRadius: 2 },
+  loaderText: { fontSize: 13, color: t.onSurfaceMuted },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

@@ -6,6 +6,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter } from "expo-router";
 // import { theme, spacing, radii } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api, setToken, readToken } from "@/src/api";
 // import { useAuth } from "@/src/auth";
 
@@ -309,6 +310,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api, readToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 
@@ -334,6 +336,7 @@ type FormData = {
 };
 
 export default function Onboarding() {
+  useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
   const { refresh } = useAuth();
   const [step, setStep] = useState(0);
@@ -527,7 +530,7 @@ export default function Onboarding() {
           value={form.institution}
           onChangeText={(v) => set("institution", v)}
           placeholder="e.g. Government Bilingual High School"
-          placeholderTextColor={theme.muted}
+          placeholderTextColor={theme.onSurfaceMuted}
         />
       </View>
       <View style={styles.field}>
@@ -537,7 +540,7 @@ export default function Onboarding() {
           value={form.bio}
           onChangeText={(v) => set("bio", v)}
           placeholder="Tell us a bit about yourself"
-          placeholderTextColor={theme.muted}
+          placeholderTextColor={theme.onSurfaceMuted}
           multiline
           numberOfLines={3}
         />
@@ -686,8 +689,8 @@ export default function Onboarding() {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -695,9 +698,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
-  progressLabel: { color: theme.onSurfaceMuted, fontWeight: "600", fontSize: 12 },
+  progressLabel: { color: t.onSurfaceMuted, fontWeight: "600", fontSize: 12 },
 
   // Step markers
   stepMarkers: { flexDirection: "row", alignItems: "center" },
@@ -707,22 +710,22 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 11,
     borderWidth: 1,
-    borderColor: theme.border,
-    backgroundColor: "#fff",
+    borderColor: t.border,
+    backgroundColor: t.surfaceSecondary,
     alignItems: "center",
     justifyContent: "center",
   },
-  stepDotActive: { borderColor: theme.brandPrimary, backgroundColor: theme.brandTertiary },
-  stepDotDone: { borderColor: theme.brandPrimary, backgroundColor: theme.brandPrimary },
-  stepDotText: { fontSize: 11, fontWeight: "700", color: theme.onSurfaceMuted },
-  stepDotTextActive: { color: theme.brand },
-  stepConnector: { width: 18, height: 1, backgroundColor: theme.border, marginHorizontal: 4 },
-  stepConnectorDone: { backgroundColor: theme.brandPrimary },
+  stepDotActive: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
+  stepDotDone: { borderColor: t.brandPrimary, backgroundColor: t.brandPrimary },
+  stepDotText: { fontSize: 11, fontWeight: "700", color: t.onSurfaceMuted },
+  stepDotTextActive: { color: t.brand },
+  stepConnector: { width: 18, height: 1, backgroundColor: t.border, marginHorizontal: 4 },
+  stepConnectorDone: { backgroundColor: t.brandPrimary },
 
   body: { padding: spacing.lg, paddingBottom: spacing.xxl },
   stepContainer: { gap: spacing.md },
-  title: { fontSize: 24, fontWeight: "800", color: theme.onSurface },
-  sub: { color: theme.onSurfaceMuted, marginTop: spacing.xs },
+  title: { fontSize: 24, fontWeight: "800", color: t.onSurface },
+  sub: { color: t.onSurfaceMuted, marginTop: spacing.xs },
 
   // Role cards
   roleCard: {
@@ -730,37 +733,37 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: spacing.md,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     borderRadius: radii.md,
     padding: spacing.md,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
   },
   roleCardSelected: {
-    borderColor: theme.brandPrimary,
-    backgroundColor: theme.brandTertiary,
+    borderColor: t.brandPrimary,
+    backgroundColor: t.brandTertiary,
   },
   roleIcon: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
     alignItems: "center",
     justifyContent: "center",
   },
-  roleIconSelected: { backgroundColor: theme.brand },
-  roleTitle: { fontWeight: "600", fontSize: 16, color: theme.onSurface },
-  roleDesc: { fontSize: 13, color: theme.onSurfaceMuted },
+  roleIconSelected: { backgroundColor: t.brand },
+  roleTitle: { fontWeight: "600", fontSize: 16, color: t.onSurface },
+  roleDesc: { fontSize: 13, color: t.onSurfaceMuted },
 
   field: { gap: 6 },
-  label: { fontSize: 14, fontWeight: "600", color: theme.onSurface },
+  label: { fontSize: 14, fontWeight: "600", color: t.onSurface },
   input: {
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
     borderRadius: radii.sm,
     padding: spacing.sm,
     fontSize: 15,
-    color: theme.onSurface,
-    backgroundColor: "#fff",
+    color: t.onSurface,
+    backgroundColor: t.surfaceSecondary,
   },
   textArea: { minHeight: 80, textAlignVertical: "top" },
   optionsGrid: {
@@ -773,55 +776,63 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: theme.border,
-    backgroundColor: "#fff",
+    borderColor: t.border,
+    backgroundColor: t.surfaceSecondary,
   },
   optionChipSelected: {
-    borderColor: theme.brandPrimary,
-    backgroundColor: theme.brandPrimary,
+    borderColor: t.brandPrimary,
+    backgroundColor: t.brandPrimary,
   },
   optionChipText: {
     fontSize: 13,
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   optionChipTextSelected: {
-    color: "#fff",
+    color: t.onBrandPrimary,
   },
   row: {
     flexDirection: "row",
     gap: spacing.md,
   },
   infoBox: {
-    backgroundColor: theme.surfaceSecondary,
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
   },
   infoText: {
     fontSize: 13,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
   infoHighlight: {
     fontWeight: "700",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   footer: {
     padding: spacing.lg,
     borderTopWidth: 1,
-    borderTopColor: theme.divider,
-    backgroundColor: "#fff",
+    borderTopColor: t.divider,
+    backgroundColor: t.surfaceSecondary,
   },
   cta: {
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
     paddingVertical: 16,
     borderRadius: radii.md,
     alignItems: "center",
   },
   ctaDisabled: { opacity: 0.5 },
   ctaText: {
-    color: "#fff",
+    color: t.onBrandPrimary,
     fontWeight: "700",
     fontSize: 16,
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

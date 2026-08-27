@@ -4,6 +4,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { theme, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 
 // Metadata for each tab – the order here is just for reference;
 // the actual rendering order comes from the Tabs.Screen order below.
@@ -75,6 +77,7 @@ function CustomTabBar({ state, descriptors, navigation }: any) {
 }
 
 export default function TabsLayout() {
+  useTheme(); // re-render this screen when light/dark changes
   return (
     <Tabs
       tabBar={(props) => <CustomTabBar {...props} />}
@@ -90,18 +93,18 @@ export default function TabsLayout() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
   barWrapper: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderTopWidth: 1,
-    borderTopColor: theme.divider,
+    borderTopColor: t.divider,
   },
   bar: {
     flexDirection: "row",
     alignItems: "center",
     height: 60,
     paddingHorizontal: 6,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
   },
   item: {
     flex: 1,
@@ -113,10 +116,10 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 10,
     fontWeight: "600",
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
   labelActive: {
-    color: theme.brandPrimary,
+    color: t.brandPrimary,
   },
   centerSlot: {
     flex: 1,
@@ -129,17 +132,25 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 3,
-    borderColor: "#fff",
+    borderColor: t.surfaceSecondary,
     ...shadow1,
   },
   centerButtonFocused: {
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
   },
   centerLabel: {
     marginTop: 4, // space between the raised button and the label
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

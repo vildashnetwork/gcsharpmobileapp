@@ -13,6 +13,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 // import { storage } from "@/src/utils/storage/index";
 // // ---------- Helpers ----------
@@ -633,6 +634,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { storage } from "@/src/utils/storage/index";
 
@@ -674,6 +676,7 @@ type LocalHighlight = {
 };
 
 export default function DraftsScreen() {
+  useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
   const [items, setItems] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1047,10 +1050,10 @@ function FilterChip({
 }
 
 // ---------- Styles ----------
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: theme.surface,
+    backgroundColor: t.surface,
   },
   loadingContainer: {
     justifyContent: "center",
@@ -1066,28 +1069,28 @@ const styles = StyleSheet.create({
   loaderTitle: {
     fontSize: 18,
     fontWeight: "700",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   loaderSub: {
     fontSize: 14,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
   progressTrack: {
     width: "100%",
     height: 6,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
     borderRadius: 3,
     overflow: "hidden",
   },
   progressFill: {
     height: "100%",
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
     borderRadius: 3,
   },
   progressText: {
     fontSize: 24,
     fontWeight: "800",
-    color: theme.brand,
+    color: t.brand,
     letterSpacing: 1,
     marginTop: 4,
   },
@@ -1097,26 +1100,26 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
   },
   backBtn: { padding: 4 },
   headerTitle: {
     fontSize: 20,
     fontWeight: "700",
-    color: theme.brand,
+    color: t.brand,
     letterSpacing: -0.5,
   },
   highlightSection: {
-    backgroundColor: theme.surfaceSecondary,
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     marginBottom: spacing.md,
     gap: spacing.sm,
   },
   highlightCard: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: radii.sm,
     padding: spacing.sm,
     flexDirection: "row",
@@ -1124,14 +1127,14 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   highlightTextWrap: { flex: 1, gap: 4 },
-  highlightText: { color: theme.onSurface, fontSize: 13, lineHeight: 19 },
-  highlightMeta: { color: theme.onSurfaceMuted, fontSize: 11 },
+  highlightText: { color: t.onSurface, fontSize: 13, lineHeight: 19 },
+  highlightMeta: { color: t.onSurfaceMuted, fontSize: 11 },
   highlightActions: { flexDirection: "row", alignItems: "center", gap: 5 },
   askButton: {
     width: 34,
     height: 34,
     borderRadius: 17,
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1142,7 +1145,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   filterSection: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     marginBottom: spacing.md,
@@ -1156,11 +1159,11 @@ const styles = StyleSheet.create({
   },
   filterLabel: {
     fontWeight: "600",
-    color: theme.onSurface,
+    color: t.onSurface,
     fontSize: 14,
   },
   clearText: {
-    color: theme.brandPrimary,
+    color: t.brandPrimary,
     fontWeight: "600",
     fontSize: 13,
   },
@@ -1170,7 +1173,7 @@ const styles = StyleSheet.create({
   },
   chipGroup: {
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
+    borderBottomColor: t.divider,
     paddingBottom: spacing.sm,
   },
   chipGroupLabel: {
@@ -1181,7 +1184,7 @@ const styles = StyleSheet.create({
   },
   chipGroupLabelText: {
     fontSize: 13,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     fontWeight: "500",
   },
   chipScroll: {
@@ -1193,24 +1196,24 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: theme.border,
-    backgroundColor: "#fff",
+    borderColor: t.border,
+    backgroundColor: t.surfaceSecondary,
     marginRight: 6,
   },
   chipSelected: {
-    backgroundColor: theme.brandPrimary,
-    borderColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
+    borderColor: t.brandPrimary,
   },
   chipText: {
     fontSize: 12,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
   chipTextSelected: {
-    color: "#fff",
+    color: t.onBrandPrimary,
     fontWeight: "600",
   },
   resultCount: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     fontSize: 12,
     marginTop: spacing.sm,
     textAlign: "center",
@@ -1225,10 +1228,10 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontWeight: "700",
     fontSize: 18,
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   emptyDesc: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     textAlign: "center",
     fontSize: 14,
   },
@@ -1238,7 +1241,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   card: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: radii.md,
     padding: spacing.md,
     ...shadow1,
@@ -1256,7 +1259,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1267,15 +1270,15 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontWeight: "600",
     fontSize: 15,
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   cardMeta: {
     fontSize: 12,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
   cardTime: {
     fontSize: 11,
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     flexDirection: "row",
     alignItems: "center",
   },
@@ -1292,7 +1295,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   openBtn: {
-    backgroundColor: theme.brand,
+    backgroundColor: t.brand,
   },
   openBtnDisabled: {
     opacity: 0.4,
@@ -1300,4 +1303,12 @@ const styles = StyleSheet.create({
   deleteBtn: {
     backgroundColor: "transparent",
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

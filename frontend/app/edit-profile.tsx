@@ -16,6 +16,8 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import * as ImagePicker from "expo-image-picker";
@@ -33,6 +35,7 @@ const CLOUD_NAME = "qsmemy5r";
 const UPLOAD_PRESET = "gcsharp";
 
 export default function EditProfile() {
+  useTheme(); // re-render this screen when light/dark changes
     const { user, refresh } = useAuth(); // ✅ Use refresh instead of setUser
     const router = useRouter();
     const insets = useSafeAreaInsets();
@@ -346,20 +349,20 @@ export default function EditProfile() {
     );
 }
 
-const styles = StyleSheet.create({
-    root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+    root: { flex: 1, backgroundColor: t.surface },
     header: {
         flexDirection: "row",
         alignItems: "center",
         justifyContent: "space-between",
         paddingHorizontal: spacing.md,
         paddingVertical: spacing.sm,
-        backgroundColor: "#fff",
+        backgroundColor: t.surfaceSecondary,
         borderBottomWidth: 1,
-        borderBottomColor: theme.divider,
+        borderBottomColor: t.divider,
     },
     backBtn: { padding: 4 },
-    headerTitle: { fontSize: 18, fontWeight: "700", color: theme.brand },
+    headerTitle: { fontSize: 18, fontWeight: "700", color: t.brand },
     avatarSection: { alignItems: "center", marginVertical: spacing.lg },
     avatarWrapper: { position: "relative" },
     avatarImage: { width: 100, height: 100, borderRadius: 50 },
@@ -367,42 +370,42 @@ const styles = StyleSheet.create({
         width: 100,
         height: 100,
         borderRadius: 50,
-        backgroundColor: theme.brand,
+        backgroundColor: t.brand,
         alignItems: "center",
         justifyContent: "center",
     },
-    avatarPlaceholderText: { color: "#fff", fontSize: 36, fontWeight: "800" },
+    avatarPlaceholderText: { color: t.onBrandPrimary, fontSize: 36, fontWeight: "800" },
     cameraBtn: {
         position: "absolute",
         bottom: 0,
         right: 0,
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
         borderRadius: 20,
         width: 36,
         height: 36,
         alignItems: "center",
         justifyContent: "center",
         borderWidth: 2,
-        borderColor: "#fff",
+        borderColor: t.surfaceSecondary,
     },
-    avatarHint: { fontSize: 12, color: theme.onSurfaceMuted, marginTop: 6 },
+    avatarHint: { fontSize: 12, color: t.onSurfaceMuted, marginTop: 6 },
     field: { marginBottom: spacing.md },
-    label: { fontWeight: "600", color: theme.onSurface, marginBottom: 4, fontSize: 14 },
+    label: { fontWeight: "600", color: t.onSurface, marginBottom: 4, fontSize: 14 },
     input: {
-        backgroundColor: "#fff",
+        backgroundColor: t.surfaceSecondary,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         borderRadius: radii.md,
         paddingHorizontal: 12,
         paddingVertical: 10,
         fontSize: 15,
-        color: theme.onSurface,
+        color: t.onSurface,
     },
     textArea: { minHeight: 80, textAlignVertical: "top" },
     select: {
-        backgroundColor: "#fff",
+        backgroundColor: t.surfaceSecondary,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         borderRadius: radii.md,
         paddingHorizontal: 12,
         paddingVertical: 10,
@@ -410,27 +413,35 @@ const styles = StyleSheet.create({
         justifyContent: "space-between",
         alignItems: "center",
     },
-    selectText: { fontSize: 15, color: theme.onSurface },
+    selectText: { fontSize: 15, color: t.onSurface },
     options: {
         marginTop: 4,
-        backgroundColor: "#fff",
+        backgroundColor: t.surfaceSecondary,
         borderRadius: radii.md,
         borderWidth: 1,
-        borderColor: theme.border,
+        borderColor: t.border,
         overflow: "hidden",
     },
     optionItem: { paddingVertical: 10, paddingHorizontal: 12 },
-    optionSelected: { backgroundColor: theme.brandTertiary },
-    optionText: { fontSize: 14, color: theme.onSurface },
-    optionTextSelected: { color: theme.brandPrimary, fontWeight: "600" },
-    helperText: { fontSize: 12, color: theme.onSurfaceMuted, marginTop: 4 },
+    optionSelected: { backgroundColor: t.brandTertiary },
+    optionText: { fontSize: 14, color: t.onSurface },
+    optionTextSelected: { color: t.brandPrimary, fontWeight: "600" },
+    helperText: { fontSize: 12, color: t.onSurfaceMuted, marginTop: 4 },
     saveBtn: {
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
         paddingVertical: 14,
         borderRadius: radii.md,
         alignItems: "center",
         marginTop: spacing.md,
     },
     saveBtnDisabled: { opacity: 0.6 },
-    saveBtnText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+    saveBtnText: { color: t.onBrandPrimary, fontWeight: "700", fontSize: 16 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

@@ -4,6 +4,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useLocalSearchParams, useRouter } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 
 // type Q = {
@@ -255,6 +256,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme, spacing, radii, shadow1 } from '@/src/theme';
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from '@/src/api';
 import { useReadingTimer } from '@/src/hooks/useReadingTimer';
 import { StreakBadge } from '@/src/components/StreakBadge';
@@ -278,6 +280,7 @@ type Paper = {
 };
 
 export default function MCQViewer() {
+  useTheme(); // re-render this screen when light/dark changes
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -378,7 +381,7 @@ export default function MCQViewer() {
         <View style={styles.headerRight}>
           {/* Timer */}
           <View style={styles.timer}>
-            <Ionicons name="time-outline" size={16} color={theme.muted} />
+            <Ionicons name="time-outline" size={16} color={theme.onSurfaceMuted} />
             <Text style={styles.timerText}>{formatDuration(displaySeconds)}</Text>
           </View>
           {/* Streak Badge */}
@@ -472,7 +475,7 @@ export default function MCQViewer() {
           left: spacing.md,
           right: spacing.md,
           bottom: insets.bottom + spacing.sm,
-          backgroundColor: '#fff',
+          backgroundColor: theme.surfaceSecondary,
           borderRadius: radii.md,
           borderWidth: 1,
           borderColor: theme.border,
@@ -493,70 +496,78 @@ export default function MCQViewer() {
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: theme.divider,
-    backgroundColor: '#fff',
+    borderBottomColor: t.divider,
+    backgroundColor: t.surfaceSecondary,
   },
   backButton: { padding: 4 },
-  title: { fontSize: 16, fontWeight: '600', color: theme.onSurface },
-  subtitle: { fontSize: 12, color: theme.onSurfaceMuted },
+  title: { fontSize: 16, fontWeight: '600', color: t.onSurface },
+  subtitle: { fontSize: 12, color: t.onSurfaceMuted },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   timer: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  timerText: { fontSize: 13, fontWeight: '500', color: theme.onSurface },
+  timerText: { fontSize: 13, fontWeight: '500', color: t.onSurface },
   footerTimerContent: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  footerTimerLabel: { fontSize: 11, fontWeight: '600', color: theme.onSurfaceMuted, textTransform: 'uppercase', letterSpacing: 0.8 },
-  footerTimerValue: { fontSize: 24, fontWeight: '800', color: theme.brand, letterSpacing: 0.5 },
+  footerTimerLabel: { fontSize: 11, fontWeight: '600', color: t.onSurfaceMuted, textTransform: 'uppercase', letterSpacing: 0.8 },
+  footerTimerValue: { fontSize: 24, fontWeight: '800', color: t.brand, letterSpacing: 0.5 },
   pdfContainer: { height: 400, borderRadius: radii.md, overflow: 'hidden', backgroundColor: '#f3f4f6' },
   aiPanel: {
-    backgroundColor: '#fff',
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     ...shadow1,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
   },
   aiHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   aiTitle: { fontWeight: '600', fontSize: 16 },
-  aiSub: { fontSize: 12, color: theme.onSurfaceMuted, marginBottom: 12 },
+  aiSub: { fontSize: 12, color: t.onSurfaceMuted, marginBottom: 12 },
   aiButton: {
-    backgroundColor: theme.brandPrimary,
+    backgroundColor: t.brandPrimary,
     paddingVertical: 12,
     borderRadius: radii.md,
     alignItems: 'center',
   },
   aiButtonDisabled: { opacity: 0.6 },
-  aiButtonText: { color: '#fff', fontWeight: '600' },
+  aiButtonText: { color: t.onBrandPrimary, fontWeight: '600' },
   qaContainer: {
-    backgroundColor: '#fff',
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     ...shadow1,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
   },
   qaTitle: { fontWeight: '700', fontSize: 16, marginBottom: 12 },
-  qaItem: { marginBottom: 12, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: theme.divider },
+  qaItem: { marginBottom: 12, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: t.divider },
   qaQuestion: { fontWeight: '600', fontSize: 14, marginBottom: 4 },
-  qaStep: { fontSize: 13, color: theme.onSurface, marginLeft: 8 },
-  qaAnswer: { fontWeight: '600', fontSize: 14, marginTop: 4, color: theme.success },
+  qaStep: { fontSize: 13, color: t.onSurface, marginLeft: 8 },
+  qaAnswer: { fontWeight: '600', fontSize: 14, marginTop: 4, color: t.success },
   videoContainer: {
-    backgroundColor: '#fff',
+    backgroundColor: t.surfaceSecondary,
     padding: spacing.md,
     borderRadius: radii.md,
     ...shadow1,
     borderWidth: 1,
-    borderColor: theme.border,
+    borderColor: t.border,
   },
   videoTitle: { fontWeight: '700', fontSize: 16, marginBottom: 4 },
-  videoQuestion: { fontSize: 14, color: theme.onSurfaceMuted, marginBottom: 8 },
+  videoQuestion: { fontSize: 14, color: t.onSurfaceMuted, marginBottom: 8 },
   sceneItem: { marginBottom: 8 },
   sceneHeading: { fontWeight: '600', fontSize: 14 },
-  sceneNarration: { fontSize: 13, color: theme.onSurface, marginTop: 2 },
+  sceneNarration: { fontSize: 13, color: t.onSurface, marginTop: 2 },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

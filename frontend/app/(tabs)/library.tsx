@@ -5,6 +5,7 @@
 // import { useRouter } from "expo-router";
 // import { Ionicons } from "@expo/vector-icons";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 
 // type Course = {
@@ -133,6 +134,7 @@ import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 
 type SavedVideo = {
@@ -153,6 +155,7 @@ type SavedVideo = {
 };
 
 export default function SavedVideosScreen() {
+  useTheme(); // re-render this screen when light/dark changes
   const [items, setItems] = useState<SavedVideo[] | null>(null);
   const [query, setQuery] = useState("");
   const router = useRouter();
@@ -297,10 +300,10 @@ function Chip({ label }: { label: string }) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: theme.surface,
+    backgroundColor: t.surface,
   },
   header: {
     paddingHorizontal: spacing.lg,
@@ -310,16 +313,16 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 24,
     fontWeight: "800",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   sub: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     marginTop: 2,
   },
   searchWrap: {
     marginHorizontal: spacing.lg,
     marginBottom: spacing.sm,
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: radii.pill,
     paddingHorizontal: 12,
     height: 46,
@@ -330,11 +333,11 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    color: theme.onSurface,
+    color: t.onSurface,
     fontSize: 14,
   },
   card: {
-    backgroundColor: "#fff",
+    backgroundColor: t.surfaceSecondary,
     borderRadius: radii.md,
     overflow: "hidden",
     ...shadow1,
@@ -342,7 +345,7 @@ const styles = StyleSheet.create({
   thumb: {
     width: "100%",
     height: 160,
-    backgroundColor: theme.surfaceTertiary,
+    backgroundColor: t.surfaceTertiary,
   },
   cardBody: {
     padding: spacing.md,
@@ -356,7 +359,7 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 16,
     fontWeight: "700",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   metaRow: {
     flexDirection: "row",
@@ -370,17 +373,17 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   meta: {
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
     fontSize: 12,
   },
   chip: {
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: radii.pill,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
   },
   chipTxt: {
-    color: theme.onBrandTertiary,
+    color: t.onBrandTertiary,
     fontSize: 11,
     fontWeight: "700",
   },
@@ -393,11 +396,19 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontSize: 18,
     fontWeight: "700",
-    color: theme.onSurface,
+    color: t.onSurface,
   },
   emptySub: {
     marginTop: 6,
     textAlign: "center",
-    color: theme.onSurfaceMuted,
+    color: t.onSurfaceMuted,
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

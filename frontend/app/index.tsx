@@ -3,8 +3,11 @@ import { View, ActivityIndicator, StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/auth";
 import { theme } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 
 export default function Index() {
+  useTheme(); // re-render this screen when light/dark changes
   const { user, loading } = useAuth();
   const router = useRouter();
 
@@ -28,6 +31,14 @@ export default function Index() {
   );
 }
 
-const styles = StyleSheet.create({
-  c: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  c: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: t.surface },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

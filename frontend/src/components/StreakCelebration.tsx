@@ -4,6 +4,7 @@ import { Modal, View, Text, StyleSheet, Animated, Dimensions, Pressable, Easing 
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
 import { theme } from '@/src/theme';
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -142,14 +143,14 @@ export function StreakCelebration({ visible, streak, onDismiss, autoDismissMs = 
     );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (t: Palette) => StyleSheet.create({
     backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.25)' },
     particle: { position: 'absolute', top: 0 },
     banner: {
         position: 'absolute',
         top: '38%',
         alignSelf: 'center',
-        backgroundColor: '#fff',
+        backgroundColor: t.surfaceSecondary,
         borderRadius: 20,
         paddingHorizontal: 28,
         paddingVertical: 22,
@@ -161,14 +162,22 @@ const styles = StyleSheet.create({
         shadowOffset: { width: 0, height: 8 },
         elevation: 8,
     },
-    bannerTitle: { fontSize: 18, fontWeight: '800', color: theme.onSurface, marginTop: 4 },
-    bannerSub: { fontSize: 13, color: theme.onSurfaceMuted },
+    bannerTitle: { fontSize: 18, fontWeight: '800', color: t.onSurface, marginTop: 4 },
+    bannerSub: { fontSize: 13, color: t.onSurfaceMuted },
     dismissBtn: {
         marginTop: 10,
-        backgroundColor: theme.brandPrimary,
+        backgroundColor: t.brandPrimary,
         paddingHorizontal: 20,
         paddingVertical: 8,
         borderRadius: 999,
     },
-    dismissTxt: { color: '#fff', fontWeight: '700' },
+    dismissTxt: { color: t.onBrandPrimary, fontWeight: '700' },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

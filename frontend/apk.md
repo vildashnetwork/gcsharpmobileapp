@@ -1,5 +1,9 @@
 # 1. Install EAS CLI globally if not installed
 
+expo-file-system
+
+@react-native-community/netinfo
+
 npm install -g eas-cli
 
 # 2. Login to your Expo account (create one if you don't have)
