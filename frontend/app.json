@@ -19,7 +19,8 @@
       },
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "pan",
-      "package": "com.gcsharp"
+      "package": "com.gcsharp",
+      "versionCode": 1
     },
     "web": {
       "bundler": "metro",
@@ -45,7 +46,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "6d1d7945-b983-432e-af2a-9edc70fd3b63"
+        "projectId": "4ea50a82-7983-4ca0-bb9a-b22297bb304d"
       }
     }
   }
