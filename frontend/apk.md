@@ -28,6 +28,8 @@ eas build --platform android --profile production --output aab
 
 npx  expo prebuild -p android
 
+npm run android
+
 `adb logcat *:E | Select-String "gcsharp"`
 
 adb logcat -c
