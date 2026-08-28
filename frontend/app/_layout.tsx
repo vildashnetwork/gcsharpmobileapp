@@ -16,7 +16,7 @@
 
 
 // app/_layout.tsx
-import { Stack } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { LogBox, StatusBar, View, Text, StyleSheet } from "react-native";
@@ -32,6 +32,11 @@ import { ThemeProvider, useTheme } from "@/src/theme-context";
 import { LanguageProvider, useLanguage } from "@/src/i18n";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
+import {
+  schedulePushSetup,
+  registerForegroundNotificationListener,
+  registerNotificationResponseListener,
+} from "@/src/lib/pushNotifications";
 
 LogBox.ignoreAllLogs(true);
 
@@ -63,8 +68,38 @@ function AppLoader() {
 
 // ----- Main App with Auth -----
 function AppContent() {
-  const { loading } = useAuth();
+  const { loading, user } = useAuth();
   const t = useTheme();
+  const router = useRouter();
+
+  // ----- Push notifications (safe/deferred — see src/lib/pushNotifications.ts) -----
+  // Registration only starts AFTER auth has finished loading (we need the
+  // auth token for the backend call) and is deferred 1.5s so it can never
+  // delay or freeze startup. All native calls inside are try/catch-guarded.
+  useEffect(() => {
+    if (loading || !user?.user_id) return;
+
+    schedulePushSetup();
+
+    const disposeReceived = registerForegroundNotificationListener();
+    // Tapping a push opens the linked screen when the link is a valid
+    // in-app route; anything else is ignored.
+    const disposeResponse = registerNotificationResponseListener((link) => {
+      if (typeof link === "string" && link.startsWith("/")) {
+        try {
+          router.push(link as any);
+        } catch (e) {
+          console.warn("[push] failed to navigate to link:", link, e);
+        }
+      }
+    });
+
+    return () => {
+      disposeReceived();
+      disposeResponse();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, user?.user_id]);
 
   // Show loader over the entire app during auth initialization
   if (loading) {

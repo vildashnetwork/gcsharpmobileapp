@@ -457,9 +457,13 @@ export default function Home() {
             <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>{t.home.xpPoints}</Text>
           </View>
           <View style={styles.stat}>
-            <Ionicons name="checkmark-circle-outline" size={20} color={theme.success} />
-            <Text style={[styles.statValue, { color: theme.onSurface }]}>{data?.accuracy ?? 0}%</Text>
-            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>{t.home.accuracy}</Text>
+            <Ionicons name="trending-up-outline" size={20} color={theme.success} />
+            <Text style={[styles.statValue, { color: theme.onSurface }]}>
+              {data && (data.xp + data.xp_to_next) > 0
+                ? Math.round((data.xp / (data.xp + data.xp_to_next)) * 100)
+                : 0}%
+            </Text>
+            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>{t.home.levelProgress}</Text>
           </View>
         </View>
 

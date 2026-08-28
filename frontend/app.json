@@ -38,7 +38,15 @@
           "backgroundColor": "#ffffff"
         }
       ],
-      "expo-video"
+      "expo-video",
+      "expo-audio",
+      [
+        "expo-notifications",
+        {
+          "color": "#1D4ED8",
+          "mode": "production"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

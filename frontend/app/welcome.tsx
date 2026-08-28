@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState, useRef } from "react";
 import {
   ActivityIndicator,
@@ -342,7 +341,7 @@ function PinInput({
             key={number}
             onPress={() => add(number)}
             disabled={disabled}
-            style={({ pressed }) => [styles.key, pressed && { backgroundColor: LIGHT_BLUE }]}
+            style={({ pressed }) => [styles.key, pressed && { backgroundColor: theme.brandTertiary }]}
           >
             <Text style={styles.keyText}>{number}</Text>
           </Pressable>
@@ -351,16 +350,16 @@ function PinInput({
         <Pressable
           onPress={() => add("0")}
           disabled={disabled}
-          style={({ pressed }) => [styles.key, pressed && { backgroundColor: LIGHT_BLUE }]}
+          style={({ pressed }) => [styles.key, pressed && { backgroundColor: theme.brandTertiary }]}
         >
           <Text style={styles.keyText}>0</Text>
         </Pressable>
         <Pressable
           onPress={remove}
           disabled={disabled}
-          style={({ pressed }) => [styles.key, pressed && { backgroundColor: LIGHT_BLUE }]}
+          style={({ pressed }) => [styles.key, pressed && { backgroundColor: theme.brandTertiary }]}
         >
-          <Ionicons name="backspace-outline" size={26} color="#17345F" />
+          <Ionicons name="backspace-outline" size={26} color={theme.onSurface} />
         </Pressable>
       </View>
     </View>
@@ -407,7 +406,7 @@ export default function Welcome() {
   const [resetSuccess, setResetSuccess] = useState(false);
   const [otpSent, setOtpSent] = useState(false);
   const [countdown, setCountdown] = useState(0);
-  const countdownInterval = useRef<NodeJS.Timeout | null>(null);
+  const countdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Cleanup countdown on unmount
   useEffect(() => {
@@ -737,12 +736,6 @@ export default function Welcome() {
       setResetError("PINs do not match.");
       return;
     }
-    // Weak PIN check
-    const weakPins = ["000000", "111111", "123456", "654321", "121212", "112233"];
-    if (weakPins.includes(resetNewPin)) {
-      setResetError("Choose a less predictable PIN.");
-      return;
-    }
 
     setResetBusy(true);
     try {
@@ -840,7 +833,7 @@ export default function Welcome() {
             }}
             hitSlop={12}
           >
-            <Ionicons name="arrow-back" size={28} color={BLUE} />
+            <Ionicons name="arrow-back" size={28} color={theme.brandPrimary} />
           </Pressable>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
             <LanguageSwitcher />
@@ -936,14 +929,14 @@ export default function Welcome() {
               value={email}
               onChangeText={setEmail}
               placeholder={t.welcome.emailPlaceholder}
-              placeholderTextColor="#94A3B8"
+              placeholderTextColor={theme.onSurfaceMuted}
               keyboardType="email-address"
               autoCapitalize="none"
               style={styles.input}
             />
           )}
           <PinInput value={pin} onChange={setPin} disabled={busy} />
-          {busy && <ActivityIndicator style={{ marginTop: 14 }} color={BLUE} />}
+          {busy && <ActivityIndicator style={{ marginTop: 14 }} color={theme.brandPrimary} />}
           {error && <Text style={styles.error}>{error}</Text>}
           {biometricAvailable && (
             <Pressable
@@ -952,7 +945,7 @@ export default function Welcome() {
               disabled={busy}
               style={styles.biometricButton}
             >
-              <Ionicons name="finger-print-outline" size={32} color={BLUE} />
+              <Ionicons name="finger-print-outline" size={32} color={theme.onBrandTertiary} />
               <Text style={styles.biometricText}>{t.welcome.signInFingerprint}</Text>
             </Pressable>
           )}
@@ -1001,7 +994,7 @@ export default function Welcome() {
         >
           <View style={styles.resetHeader}>
             <Pressable onPress={goBackToLogin} hitSlop={12}>
-              <Ionicons name="arrow-back" size={28} color={BLUE} />
+              <Ionicons name="arrow-back" size={28} color={theme.brandPrimary} />
             </Pressable>
             <Text style={styles.resetTitle}>Reset PIN</Text>
             <View style={{ width: 28 }} />
@@ -1017,7 +1010,7 @@ export default function Welcome() {
                 value={resetEmail}
                 onChangeText={setResetEmail}
                 placeholder="your@email.com"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={theme.onSurfaceMuted}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 style={styles.input}
@@ -1049,7 +1042,7 @@ export default function Welcome() {
                 value={resetOtp}
                 onChangeText={setResetOtp}
                 placeholder="Enter 6-digit code"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={theme.onSurfaceMuted}
                 keyboardType="number-pad"
                 maxLength={6}
                 style={styles.input}
@@ -1072,7 +1065,7 @@ export default function Welcome() {
               {resetError && <Text style={styles.error}>{resetError}</Text>}
               {resetSuccess && (
                 <View style={styles.successContainer}>
-                  <Ionicons name="checkmark-circle" size={24} color="#22C55E" />
+                  <Ionicons name="checkmark-circle" size={24} color={theme.success} />
                   <Text style={styles.successText}>PIN reset successful! Redirecting...</Text>
                 </View>
               )}
@@ -1141,7 +1134,7 @@ export default function Welcome() {
             }}
             hitSlop={12}
           >
-            <Ionicons name="arrow-back" size={28} color={BLUE} />
+            <Ionicons name="arrow-back" size={28} color={theme.brandPrimary} />
           </Pressable>
           <Text style={styles.stepText}>Step {registrationProgress} of 4</Text>
           <View style={{ width: 28 }} />
@@ -1153,7 +1146,7 @@ export default function Welcome() {
 
         <View style={styles.registerLogo}>
           <View style={styles.miniLogoCard}>
-            <Ionicons name="school" size={31} color={BLUE} />
+            <Ionicons name="school" size={31} color={theme.brandPrimary} />
           </View>
         </View>
 
@@ -1169,7 +1162,7 @@ export default function Welcome() {
               value={email}
               onChangeText={setEmail}
               placeholder="student@example.com"
-              placeholderTextColor="#94A3B8"
+              placeholderTextColor={theme.onSurfaceMuted}
               keyboardType="email-address"
               autoCapitalize="none"
               autoCorrect={false}
@@ -1190,7 +1183,7 @@ export default function Welcome() {
               value={name}
               onChangeText={setName}
               placeholder="Your full name"
-              placeholderTextColor="#94A3B8"
+              placeholderTextColor={theme.onSurfaceMuted}
               autoCapitalize="words"
               style={styles.input}
             />
@@ -1210,12 +1203,12 @@ export default function Welcome() {
                 value={password}
                 onChangeText={setPassword}
                 placeholder="At least 8 characters"
-                placeholderTextColor="#94A3B8"
+                placeholderTextColor={theme.onSurfaceMuted}
                 secureTextEntry={!showPassword}
                 style={[styles.input, { paddingRight: 52 }]}
               />
               <Pressable onPress={() => setShowPassword((value) => !value)} style={styles.passwordEye}>
-                <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={22} color={MUTED} />
+                <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={22} color={theme.onSurfaceMuted} />
               </Pressable>
             </View>
           </>
@@ -1264,26 +1257,26 @@ export default function Welcome() {
 }
 
 const createStyles = (t: Palette) => StyleSheet.create({
-  root: { flex: 1, backgroundColor: "#F9FAFC" },
+  root: { flex: 1, backgroundColor: t.surface },
 
   // Loading screen with progress
   loading: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#F9FAFC",
+    backgroundColor: t.surface,
     paddingHorizontal: 40,
   },
   loadingTitle: {
     fontSize: 42,
     fontWeight: "800",
-    color: BLUE,
+    color: t.brandPrimary,
     letterSpacing: -0.5,
   },
   loadingSubtitle: {
     fontSize: 16,
     fontWeight: "600",
-    color: MUTED,
+    color: t.onSurfaceMuted,
     letterSpacing: 6,
     marginTop: 2,
     marginBottom: 40,
@@ -1295,9 +1288,10 @@ const createStyles = (t: Palette) => StyleSheet.create({
   progressTrack: {
     width: "100%",
     height: 6,
-    backgroundColor: BORDER,
-    borderRadius: 3,
+    backgroundColor: t.surfaceTertiary,
+    borderRadius: 4,
     overflow: "hidden",
+    marginTop: 8,
   },
   progressFill: {
     height: "100%",
@@ -1307,7 +1301,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
   progressText: {
     marginTop: 8,
     fontSize: 14,
-    color: MUTED,
+    color: t.onSurfaceMuted,
     fontWeight: "600",
   },
 
@@ -1329,19 +1323,19 @@ const createStyles = (t: Palette) => StyleSheet.create({
   splashLogo: { flex: 1, alignItems: "center", justifyContent: "center", transform: [{ translateY: -15 }] },
   logoTitle: { marginTop: -15, color: t.onBrandPrimary, fontSize: 49, fontWeight: "600", letterSpacing: 0.5 },
   logoSubtitle: { marginTop: 6, color: "#F5C542", fontSize: 18, fontWeight: "800", letterSpacing: 6 },
-  splashButton: { minHeight: 61, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: t.surfaceSecondary },
+  splashButton: { minHeight: 61, alignItems: "center", justifyContent: "center", borderRadius: 13, backgroundColor: WHITE },
   splashButtonText: { color: BLUE, fontSize: 17, fontWeight: "800" },
 
   // Onboarding
   onboardingHeader: { height: 65, paddingHorizontal: 23, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  skipText: { color: DARK_BLUE, fontSize: 17, fontWeight: "800" },
+  skipText: { color: t.brandPrimary, fontSize: 17, fontWeight: "800" },
   artworkWrap: { flex: 1, minHeight: 330, alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
   onboardingCopy: { paddingHorizontal: 29, paddingBottom: 16, alignItems: "center" },
-  onboardingTitle: { color: BLUE, fontSize: 34, lineHeight: 42, fontWeight: "800", textAlign: "center" },
-  onboardingDescription: { marginTop: 13, minHeight: 76, color: "#245A9E", fontSize: 18, lineHeight: 25, textAlign: "center" },
+  onboardingTitle: { color: t.brandPrimary, fontSize: 34, lineHeight: 42, fontWeight: "800", textAlign: "center" },
+  onboardingDescription: { marginTop: 13, minHeight: 76, color: t.onSurfaceMuted, fontSize: 18, lineHeight: 25, textAlign: "center" },
   pagination: { marginTop: 19, marginBottom: 20, flexDirection: "row", gap: 12 },
-  pageDot: { width: 29, height: 11, borderRadius: 8, backgroundColor: "#AAB3C1" },
-  pageDotActive: { width: 84, backgroundColor: BLUE },
+  pageDot: { width: 29, height: 11, borderRadius: 8, backgroundColor: t.borderStrong },
+  pageDotActive: { width: 84, backgroundColor: t.brandPrimary },
 
   // Buttons
   primaryButton: {
@@ -1362,13 +1356,13 @@ const createStyles = (t: Palette) => StyleSheet.create({
     minHeight: 58,
     marginTop: 14,
     borderWidth: 1.5,
-    borderColor: BLUE,
+    borderColor: t.brandPrimary,
     borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: t.surfaceSecondary,
   },
-  secondaryButtonText: { color: BLUE, fontSize: 16, fontWeight: "800" },
+  secondaryButtonText: { color: t.brandPrimary, fontSize: 16, fontWeight: "800" },
   disabledButton: { opacity: 0.5 },
 
   // AuthChoice
@@ -1384,30 +1378,30 @@ const createStyles = (t: Palette) => StyleSheet.create({
     overflow: "hidden",
     ...shadow1,
   },
-  authBrand: { marginTop: 20, color: "#123E83", fontSize: 36, fontWeight: "800" },
-  authTagline: { marginTop: 7, color: MUTED, fontSize: 16 },
+  authBrand: { marginTop: 20, color: t.onSurface, fontSize: 36, fontWeight: "800" },
+  authTagline: { marginTop: 7, color: t.onSurfaceMuted, fontSize: 16 },
   choiceCard: { marginTop: 45, marginBottom: 40, padding: 23, borderRadius: 22, backgroundColor: t.surfaceSecondary, ...shadow1 },
-  choiceTitle: { color: "#172B4D", fontSize: 27, fontWeight: "800", textAlign: "center" },
-  choiceDescription: { marginTop: 10, marginBottom: 25, color: MUTED, fontSize: 16, lineHeight: 23, textAlign: "center" },
+  choiceTitle: { color: t.onSurface, fontSize: 27, fontWeight: "800", textAlign: "center" },
+  choiceDescription: { marginTop: 10, marginBottom: 25, color: t.onSurfaceMuted, fontSize: 16, lineHeight: 23, textAlign: "center" },
 
   // Login
   loginContent: { flexGrow: 1, paddingHorizontal: 27, alignItems: "center", justifyContent: "center" },
   loginHeader: { alignItems: "center", marginBottom: 25 },
   smallLogoCard: { width: 84, height: 84, borderRadius: 23, alignItems: "center", justifyContent: "center", overflow: "hidden", backgroundColor: BLUE },
-  loginTitle: { marginTop: 20, color: "#172B4D", fontSize: 31, fontWeight: "800" },
-  loginDescription: { marginTop: 9, maxWidth: 330, color: MUTED, fontSize: 15, lineHeight: 22, textAlign: "center" },
+  loginTitle: { marginTop: 20, color: t.onSurface, fontSize: 31, fontWeight: "800" },
+  loginDescription: { marginTop: 9, maxWidth: 330, color: t.onSurfaceMuted, fontSize: 15, lineHeight: 22, textAlign: "center" },
   pinDots: { marginTop: 22, marginBottom: 29, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 17 },
-  pinDot: { width: 16, height: 16, borderRadius: 9, borderWidth: 2, borderColor: BLUE, backgroundColor: t.surfaceSecondary },
+  pinDot: { width: 16, height: 16, borderRadius: 9, borderWidth: 2, borderColor: t.brandPrimary, backgroundColor: t.surfaceSecondary },
   pinDotFilled: { backgroundColor: BLUE },
   keypad: { width: 305, flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between" },
   key: { width: 82, height: 62, marginBottom: 10, borderRadius: 31, alignItems: "center", justifyContent: "center" },
-  keyText: { color: "#17345F", fontSize: 28, fontWeight: "600" },
-  biometricButton: { marginTop: 17, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 28, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: LIGHT_BLUE },
-  biometricText: { color: BLUE, fontSize: 15, fontWeight: "700" },
+  keyText: { color: t.onSurface, fontSize: 28, fontWeight: "600" },
+  biometricButton: { marginTop: 17, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 28, flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: t.brandTertiary },
+  biometricText: { color: t.onBrandTertiary, fontSize: 15, fontWeight: "700" },
   linkButton: { marginTop: 12, padding: 12 },
-  linkText: { color: BLUE, fontWeight: "700" },
+  linkText: { color: t.brandPrimary, fontWeight: "700" },
   forgotPinLink: { marginTop: 8, padding: 8 },
-  forgotPinText: { color: MUTED, fontSize: 14, textDecorationLine: "underline" },
+  forgotPinText: { color: t.onSurfaceMuted, fontSize: 14, textDecorationLine: "underline" },
 
   // Reset PIN with OTP
   resetHeader: {
@@ -1417,11 +1411,11 @@ const createStyles = (t: Palette) => StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
   },
-  resetTitle: { fontSize: 20, fontWeight: "700", color: "#172B4D" },
+  resetTitle: { fontSize: 20, fontWeight: "700", color: t.onSurface },
   resetContent: { flexGrow: 1, paddingHorizontal: 24, paddingBottom: 40 },
   resetDescription: {
     fontSize: 16,
-    color: MUTED,
+    color: t.onSurfaceMuted,
     textAlign: "center",
     marginBottom: 24,
     lineHeight: 23,
@@ -1431,14 +1425,14 @@ const createStyles = (t: Palette) => StyleSheet.create({
     paddingVertical: 12,
   },
   resendButtonText: {
-    color: BLUE,
+    color: t.brandPrimary,
     fontSize: 16,
     fontWeight: "600",
   },
   resendText: {
     textAlign: "center",
     fontSize: 14,
-    color: MUTED,
+    color: t.onSurfaceMuted,
     marginTop: 4,
   },
   successContainer: {
@@ -1448,34 +1442,33 @@ const createStyles = (t: Palette) => StyleSheet.create({
     marginTop: 8,
     marginBottom: 16,
   },
-  successText: { color: "#22C55E", fontSize: 14, fontWeight: "500" },
+  successText: { color: t.success, fontSize: 14, fontWeight: "500" },
 
   // Registration
   registerContent: { flexGrow: 1, paddingHorizontal: 25 },
   registerHeader: { height: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  stepText: { color: MUTED, fontSize: 14, fontWeight: "700" },
-  progressTrack: { height: 6, marginTop: 8, borderRadius: 4, overflow: "hidden", backgroundColor: "#DFE6EF" },
+  stepText: { color: t.onSurfaceMuted, fontSize: 14, fontWeight: "700" },
   progressValue: { height: "100%", borderRadius: 4, backgroundColor: BLUE },
   registerLogo: { marginTop: 32, marginBottom: 25, alignItems: "center" },
-  miniLogoCard: { width: 66, height: 66, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: LIGHT_BLUE },
-  formTitle: { color: "#172B4D", fontSize: 29, lineHeight: 36, fontWeight: "800", textAlign: "center" },
-  formDescription: { marginTop: 10, marginBottom: 30, color: MUTED, fontSize: 16, lineHeight: 23, textAlign: "center" },
-  inputLabel: { marginBottom: 8, color: "#334155", fontSize: 14, fontWeight: "700" },
+  miniLogoCard: { width: 66, height: 66, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: t.brandTertiary },
+  formTitle: { color: t.onSurface, fontSize: 29, lineHeight: 36, fontWeight: "800", textAlign: "center" },
+  formDescription: { marginTop: 10, marginBottom: 30, color: t.onSurfaceMuted, fontSize: 16, lineHeight: 23, textAlign: "center" },
+  inputLabel: { marginBottom: 8, color: t.onSurface, fontSize: 14, fontWeight: "700" },
   input: {
     width: "100%",
     minHeight: 57,
     paddingHorizontal: 17,
     borderWidth: 1,
-    borderColor: BORDER,
+    borderColor: t.border,
     borderRadius: 13,
-    color: "#172B4D",
+    color: t.onSurface,
     fontSize: 16,
     backgroundColor: t.surfaceSecondary,
     marginBottom: 20,
   },
   passwordWrap: { position: "relative" },
   passwordEye: { position: "absolute", top: 8, right: 8, padding: 10 },
-  error: { marginTop: 14, marginBottom: 8, color: ERROR, fontSize: 14, lineHeight: 20, textAlign: "center" },
+  error: { marginTop: 14, marginBottom: 8, color: t.error, fontSize: 14, lineHeight: 20, textAlign: "center" },
 });
 
 // Rebuild the module styles whenever the active palette changes so
