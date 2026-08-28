@@ -24,4 +24,13 @@ eas build --platform android
 
 eas build --platform android --android-app-bundle --profile production
 
-eas build --platform android --profile production --output aabnpx  expo prebuild -p android
+eas build --platform android --profile production --output aab
+
+npx  expo prebuild -p android
+
+`adb logcat *:E | Select-String "gcsharp"`
+
+adb logcat -c
+adb logcat AndroidRuntime:E *:S > crash_full.txt
+
+Get-Content crash_full.txt
