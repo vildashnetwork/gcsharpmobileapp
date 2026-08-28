@@ -670,6 +670,76 @@ def _new_chat(session_id: str, system: str) -> SimpleLLM:
     chat.session_id = session_id
     return chat
 
+# async def get_current_user(authorization: Optional[str] = Header(None)):
+#     if not authorization or not authorization.startswith("Bearer "):
+#         raise HTTPException(status_code=401, detail="Missing token")
+#     token = authorization.split(" ", 1)[1]
+    
+#     user_id = None
+    
+#     try:
+#         decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+#         user_id = decoded.get("sub")
+#     except:
+#         session = await db.user_sessions.find_one({"session_token": token})
+#         if session:
+#             exp = session.get("expires_at")
+#             if exp:
+#                 if isinstance(exp, str):
+#                     try:
+#                         exp = datetime.fromisoformat(exp)
+#                     except:
+#                         pass
+#                 if exp and exp > datetime.utcnow():
+#                     user_id = session["user_id"]
+#                 else:
+#                     raise HTTPException(status_code=401, detail="Session expired")
+#             else:
+#                 user_id = session["user_id"]
+#         else:
+#             raise HTTPException(status_code=401, detail="Invalid token")
+    
+#     if not user_id:
+#         raise HTTPException(status_code=401, detail="Invalid token")
+    
+#     user = await db.users.find_one({"user_id": user_id})
+#     if not user:
+#         raise HTTPException(status_code=401, detail="User not found")
+    
+#     user.pop("_id", None)
+#     user.pop("password_hash", None)
+    
+#     user.setdefault("onboarded", False)
+#     user.setdefault("xp", 0)
+#     user.setdefault("level", 1)
+#     user.setdefault("streak", 0)
+#     user.setdefault("profile_photo", None)
+#     user.setdefault("exam_level", None)
+#     user.setdefault("full_name", user.get("full_name", "User"))
+#     user.setdefault("role", "student")
+#     user.setdefault("bio", "")
+#     user.setdefault("institution", "")
+#     user.setdefault("study_year", None)
+#     user.setdefault("subjects", [])
+#     user.setdefault("goals", [])
+#     user.setdefault("daily_commitment", "")
+#     user.setdefault("proficiency", "")
+#     user.setdefault("learning_style", "")
+#     user.setdefault("specialization", "")
+#     user.setdefault("accuracy", 0.0)
+#     user.setdefault("settings", DEFAULT_SETTINGS)
+#     user.setdefault("last_goal_met_date", None)
+    
+#     return user
+
+
+
+
+
+
+
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
@@ -706,6 +776,13 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     
+    # ---- FIX: Override full_name and profile_photo with current DB values ----
+    if "name" in user:
+        user["full_name"] = user["name"]
+    if "picture" in user:
+        user["profile_photo"] = user["picture"]
+    # ---------------------------------------------------------------------
+    
     user.pop("_id", None)
     user.pop("password_hash", None)
     
@@ -731,6 +808,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user.setdefault("last_goal_met_date", None)
     
     return user
+
 
 async def get_current_user_optional(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -874,6 +952,8 @@ class ProfileUpdate(BaseModel):
     proficiency: Optional[str] = None
     learning_style: Optional[str] = None
     specialization: Optional[str] = None
+    full_name: Optional[str] = None
+    picture: Optional[str] = None
     onboarded: Optional[bool] = None
 
 class OnboardingIn(BaseModel):
@@ -1184,15 +1264,61 @@ async def logout(request: Request, response: Response):
     response.delete_cookie("session_token", path="/")
     return {"ok": True}
 
+# @api_router.put("/auth/profile")
+# async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
+#     update = {}
+#     for k, v in payload.model_dump().items():
+#         if v is not None:
+#             if k == "full_name":
+#                 update["name"] = v      # DB stores name
+#             elif k == "picture":
+#                 update["picture"] = v
+#             else:
+#                 update[k] = v
+#     if update:
+#         await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
+#     fresh = await db.users.find_one({"user_id": user["user_id"]})
+#     fresh.pop("_id", None)
+#     fresh.pop("password_hash", None)
+#     # Normalise for frontend
+#     if "name" in fresh and "full_name" not in fresh:
+#         fresh["full_name"] = fresh["name"]
+#     if "picture" in fresh and "profile_photo" not in fresh:
+#         fresh["profile_photo"] = fresh["picture"]
+#     return fresh
+
+
+
+
+
+
+
 @api_router.put("/auth/profile")
 async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
-    update = {k: v for k, v in payload.model_dump().items() if v is not None}
+    update = {}
+    for k, v in payload.model_dump().items():
+        if v is not None:
+            if k == "full_name":
+                update["name"] = v
+                update["full_name"] = v   # keep both in sync
+            elif k == "picture":
+                update["picture"] = v
+                update["profile_photo"] = v   # keep both in sync
+            else:
+                update[k] = v
     if update:
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
     fresh = await db.users.find_one({"user_id": user["user_id"]})
     fresh.pop("_id", None)
     fresh.pop("password_hash", None)
+    # Normalise for frontend (already done, but keep for safety)
+    if "name" in fresh and "full_name" not in fresh:
+        fresh["full_name"] = fresh["name"]
+    if "picture" in fresh and "profile_photo" not in fresh:
+        fresh["profile_photo"] = fresh["picture"]
     return fresh
+
+
 
 # ============================================================
 # User Settings
@@ -2015,7 +2141,7 @@ async def analytics_student(user: dict = Depends(get_current_user)):
 # ============================================================
 
 EXAM_STRUCTURE = {
-    "GCE O Level": ["Mathematics", "English Language", "French", "Physics", "Chemistry",
+    "GCE O Level": ["MATHEMATICS", "English Language", "French", "Physics", "Chemistry",
                     "Biology", "History", "Geography", "Economics", "Literature", "Additional Mathematics"],
     "GCE A Level": ["Pure Mathematics with stat", "Pure Mathematics with mech", "Further Mathematics", "Physics", "Chemistry", "Biology",
                     "Economics", "Accounting", "Business Studies", "French", "English Literature"],
@@ -2353,15 +2479,30 @@ async def dashboard_stats(user: dict = Depends(get_current_user)):
 
 
 @api_router.get("/leaderboard")
-async def leaderboard():
-    users = await db.users.find({"role": "student"}, {"_id": 0, "full_name": 1, "xp": 1, "level": 1, "user_id": 1}).to_list(500)
+async def leaderboard(user: dict = Depends(get_current_user_optional)):
+    users = await db.users.find(
+        {"role": "student"},
+        {"_id": 0, "full_name": 1, "xp": 1, "level": 1, "user_id": 1, "profile_photo": 1, "picture": 1}
+    ).to_list(500)
     users.sort(key=lambda u: u.get("xp", 0), reverse=True)
-    board = []
-    for i, u in enumerate(users):
-        entry = {"rank": i + 1, "name": u.get("full_name", "Student"), "xp": u.get("xp", 0), "level": u.get("level", 1)}
-        board.append(entry)
-    return {"top": board[:10]}
 
+    my_user_id = user["user_id"] if user else None
+    board = []
+    my_rank = None
+    for i, u in enumerate(users):
+        entry = {
+            "rank": i + 1,
+            "name": u.get("full_name", "Student"),
+            "picture": u.get("profile_photo") or u.get("picture") or None,
+            "xp": u.get("xp", 0),
+            "level": u.get("level", 1),
+            "is_me": u["user_id"] == my_user_id if my_user_id else False,
+        }
+        if entry["is_me"]:
+            my_rank = entry
+        board.append(entry)
+
+    return {"top": board[:10], "my_rank": my_rank}
 
 # ============================================================
 # Library Routes
