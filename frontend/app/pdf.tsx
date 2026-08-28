@@ -627,7 +627,15 @@ import { StreakBadge } from "@/src/components/StreakBadge";
 import { VideoSolutionPlayer } from "@/src/components/VideoSolutionPlayer";
 import { storage } from "@/src/utils/storage";
 import { useNetworkStatus } from "@/src/lib/useNetworkStatus";
-import { getLocalMediaUri, cacheMediaBytes } from "@/src/lib/mediaStore";
+import { useLanguage } from "@/src/i18n";
+import {
+  getLocalMediaUri,
+  cacheMediaBytes,
+  getMediaManifestEntry,
+  listCachedMedia,
+  deleteCachedMedia,
+  type MediaManifestEntry,
+} from "@/src/lib/mediaStore";
 import { PDFJS_RUNTIME, PDFJS_WORKER } from "@/src/generated/pdfjsRuntime";
 
 const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -701,11 +709,53 @@ function readableSolutionText(value: unknown): string[] {
   return [String(value)];
 }
 
+// ---------- Offline PDF downloads helpers ----------
+
+type DownloadItem = {
+  paper_id?: string;
+  title: string;
+  subject?: string;
+  year?: number;
+  paper_number?: number;
+  pdf_url: string;
+  cached: boolean;
+  localUri?: string;
+  bytes?: number;
+  cachedAt?: number;
+};
+
+/** Derives a readable title from a pdf url when no library title is known. */
+function titleFromUrl(url: string): string {
+  try {
+    const path = url.split("?")[0];
+    const last = path.substring(path.lastIndexOf("/") + 1);
+    const name = decodeURIComponent(last).replace(/\.pdf$/i, "").trim();
+    return name ? humanize(name) : "Downloaded paper";
+  } catch {
+    return "Downloaded paper";
+  }
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "Saved";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(ts?: number): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 export default function PdfViewer() {
   useTheme(); // re-render this screen when light/dark changes
   const { url, title, paper_id } = useLocalSearchParams<{ url: string; title?: string; paper_id?: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { t } = useLanguage();
   const webRef = useRef<WebView>(null);
   const [loading, setLoading] = useState(true);
 
@@ -728,7 +778,7 @@ export default function PdfViewer() {
 
     // iOS-only: fires after a screenshot is taken. No-op on Android.
     screenshotSub = ScreenCapture.addScreenshotListener(() => {
-      setSavedMsg("Screenshots of paper content aren't permitted.");
+      setSavedMsg(t.pdf.highlightHint);
       setTimeout(() => setSavedMsg(null), 3000);
     });
 
@@ -771,6 +821,14 @@ export default function PdfViewer() {
   const [speaking, setSpeaking] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
+
+  // === OFFLINE PDF DOWNLOADS ===
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const [downloadsLoading, setDownloadsLoading] = useState(false);
+  const [downloadItems, setDownloadItems] = useState<DownloadItem[]>([]);
+  const [downloadingUrls, setDownloadingUrls] = useState<string[]>([]);
+  const [currentCached, setCurrentCached] = useState(false);
+  const [downloadingCurrent, setDownloadingCurrent] = useState(false);
 
   // Fetch paper details
   useEffect(() => {
@@ -848,13 +906,8 @@ export default function PdfViewer() {
         if (mounted) setPdfSrc(null);
         return;
       }
-      if (isOnline) {
-        // Best-effort background caching of the bytes for offline use.
-        cacheMediaBytes(fullUrl, "pdf").catch(() => { });
-        if (mounted) setPdfSrc(fullUrl);
-        return;
-      }
-      // Offline: use the cached bytes if the sync worker grabbed them.
+      // Prefer the on-device downloaded copy when it exists: it opens
+      // instantly and works offline — downloaded PDFs are used in-app.
       try {
         const localUri = await getLocalMediaUri(fullUrl);
         if (localUri) {
@@ -863,16 +916,193 @@ export default function PdfViewer() {
           return;
         }
       } catch (e) {
-        console.warn("[PdfViewer] Offline PDF read failed:", e);
+        console.warn("[PdfViewer] Cached PDF read failed:", e);
       }
-      // No cached copy — still point at the URL; the WebView will show its
-      // own load error, which is honest about what's available.
+      if (isOnline) {
+        // Best-effort background caching of the bytes for offline use.
+        cacheMediaBytes(fullUrl, "pdf").catch(() => { });
+        if (mounted) setPdfSrc(fullUrl);
+        return;
+      }
+      // No cached copy and offline — point at the URL; the WebView will show
+      // its own load error, which is honest about what's available.
       if (mounted) setPdfSrc(fullUrl);
     })();
     return () => {
       mounted = false;
     };
   }, [fullUrl, isOnline]);
+
+  // --- Downloads manager: cached PDFs + one-tap download for the rest ---
+
+  // Tracks whether the paper currently open already has its bytes on-device.
+  useEffect(() => {
+    let mounted = true;
+    if (!fullUrl) {
+      if (mounted) setCurrentCached(false);
+      return;
+    }
+    getLocalMediaUri(fullUrl)
+      .then((uri) => {
+        if (mounted) setCurrentCached(!!uri);
+      })
+      .catch(() => {
+        if (mounted) setCurrentCached(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [fullUrl, downloadsOpen]);
+
+  // Builds the downloads list: cached PDFs first, then papers that can still
+  // be downloaded. Cached files that no longer match a library paper are kept
+  // so users can open (or clean up) everything stored on the device.
+  const loadDownloads = async () => {
+    setDownloadsLoading(true);
+    try {
+      const [cached, papersRes] = await Promise.all([
+        listCachedMedia(),
+        api<{ items: Paper[] } | Paper[]>("/papers").catch(() => null),
+      ]);
+      const cacheByUrl = new Map<string, MediaManifestEntry>();
+      for (const entry of cached) {
+        if (entry.kind === "pdf") cacheByUrl.set(entry.remoteUrl, entry);
+      }
+
+      const items = Array.isArray(papersRes)
+        ? papersRes
+        : papersRes && typeof papersRes === "object" && "items" in papersRes
+          ? papersRes.items || []
+          : [];
+
+      const list: DownloadItem[] = [];
+      const seen = new Set<string>();
+
+      for (const p of items) {
+        if (!p.pdf_url) continue;
+        const full = p.pdf_url.startsWith("http") ? p.pdf_url : `${BACKEND}${p.pdf_url}`;
+        if (seen.has(full)) continue;
+        seen.add(full);
+        const entry = cacheByUrl.get(full);
+        list.push({
+          paper_id: p.paper_id,
+          title: p.title || `${p.subject} ${p.year}`,
+          subject: p.subject,
+          year: p.year,
+          paper_number: p.paper_number,
+          pdf_url: full,
+          cached: !!entry,
+          localUri: entry?.localUri,
+          bytes: entry?.bytes,
+          cachedAt: entry?.cachedAt,
+        });
+        cacheByUrl.delete(full);
+      }
+
+      for (const entry of cacheByUrl.values()) {
+        list.push({
+          title: titleFromUrl(entry.remoteUrl),
+          pdf_url: entry.remoteUrl,
+          cached: true,
+          localUri: entry.localUri,
+          bytes: entry.bytes,
+          cachedAt: entry.cachedAt,
+        });
+      }
+
+      list.sort((a, b) => {
+        if (a.cached !== b.cached) return a.cached ? -1 : 1;
+        return (b.cachedAt || 0) - (a.cachedAt || 0);
+      });
+
+      setDownloadItems(list);
+    } finally {
+      setDownloadsLoading(false);
+    }
+  };
+
+  const openDownloads = () => {
+    setDownloadsOpen(true);
+    loadDownloads();
+  };
+
+  const downloadPdf = async (item: DownloadItem) => {
+    if (downloadingUrls.includes(item.pdf_url)) return;
+    setDownloadingUrls((prev) => [...prev, item.pdf_url]);
+    try {
+      const localUri = await cacheMediaBytes(item.pdf_url, "pdf");
+      const entry = localUri ? await getMediaManifestEntry(item.pdf_url) : null;
+      setDownloadItems((prev) =>
+        prev.map((it) =>
+          it.pdf_url === item.pdf_url
+            ? {
+              ...it,
+              cached: !!localUri,
+              localUri: localUri || it.localUri,
+              bytes: entry?.bytes ?? it.bytes,
+              cachedAt: localUri ? Date.now() : it.cachedAt,
+            }
+            : it
+        )
+      );
+      if (item.pdf_url === fullUrl) setCurrentCached(!!localUri);
+      setSavedMsg(
+        localUri
+          ? `“${item.title}” ${t.pdf.readOffline}`
+          : `${t.pdf.couldntDownload} “${item.title}”. ${t.pdf.checkConnection}`
+      );
+      setTimeout(() => setSavedMsg(null), 3000);
+    } finally {
+      setDownloadingUrls((prev) => prev.filter((u) => u !== item.pdf_url));
+    }
+  };
+
+  const downloadCurrentPdf = async () => {
+    if (!fullUrl || currentCached || downloadingCurrent) return;
+    setDownloadingCurrent(true);
+    try {
+      const localUri = await cacheMediaBytes(fullUrl, "pdf");
+      setCurrentCached(!!localUri);
+      setSavedMsg(
+        localUri
+          ? t.pdf.paperDownloaded
+          : t.pdf.downloadFailed
+      );
+      setTimeout(() => setSavedMsg(null), 3000);
+    } finally {
+      setDownloadingCurrent(false);
+    }
+  };
+
+  const openDownloaded = (item: DownloadItem) => {
+    setDownloadsOpen(false);
+    router.push({
+      pathname: "/pdf",
+      params: {
+        url: item.pdf_url,
+        title: item.title,
+        ...(item.paper_id ? { paper_id: item.paper_id } : {}),
+      },
+    });
+  };
+
+  const removeDownload = async (item: DownloadItem) => {
+    try {
+      await deleteCachedMedia(item.pdf_url);
+      setDownloadItems((prev) =>
+        prev.map((it) =>
+          it.pdf_url === item.pdf_url
+            ? { ...it, cached: false, localUri: undefined, bytes: undefined, cachedAt: undefined }
+            : it
+        )
+      );
+      if (item.pdf_url === fullUrl) setCurrentCached(false);
+      setSavedMsg(`${t.pdf.removed} “${item.title}” ${t.pdf.fromDevice}`);
+      setTimeout(() => setSavedMsg(null), 3000);
+    } catch {
+      // ignore
+    }
+  };
 
   const html = useMemo(
     () => pdfHtml(pdfSrc ?? "", 1, { pdfjsRuntime: PDFJS_RUNTIME, pdfjsWorker: PDFJS_WORKER }),
@@ -977,12 +1207,17 @@ export default function PdfViewer() {
           <Ionicons name="arrow-back" size={22} color={theme.brand} />
         </Pressable>
 
-        <Text style={styles.title} numberOfLines={1}>{title || "PDF Paper"}</Text>
+        <Text style={styles.title} numberOfLines={1}>{title || t.pdf.paper}</Text>
 
         <View style={styles.headerRight}>
-          <Pressable onPress={saveDraft} testID="save-draft-btn" style={styles.saveButton}>
-            <Ionicons name={draftSaved ? "bookmark" : "bookmark-outline"} size={20} color={theme.brand} />
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable onPress={openDownloads} testID="downloads-btn" style={styles.saveButton}>
+              <Ionicons name="cloud-download-outline" size={20} color={theme.brand} />
+            </Pressable>
+            <Pressable onPress={saveDraft} testID="save-draft-btn" style={styles.saveButton}>
+              <Ionicons name={draftSaved ? "bookmark" : "bookmark-outline"} size={20} color={theme.brand} />
+            </Pressable>
+          </View>
           <View style={styles.headerMeta}>
             <View style={styles.timer}>
               <Ionicons name="time-outline" size={16} color={theme.onSurfaceMuted} />
@@ -1009,13 +1244,45 @@ export default function PdfViewer() {
         {loading && (
           <View style={styles.loader}>
             <ActivityIndicator size="large" color={theme.brandPrimary} />
-            <Text style={styles.loadTxt}>Loading paper…</Text>
+            <Text style={styles.loadTxt}>{t.pdf.loadingPaper}</Text>
           </View>
         )}
         <View style={styles.hint} pointerEvents="none">
           <Ionicons name="finger-print-outline" size={14} color="#fff" />
-          <Text style={styles.hintTxt}>Highlight any question to use GC AI</Text>
+          <Text style={styles.hintTxt}>{t.pdf.highlightHint}</Text>
         </View>
+
+        {/* Offline download status / action for the open paper */}
+        {fullUrl && (
+          <Pressable
+            onPress={downloadCurrentPdf}
+            disabled={downloadingCurrent || currentCached}
+            style={[styles.offlinePill, currentCached && styles.offlinePillDone]}
+            testID="offline-download-pill"
+          >
+            {downloadingCurrent ? (
+              <ActivityIndicator size="small" color={theme.onBrandPrimary} />
+            ) : (
+              <Ionicons
+                name={currentCached ? "checkmark-circle" : "cloud-download-outline"}
+                size={15}
+                color={currentCached ? theme.success : theme.onBrandPrimary}
+              />
+            )}
+            <Text
+              style={[
+                styles.offlinePillTxt,
+                currentCached && { color: theme.onSurface },
+              ]}
+            >
+              {downloadingCurrent
+                ? t.pdf.downloading
+                : currentCached
+                  ? t.pdf.availableOffline
+                  : t.pdf.downloadOffline}
+            </Text>
+          </Pressable>
+        )}
 
         {/* AI action button - Paper1 vs Paper2 */}
         {/* {!loading && !paperLoading && paper && (
@@ -1060,11 +1327,11 @@ export default function PdfViewer() {
         <View style={styles.sheetBackdrop}>
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="ask-sheet">
             <View style={styles.grabber} />
-            <Text style={styles.sheetTitle}>Ask GC AI</Text>
+            <Text style={styles.sheetTitle}>{t.pdf.askAi}</Text>
             <Text style={styles.sheetSel} numberOfLines={5}>“{askOpen?.text}”</Text>
             <Pressable style={styles.primaryBtn} onPress={askGcAi} testID="confirm-ask">
               <Ionicons name="sparkles" size={18} color="#fff" />
-              <Text style={styles.primaryBtnTxt}>Open in AI chat</Text>
+              <Text style={styles.primaryBtnTxt}>{t.pdf.openInChat}</Text>
             </Pressable>
             <Pressable style={styles.ghostBtn} onPress={() => setAskOpen(null)} testID="cancel-ask">
               <Text style={styles.ghostBtnTxt}>Cancel</Text>
@@ -1078,11 +1345,11 @@ export default function PdfViewer() {
         <View style={styles.sheetBackdrop}>
           <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="save-sheet">
             <View style={styles.grabber} />
-            <Text style={styles.sheetTitle}>Save as draft</Text>
+            <Text style={styles.sheetTitle}>{t.pdf.saveDraft}</Text>
             <Text style={styles.sheetSel} numberOfLines={5}>{saveOpen?.text}</Text>
             <Pressable style={styles.primaryBtn} onPress={saveDraft} testID="confirm-save">
               <Ionicons name="bookmark" size={18} color="#fff" />
-              <Text style={styles.primaryBtnTxt}>Save to My Drafts</Text>
+              <Text style={styles.primaryBtnTxt}>{t.pdf.saveToDrafts}</Text>
             </Pressable>
             <Pressable style={styles.ghostBtn} onPress={() => setSaveOpen(null)} testID="cancel-save">
               <Text style={styles.ghostBtnTxt}>Cancel</Text>
@@ -1097,21 +1364,21 @@ export default function PdfViewer() {
           <View style={[styles.sheetLg, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="video-sheet">
             <View style={styles.grabber} />
             <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-              <Text style={styles.sheetTitle}>Video Solution</Text>
+              <Text style={styles.sheetTitle}>{t.pdf.videoSolution}</Text>
               <Pressable onPress={closeVideoModal} testID="close-video"><Ionicons name="close" size={22} color={theme.onSurface} /></Pressable>
             </View>
-            <Text style={styles.sheetSel} numberOfLines={4}>Question: “{videoOpen?.text}”</Text>
+            <Text style={styles.sheetSel} numberOfLines={4}>{t.pdf.question}: “{videoOpen?.text}”</Text>
 
             {!solution && !solLoading && (
               <Pressable style={styles.primaryBtn} onPress={generateHighlightSolution} testID="generate-video">
                 <Ionicons name="film-outline" size={18} color="#fff" />
-                <Text style={styles.primaryBtnTxt}>Generate narrated solution</Text>
+                <Text style={styles.primaryBtnTxt}>{t.pdf.generateNarration}</Text>
               </Pressable>
             )}
             {solLoading && (
               <View style={{ alignItems: "center", padding: spacing.lg }}>
                 <ActivityIndicator color={theme.brandPrimary} />
-                <Text style={{ marginTop: 8, color: theme.onSurfaceMuted }}>Solving with GC AI</Text>
+                <Text style={{ marginTop: 8, color: theme.onSurfaceMuted }}>{t.pdf.solving}</Text>
               </View>
             )}
             {solution && (
@@ -1150,7 +1417,7 @@ export default function PdfViewer() {
       <Modal visible={showQaModal} animationType="slide" onRequestClose={() => setShowQaModal(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: theme.surfaceSecondary }}>
           <View style={styles.qaModalHeader}>
-            <Text style={styles.qaModalTitle}>Worked Solutions</Text>
+            <Text style={styles.qaModalTitle}>{t.pdf.workedSolutions}</Text>
             <Pressable onPress={() => setShowQaModal(false)}>
               <Ionicons name="close" size={24} color={theme.onSurface} />
             </Pressable>
@@ -1162,11 +1429,116 @@ export default function PdfViewer() {
                 {item.steps.map((step, j) => (
                   <Text key={j} style={styles.qaStep}>{j + 1}. {step}</Text>
                 ))}
-                <Text style={styles.qaAnswer}>Answer: {item.answer}</Text>
+                <Text style={styles.qaAnswer}>{t.pdf.answer}: {item.answer}</Text>
               </View>
             ))}
           </ScrollView>
         </SafeAreaView>
+      </Modal>
+
+      {/* PDF downloads manager: everything cached on-device, plus one-tap
+          downloads for papers that aren't stored yet. */}
+      <Modal visible={downloadsOpen} transparent animationType="slide" onRequestClose={() => setDownloadsOpen(false)}>
+        <View style={styles.sheetBackdrop}>
+          <View style={[styles.sheetLg, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="downloads-sheet">
+            <View style={styles.grabber} />
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+              <Text style={styles.sheetTitle}>{t.pdf.downloads}</Text>
+              <Pressable onPress={() => setDownloadsOpen(false)} testID="close-downloads">
+                <Ionicons name="close" size={22} color={theme.onSurface} />
+              </Pressable>
+            </View>
+
+            {downloadsLoading ? (
+              <View style={styles.dlEmpty}>
+                <ActivityIndicator color={theme.brandPrimary} />
+                <Text style={styles.dlEmptyTxt}>{t.pdf.checkingLibrary}</Text>
+              </View>
+            ) : (
+              <ScrollView
+                style={{ maxHeight: "68%" }}
+                contentContainerStyle={{ gap: spacing.sm, paddingBottom: spacing.sm }}
+                showsVerticalScrollIndicator={false}
+              >
+                {downloadItems.length === 0 && (
+                  <View style={styles.dlEmpty}>
+                    <Ionicons name="cloud-offline-outline" size={26} color={theme.onSurfaceMuted} />
+                    <Text style={styles.dlEmptyTxt}>
+                      {t.pdf.noPdfsYet}{"\n"}{t.pdf.noPdfsHint}
+                    </Text>
+                  </View>
+                )}
+
+                {downloadItems.some((i) => i.cached) && (
+                  <Text style={styles.dlSection}>{t.pdf.onDevice}</Text>
+                )}
+                {downloadItems
+                  .filter((i) => i.cached)
+                  .map((item) => (
+                    <View key={item.pdf_url} style={styles.dlRow}>
+                      <Pressable
+                        style={styles.dlRowMain}
+                        onPress={() => openDownloaded(item)}
+                        testID={`open-dl-${item.paper_id ?? "local"}`}
+                      >
+                        <View style={styles.dlIcon}>
+                          <Ionicons name="document-text" size={18} color={theme.brand} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.dlTitle} numberOfLines={2}>{item.title}</Text>
+                          <Text style={styles.dlMeta}>
+                            {formatBytes(item.bytes)} · {t.pdf.savedOn} {formatDate(item.cachedAt)}
+                          </Text>
+                        </View>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => removeDownload(item)}
+                        style={styles.dlAction}
+                        hitSlop={8}
+                        testID={`remove-dl-${item.paper_id ?? "local"}`}
+                      >
+                        <Ionicons name="trash-outline" size={17} color={theme.error} />
+                      </Pressable>
+                    </View>
+                  ))}
+
+                {downloadItems.some((i) => !i.cached) && (
+                  <Text style={styles.dlSection}>{t.pdf.availableToDownload}</Text>
+                )}
+                {downloadItems
+                  .filter((i) => !i.cached)
+                  .map((item) => (
+                    <View key={item.pdf_url} style={styles.dlRow}>
+                      <View style={styles.dlRowMain}>
+                        <View style={[styles.dlIcon, { backgroundColor: theme.surfaceTertiary }]}>
+                          <Ionicons name="document-text-outline" size={18} color={theme.onSurfaceMuted} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.dlTitle} numberOfLines={2}>{item.title}</Text>
+                          <Text style={styles.dlMeta}>{t.pdf.notDownloaded}</Text>
+                        </View>
+                      </View>
+                      <Pressable
+                        onPress={() => downloadPdf(item)}
+                        disabled={downloadingUrls.includes(item.pdf_url)}
+                        style={styles.dlGetBtn}
+                        testID={`download-dl-${item.paper_id ?? item.pdf_url}`}
+                      >
+                        {downloadingUrls.includes(item.pdf_url) ? (
+                          <ActivityIndicator size="small" color={theme.onBrandPrimary} />
+                        ) : (
+                          <>
+                            <Ionicons name="download-outline" size={13} color={theme.onBrandPrimary} />
+                            <Text style={styles.dlGetTxt}>{t.pdf.get}</Text>
+                          </>
+                        )}
+                      </Pressable>
+                    </View>
+                  ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
       </Modal>
     </View>
   );
@@ -1277,6 +1649,64 @@ const createStyles = (t: Palette) => StyleSheet.create({
   qaQuestion: { fontWeight: '600', fontSize: 14, marginBottom: 4 },
   qaStep: { fontSize: 13, color: t.onSurface, marginLeft: 8, marginBottom: 2 },
   qaAnswer: { fontWeight: '600', fontSize: 14, marginTop: 4, color: t.success },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
+  offlinePill: {
+    position: "absolute",
+    bottom: 56,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: t.brandPrimary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: radii.pill,
+    ...shadow1,
+  },
+  offlinePillDone: { backgroundColor: t.successBg },
+  offlinePillTxt: { color: t.onBrandPrimary, fontSize: 12, fontWeight: "700" },
+  dlSection: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: t.onSurfaceMuted,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+    marginTop: spacing.xs,
+  },
+  dlRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: t.surface,
+    borderRadius: radii.md,
+    padding: spacing.sm,
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: t.border,
+  },
+  dlRowMain: { flexDirection: "row", alignItems: "center", gap: spacing.sm, flex: 1 },
+  dlIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: t.brandTertiary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dlTitle: { fontSize: 13, fontWeight: "700", color: t.onSurface, lineHeight: 17 },
+  dlMeta: { fontSize: 11, color: t.onSurfaceMuted, marginTop: 2 },
+  dlAction: { width: 34, height: 34, borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  dlGetBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: t.brandPrimary,
+    paddingHorizontal: 12,
+    height: 32,
+    borderRadius: 10,
+  },
+  dlGetTxt: { color: t.onBrandPrimary, fontWeight: "800", fontSize: 12 },
+  dlEmpty: { alignItems: "center", gap: 8, paddingVertical: spacing.xl },
+  dlEmptyTxt: { color: t.onSurfaceMuted, textAlign: "center", fontSize: 13, lineHeight: 18 },
 });
 
 // Rebuild the module styles whenever the active palette changes so

@@ -185,6 +185,7 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useThemeMode, type ThemePref } from "@/src/theme-context";
 import { useAuth } from "@/src/auth";
 import { storage } from "@/src/utils/storage";
+import { useLanguage, type Lang } from "@/src/i18n";
 
 const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
 
@@ -192,6 +193,7 @@ export default function Profile() {
   useTheme(); // re-render this screen when light/dark changes
   const { pref, setPref } = useThemeMode();
   const { user, logout, refresh } = useAuth();
+  const { t, lang, setLang } = useLanguage();
   const router = useRouter();
 
   // === Offline mode toggle ===
@@ -275,9 +277,9 @@ export default function Profile() {
               />
             </View>
             <View>
-              <Text style={styles.modeTitle}>Appearance</Text>
+              <Text style={styles.modeTitle}>{t.profile.appearance}</Text>
               <Text style={styles.modeSub}>
-                {pref === "system" ? "Following your device setting" : pref === "dark" ? "Dark theme" : "Light theme"}
+                {pref === "system" ? t.profile.systemMode : pref === "dark" ? t.profile.darkMode : t.profile.lightMode}
               </Text>
             </View>
           </View>
@@ -309,6 +311,47 @@ export default function Profile() {
           </View>
         </View>
 
+        {/* Language: English / French — stored locally only */}
+        <View style={styles.modeCard} testID="language-card">
+          <View style={styles.modeLeft}>
+            <View style={[styles.modeIconWrap, { backgroundColor: theme.brandTertiary }]}>
+              <Ionicons name="language-outline" size={18} color={theme.onBrandTertiary} />
+            </View>
+            <View>
+              <Text style={styles.modeTitle}>{t.profile.language}</Text>
+              <Text style={styles.modeSub}>{t.profile.languageDesc}</Text>
+            </View>
+          </View>
+          <View style={styles.segRow}>
+            {(
+              [
+                { key: "en" as const, label: "EN" },
+                { key: "fr" as const, label: "FR" },
+              ] as { key: Lang; label: string }[]
+            ).map((opt) => {
+              const active = lang === opt.key;
+              return (
+                <Pressable
+                  key={opt.key}
+                  testID={`profile-lang-${opt.key}`}
+                  onPress={() => setLang(opt.key)}
+                  style={[styles.segBtnWide, active && styles.segBtnActive]}
+                  hitSlop={4}
+                >
+                  <Text
+                    style={[
+                      styles.segBtnTxt,
+                      { color: active ? theme.onBrandPrimary : theme.onSurfaceMuted },
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
         {/* Online / Offline mode toggle */}
         <View style={styles.modeCard} testID="mode-toggle-card">
           <View style={styles.modeLeft}>
@@ -320,9 +363,11 @@ export default function Profile() {
               />
             </View>
             <View>
-              <Text style={styles.modeTitle}>{isOffline ? "Offline Mode" : "Online Mode"}</Text>
+              <Text style={styles.modeTitle}>{isOffline ? t.common.offline : t.common.online}</Text>
               <Text style={styles.modeSub}>
-                {isOffline ? "Using downloaded content only" : "Syncing with the server"}
+                {isOffline
+                  ? lang === "fr" ? "Contenu téléchargé uniquement" : "Using downloaded content only"
+                  : lang === "fr" ? "Synchronisation avec le serveur" : "Syncing with the server"}
               </Text>
             </View>
           </View>
@@ -337,19 +382,19 @@ export default function Profile() {
         </View>
 
         <View style={styles.metricsRow}>
-          <Metric icon="flame" label="Streak" value={String(user?.streak ?? 0)} tint={theme.warning} />
-          <Metric icon="trophy-outline" label="Level" value={String(user?.level ?? 1)} tint={theme.brandPrimary} />
-          <Metric icon="star" label="XP" value={String(user?.xp ?? 0)} tint={theme.success} />
+          <Metric icon="flame" label={t.home.streak} value={String(user?.streak ?? 0)} tint={theme.warning} />
+          <Metric icon="trophy-outline" label={t.home.level} value={String(user?.level ?? 1)} tint={theme.brandPrimary} />
+          <Metric icon="star" label={t.home.xp} value={String(user?.xp ?? 0)} tint={theme.success} />
         </View>
 
-        <Row icon="create-outline" label="Edit Profile" onPress={() => router.push("/edit-profile")} testID="row-edit" />
-        <Row icon="stats-chart-outline" label="Academic Analytics" onPress={() => router.push("/stats")} testID="row-stats" />
-        <Row icon="bookmark-outline" label="My Drafts" onPress={() => router.push("/drafts")} testID="row-drafts" />
-        <Row icon="document-text-outline" label="Past Questions" onPress={() => router.push("/past-questions")} testID="row-pastq" />
-        <Row icon="chatbubble-ellipses-outline" label="AI Tutor" onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
-        <Row icon="videocam-outline" label="Lesson Videos" onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
-        <Row icon="book-outline" label="Library" onPress={() => router.push("/(tabs)/library")} testID="row-library" />
-        <Row icon="log-out-outline" label="Log out" danger onPress={doLogout} testID="row-logout" />
+        <Row icon="create-outline" label={t.profile.editProfile} onPress={() => router.push("/edit-profile")} testID="row-edit" />
+        <Row icon="stats-chart-outline" label={t.stats.title} onPress={() => router.push("/stats")} testID="row-stats" />
+        <Row icon="bookmark-outline" label={t.profile.drafts} onPress={() => router.push("/drafts")} testID="row-drafts" />
+        <Row icon="document-text-outline" label={t.pastQuestions.title} onPress={() => router.push("/past-questions")} testID="row-pastq" />
+        <Row icon="chatbubble-ellipses-outline" label={t.tabs.ai} onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
+        <Row icon="videocam-outline" label={t.tabs.lessons} onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
+        <Row icon="book-outline" label={t.tabs.library} onPress={() => router.push("/(tabs)/library")} testID="row-library" />
+        <Row icon="log-out-outline" label={t.profile.logout} danger onPress={doLogout} testID="row-logout" />
       </ScrollView>
     </SafeAreaView>
   );
@@ -443,6 +488,15 @@ const createStyles = (t: Palette) => StyleSheet.create({
   segBtnActive: {
     backgroundColor: t.brandPrimary,
   },
+  segBtnWide: {
+    minWidth: 40,
+    paddingHorizontal: 8,
+    height: 28,
+    borderRadius: radii.pill,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  segBtnTxt: { fontSize: 12, fontWeight: "800" },
   metricsRow: { flexDirection: "row", gap: spacing.sm },
   metric: {
     flex: 1,

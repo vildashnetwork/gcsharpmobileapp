@@ -1293,6 +1293,7 @@ import { useRouter, Stack } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { useLanguage } from "@/src/i18n";
 
 // ---------- Types ----------
 type ExamStructure = {
@@ -1364,6 +1365,7 @@ function HighlightedText({
 export default function PastQuestions() {
   useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
+  const { t } = useLanguage();
 
   // ---------- State ----------
   const [structure, setStructure] = useState<ExamStructure | null>(null);
@@ -1482,7 +1484,7 @@ export default function PastQuestions() {
         setPapers(items);
       } catch (err) {
         console.error("Failed to load papers:", err);
-        setSearchError("Could not load papers. Pull down to retry.");
+        setSearchError(t.pastQuestions.loadError);
         setPapers([]);
       } finally {
         setLoading(false);
@@ -1564,7 +1566,7 @@ export default function PastQuestions() {
         )
       );
 
-      Alert.alert("Error", "Could not update draft status.");
+      Alert.alert("Error", t.common.error);
     } finally {
       setTogglingDraft(null);
     }
@@ -1643,7 +1645,7 @@ export default function PastQuestions() {
           <Ionicons name="arrow-back" size={22} color={theme.brand} />
         </Pressable>
 
-        <Text style={styles.headerT}>Past Questions</Text>
+        <Text style={styles.headerT}>{t.pastQuestions.title}</Text>
 
         <View style={{ width: 22 }} />
       </View>
@@ -1651,7 +1653,7 @@ export default function PastQuestions() {
       {/* Level selector */}
       <View style={styles.levelSection}>
         <View style={styles.sectionTopLine}>
-          <Text style={styles.sectionEyebrow}>EXAM LEVEL</Text>
+          <Text style={styles.sectionEyebrow}>{t.pastQuestions.examLevel}</Text>
           <Text style={styles.sectionContext}>{selectedDisplayLevel}</Text>
         </View>
 
@@ -1692,9 +1694,9 @@ export default function PastQuestions() {
       <View style={styles.subjectSection}>
         <View style={styles.subjectHeader}>
           <View>
-            <Text style={styles.subjectTitle}>Subjects</Text>
+            <Text style={styles.subjectTitle}>{t.pastQuestions.subjects}</Text>
             <Text style={styles.subjectHint}>
-              Choose a subject to explore papers
+              {t.pastQuestions.subjectsHint}
             </Text>
           </View>
 
@@ -1708,7 +1710,7 @@ export default function PastQuestions() {
             <ActivityIndicator color={theme.brandPrimary} />
           </View>
         ) : subjects.length === 0 ? (
-          <Text style={styles.emptyText}>No subjects available</Text>
+          <Text style={styles.emptyText}>{t.pastQuestions.noPapers}</Text>
         ) : (
           <ScrollView
             horizontal
@@ -1740,7 +1742,7 @@ export default function PastQuestions() {
                   selectedSubject === null && styles.subjectChipTextActive,
                 ]}
               >
-                All
+                {t.pastQuestions.all}
               </Text>
             </Pressable>
 
@@ -1783,8 +1785,8 @@ export default function PastQuestions() {
       {availableYears.length > 0 && (
         <View style={styles.yearSection}>
           <View style={styles.yearHeader}>
-            <Text style={styles.subjectTitle}>Year</Text>
-            <Text style={styles.subjectHint}>Filter by exam year</Text>
+            <Text style={styles.subjectTitle}>{t.pastQuestions.years}</Text>
+            <Text style={styles.subjectHint}>{t.pastQuestions.years}</Text>
           </View>
 
           <ScrollView
@@ -1814,7 +1816,7 @@ export default function PastQuestions() {
                   selectedYear === null && styles.subjectChipTextActive,
                 ]}
               >
-                All years
+                {t.pastQuestions.all}
               </Text>
             </Pressable>
 
@@ -1864,12 +1866,12 @@ export default function PastQuestions() {
       >
         <View style={styles.resultsHeader}>
           <Text style={styles.sec}>
-            {selectedYear ? `${selectedYear} Papers` : selectedSubject || "All Papers"}
+            {selectedYear ? `${selectedYear}` : selectedSubject || t.pastQuestions.allPapers}
           </Text>
 
           {!loading && papers.length > 0 && (
             <Text style={styles.resultsCount}>
-              {papers.length} {papers.length === 1 ? "paper" : "papers"}
+              {papers.length} {papers.length === 1 ? t.pastQuestions.paper : t.pastQuestions.papers}
             </Text>
           )}
         </View>
@@ -1894,7 +1896,7 @@ export default function PastQuestions() {
               style={styles.retryBtn}
               onPress={() => loadPapers()}
             >
-              <Text style={styles.retryBtnText}>Retry</Text>
+              <Text style={styles.retryBtnText}>{t.common.retry}</Text>
             </Pressable>
           </View>
         ) : papers.length === 0 ? (
@@ -1906,7 +1908,7 @@ export default function PastQuestions() {
             />
 
             <Text style={styles.emptyText}>
-              {selectedYear ? `No papers found for ${selectedYear}` : "No papers found"}
+              {selectedYear ? t.pastQuestions.noPapers : t.pastQuestions.noPapers}
             </Text>
           </View>
         ) : (
@@ -1922,9 +1924,9 @@ export default function PastQuestions() {
 
                 <Text style={styles.paperS}>
                   Paper {p.paper_number} · {p.year}
-                  {p.pdf_url ? " · PDF available" : ""}
+                  {p.pdf_url ? ` · ${t.pastQuestions.paperAvailable}` : ""}
                   {typeof p.views === "number"
-                    ? ` · ${p.views.toLocaleString()} views`
+                    ? ` · ${p.views.toLocaleString()} ${t.pastQuestions.views}`
                     : ""}
                 </Text>
               </View>
@@ -1948,7 +1950,7 @@ export default function PastQuestions() {
 
                 <View style={styles.startBtn}>
                   <Text style={styles.startTxt}>
-                    {p.pdf_url ? "PDF" : "Open"}
+                    {p.pdf_url ? "PDF" : t.pastQuestions.open}
                   </Text>
                   <Ionicons
                     name={

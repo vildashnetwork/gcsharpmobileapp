@@ -32,6 +32,8 @@ import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
+import { useLanguage } from "@/src/i18n";
+import { LanguageSwitcher } from "@/src/components/LanguageSwitcher";
 
 type Screen =
   | "loading"
@@ -70,36 +72,37 @@ const WHITE = "#FFFFFF";
 const BORDER = "#D7DEE8";
 const ERROR = "#C62828";
 
-const onboarding: OnboardingItem[] = [
-  {
-    title: "All Your Exams in One Place",
-    description:
-      "Master GCE, HND, Concours and other exams with verified study materials and expert guidance tailored for Cameroon.",
-    button: "Next",
-    artwork: "students",
-  },
-  {
-    title: "Thousands of Past Papers",
-    description:
-      "Access complete Paper 1, 2 and 3 questions with verified answers.",
-    button: "Next",
-    artwork: "papers",
-  },
-  {
-    title: "Instant AI Explanations",
-    description:
-      "Stuck on a tough question? Get instant step-by-step solutions tuned for Cameroonian exam syllabi.",
-    button: "Next",
-    artwork: "ai",
-  },
-  {
-    title: "And Much More...",
-    description:
-      "Explore specialized courses, personalized study plans and a growing education library designed for your success.",
-    button: "Start Revising",
-    artwork: "explore",
-  },
-];
+// Onboarding copy is resolved from the active language dictionary at render
+// time so switching EN/FR (even mid-flow) translates every slide.
+function useOnboardingItems(): OnboardingItem[] {
+  const { t } = useLanguage();
+  return [
+    {
+      title: t.welcome.onboarding1Title,
+      description: t.welcome.onboarding1Desc,
+      button: t.common.next,
+      artwork: "students",
+    },
+    {
+      title: t.welcome.onboarding2Title,
+      description: t.welcome.onboarding2Desc,
+      button: t.common.next,
+      artwork: "papers",
+    },
+    {
+      title: t.welcome.onboarding3Title,
+      description: t.welcome.onboarding3Desc,
+      button: t.common.next,
+      artwork: "ai",
+    },
+    {
+      title: t.welcome.onboarding4Title,
+      description: t.welcome.onboarding4Desc,
+      button: t.welcome.startRevising,
+      artwork: "explore",
+    },
+  ];
+}
 
 function authHeaders(token?: string) {
   return {
@@ -369,6 +372,8 @@ export default function Welcome() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const auth = useAuth() as any;
+  const { t } = useLanguage();
+  const onboarding = useOnboardingItems();
 
   const [screen, setScreen] = useState<Screen>("loading");
   const [slide, setSlide] = useState(0);
@@ -503,7 +508,7 @@ export default function Welcome() {
     if (registerStep === "email") {
       const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
       if (!valid) {
-        setError("Enter a valid email address.");
+        setError(t.welcome.errEmail);
         return;
       }
       setRegisterStep("name");
@@ -511,7 +516,7 @@ export default function Welcome() {
     }
     if (registerStep === "name") {
       if (name.trim().length < 2) {
-        setError("Enter your full name.");
+        setError(t.welcome.errName);
         return;
       }
       setRegisterStep("password");
@@ -519,7 +524,7 @@ export default function Welcome() {
     }
     if (registerStep === "password") {
       if (password.length < 8) {
-        setError("Password must contain at least 8 characters.");
+        setError(t.welcome.errPassword);
         return;
       }
       setRegisterStep("pin");
@@ -530,7 +535,7 @@ export default function Welcome() {
   const registerAccount = async () => {
     setError(null);
     if (pin.length !== 6) {
-      setError("Enter a 6-digit PIN.");
+      setError(t.welcome.errPin);
       return;
     }
     if (!confirmingPin) {
@@ -540,7 +545,7 @@ export default function Welcome() {
       return;
     }
     if (pin !== confirmPin) {
-      setError("The PINs do not match. Try again.");
+      setError(t.welcome.errPinMatch);
       setPin("");
       setConfirmPin("");
       setConfirmingPin(false);
@@ -572,7 +577,7 @@ export default function Welcome() {
       await storeTokenAndUser(data.token, data.user);
       router.replace("/(tabs)");
     } catch (e: any) {
-      setError(e.message || "Could not create your account.");
+      setError(e.message || t.welcome.errGeneric);
       setPin("");
     } finally {
       setBusy(false);
@@ -604,7 +609,7 @@ export default function Welcome() {
       await storeTokenAndUser(data.token, data.user);
       router.replace("/(tabs)");
     } catch (e: any) {
-      setError(e.message || "Incorrect PIN.");
+      setError(e.message || t.welcome.errIncorrectPin);
       setPin("");
     } finally {
       setBusy(false);
@@ -617,20 +622,20 @@ export default function Welcome() {
       const hardware = await LocalAuthentication.hasHardwareAsync();
       const enrolled = await LocalAuthentication.isEnrolledAsync();
       if (!hardware || !enrolled) {
-        setError("Fingerprint or Face ID is not configured on this device.");
+        setError(t.welcome.errBiometricSetup);
         return;
       }
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: "Sign in to GC Sharp",
-        cancelLabel: "Use PIN",
-        fallbackLabel: "Use device passcode",
+        promptMessage: t.welcome.biometricPrompt,
+        cancelLabel: t.welcome.biometricCancel,
+        fallbackLabel: t.welcome.biometricCancel,
         disableDeviceFallback: false,
       });
       if (!result.success) return;
 
       const biometricToken = await SecureStore.getItemAsync(BIOMETRIC_TOKEN_KEY);
       if (!biometricToken) {
-        setError("Sign in with your PIN once to enable fingerprint login.");
+        setError(t.welcome.errBiometricToken);
         return;
       }
 
@@ -648,7 +653,7 @@ export default function Welcome() {
       await storeTokenAndUser(data.token, data.user);
       router.replace("/(tabs)");
     } catch (e: any) {
-      setError(e.message || "Biometric sign-in failed.");
+      setError(e.message || t.welcome.errBiometricFailed);
     } finally {
       setBusy(false);
     }
@@ -811,16 +816,13 @@ export default function Welcome() {
     return (
       <View style={[styles.splash, { paddingTop: insets.top + 24, paddingBottom: insets.bottom + 28 }]}>
         <View style={styles.languageRow}>
-          <Pressable style={styles.languageButton}>
-            <Ionicons name="language-outline" size={22} color="#fff" />
-            <Text style={styles.languageText}>French</Text>
-          </Pressable>
+          <LanguageSwitcher variant="light" />
         </View>
         <View style={styles.splashLogo}>
           <BrandLogo />
         </View>
         <Pressable testID="get-started" onPress={finishSplash} style={styles.splashButton}>
-          <Text style={styles.splashButtonText}>Get Started</Text>
+          <Text style={styles.splashButtonText}>{t.welcome.getStarted}</Text>
         </Pressable>
       </View>
     );
@@ -840,9 +842,12 @@ export default function Welcome() {
           >
             <Ionicons name="arrow-back" size={28} color={BLUE} />
           </Pressable>
-          <Pressable onPress={skipOnboarding} hitSlop={12}>
-            <Text style={styles.skipText}>Skip</Text>
-          </Pressable>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <LanguageSwitcher />
+            <Pressable onPress={skipOnboarding} hitSlop={12}>
+              <Text style={styles.skipText}>{t.common.skip}</Text>
+            </Pressable>
+          </View>
         </View>
         <View style={styles.artworkWrap}>
           <Artwork type={item.artwork} />
@@ -872,12 +877,15 @@ export default function Welcome() {
               <BrandLogo compact />
             </View>
             <Text style={styles.authBrand}>GC Sharp</Text>
-            <Text style={styles.authTagline}>Learn smarter. Prepare better.</Text>
+            <Text style={styles.authTagline}>{t.common.tagline}</Text>
+            <View style={{ marginTop: 10 }}>
+              <LanguageSwitcher />
+            </View>
           </View>
           <View style={styles.choiceCard}>
-            <Text style={styles.choiceTitle}>Welcome</Text>
+            <Text style={styles.choiceTitle}>{t.welcome.welcome}</Text>
             <Text style={styles.choiceDescription}>
-              Create an account to begin, or sign in securely with your 6-digit PIN.
+              {t.welcome.welcomeDesc}
             </Text>
             <Pressable
               testID="create-account"
@@ -888,7 +896,7 @@ export default function Welcome() {
               }}
               style={styles.primaryButton}
             >
-              <Text style={styles.primaryButtonText}>Create an Account</Text>
+              <Text style={styles.primaryButtonText}>{t.welcome.createAccount}</Text>
             </Pressable>
             <Pressable
               testID="existing-account"
@@ -898,7 +906,7 @@ export default function Welcome() {
               }}
               style={styles.secondaryButton}
             >
-              <Text style={styles.secondaryButtonText}>I Already Have an Account</Text>
+              <Text style={styles.secondaryButtonText}>{t.welcome.haveAccount}</Text>
             </Pressable>
           </View>
         </ScrollView>
@@ -918,16 +926,16 @@ export default function Welcome() {
             <View style={styles.smallLogoCard}>
               <BrandLogo compact />
             </View>
-            <Text style={styles.loginTitle}>Welcome back</Text>
+            <Text style={styles.loginTitle}>{t.welcome.welcomeBack}</Text>
             <Text style={styles.loginDescription}>
-              Enter your 6-digit PIN{savedEmail ? ` for ${savedEmail}` : "."}
+              {savedEmail ? `${t.welcome.enterPinFor} ${savedEmail}` : `${t.welcome.enterPin}.`}
             </Text>
           </View>
           {!savedEmail && (
             <TextInput
               value={email}
               onChangeText={setEmail}
-              placeholder="Email address"
+              placeholder={t.welcome.emailPlaceholder}
               placeholderTextColor="#94A3B8"
               keyboardType="email-address"
               autoCapitalize="none"
@@ -945,11 +953,11 @@ export default function Welcome() {
               style={styles.biometricButton}
             >
               <Ionicons name="finger-print-outline" size={32} color={BLUE} />
-              <Text style={styles.biometricText}>Sign in with fingerprint</Text>
+              <Text style={styles.biometricText}>{t.welcome.signInFingerprint}</Text>
             </Pressable>
           )}
           <Pressable onPress={clearSavedAccount} style={styles.linkButton}>
-            <Text style={styles.linkText}>Use another account</Text>
+            <Text style={styles.linkText}>{t.welcome.useAnotherAccount}</Text>
           </Pressable>
           {/* Forgot PIN link */}
           <Pressable
@@ -968,8 +976,11 @@ export default function Welcome() {
             }}
             style={styles.forgotPinLink}
           >
-            <Text style={styles.forgotPinText}>Forgot PIN?</Text>
+            <Text style={styles.forgotPinText}>{t.welcome.forgotPin}</Text>
           </Pressable>
+          <View style={{ alignSelf: "center", marginTop: 14 }}>
+            <LanguageSwitcher />
+          </View>
         </ScrollView>
       </View>
     );

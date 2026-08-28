@@ -6,19 +6,24 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { theme, radii, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
+import { useLanguage } from "@/src/i18n";
 
-// Metadata for each tab – the order here is just for reference;
-// the actual rendering order comes from the Tabs.Screen order below.
-const TAB_ITEMS = [
-  { name: "index", label: "Home", icon: "home-outline", iconActive: "home" },
-  { name: "lessons", label: "Lessons", icon: "videocam-outline", iconActive: "videocam" },
-  { name: "ai", label: "AI", icon: "sparkles-outline", iconActive: "sparkles", center: true },
-  { name: "library", label: "Library", icon: "book-outline", iconActive: "book" },
-  { name: "profile", label: "Profile", icon: "person-outline", iconActive: "person" },
-];
+// Metadata for each tab — labels resolve from the active language dictionary
+// at render time; the actual rendering order comes from the Tabs.Screen order.
+function useTabItems() {
+  const { t } = useLanguage();
+  return [
+    { name: "index", label: t.tabs.home, icon: "home-outline", iconActive: "home" },
+    { name: "lessons", label: t.tabs.lessons, icon: "videocam-outline", iconActive: "videocam" },
+    { name: "ai", label: t.tabs.ai, icon: "sparkles-outline", iconActive: "sparkles", center: true },
+    { name: "library", label: t.tabs.library, icon: "book-outline", iconActive: "book" },
+    { name: "profile", label: t.tabs.profile, icon: "person-outline", iconActive: "person" },
+  ];
+}
 
 function CustomTabBar({ state, descriptors, navigation }: any) {
   const insets = useSafeAreaInsets();
+  const TAB_ITEMS = useTabItems();
 
   return (
     <View style={[styles.barWrapper, { paddingBottom: Math.max(insets.bottom, 8) }]}>

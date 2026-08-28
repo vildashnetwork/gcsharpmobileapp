@@ -29,6 +29,7 @@ import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/auth";
 import { OfflineBanner } from "@/src/components/OfflineBanner";
 import { ThemeProvider, useTheme } from "@/src/theme-context";
+import { LanguageProvider, useLanguage } from "@/src/i18n";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 
@@ -39,6 +40,7 @@ SplashScreen.preventAutoHideAsync();
 // ----- Percentage Loader Component -----
 function AppLoader() {
   const { loading, loadProgress } = useAuth();
+  const { t } = useLanguage();
 
   // If auth is not loading, we don't need to show loader
   if (!loading) return null;
@@ -53,7 +55,7 @@ function AppLoader() {
         <View style={styles.loaderBar}>
           <View style={[styles.loaderFill, { width: `${pct}%` }]} />
         </View>
-        <Text style={styles.loaderText}>Loading GC Smart…</Text>
+        <Text style={styles.loaderText}>{t.common.loading} GC Smart…</Text>
       </View>
     </View>
   );
@@ -107,13 +109,15 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider>
-        <SafeAreaProvider>
-          <KeyboardProvider>
-            <AuthProvider>
-              <AppContent />
-            </AuthProvider>
-          </KeyboardProvider>
-        </SafeAreaProvider>
+        <LanguageProvider>
+          <SafeAreaProvider>
+            <KeyboardProvider>
+              <AuthProvider>
+                <AppContent />
+              </AuthProvider>
+            </KeyboardProvider>
+          </SafeAreaProvider>
+        </LanguageProvider>
       </ThemeProvider>
     </GestureHandlerRootView>
   );

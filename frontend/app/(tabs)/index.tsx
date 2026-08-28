@@ -26,6 +26,8 @@ import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import Svg, { Circle, Path } from "react-native-svg";
 import { OfflineBanner } from "@/src/components/OfflineBanner";
+import { useLanguage } from "@/src/i18n";
+import { LanguageSwitcher } from "@/src/components/LanguageSwitcher";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
@@ -119,6 +121,7 @@ function GraduationCap({ size = 32, color = theme.brandPrimary }) {
 }
 
 function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: number }) {
+  const { t } = useLanguage();
   const size = 100;
   const strokeWidth = 8;
   const radius = (size - strokeWidth) / 2;
@@ -152,7 +155,7 @@ function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: numb
         />
       </Svg>
       <View style={styles.ringContent}>
-        <Text style={styles.ringLevelLabel}>Level</Text>
+        <Text style={styles.ringLevelLabel}>{t.home.level}</Text>
         <Text style={styles.ringLevel}>{level}</Text>
         <Text style={styles.ringXp}>{xp} XP</Text>
       </View>
@@ -161,8 +164,9 @@ function XPRing({ xp, level, toNext }: { xp: number; level: number; toNext: numb
 }
 
 function ConsistencyChart({ data }: { data: { day: string; minutes: number }[] }) {
+  const { t } = useLanguage();
   if (!data || data.length === 0) {
-    return <Text style={styles.emptyChart}>No study data yet</Text>;
+    return <Text style={styles.emptyChart}>{t.home.noStudyData}</Text>;
   }
 
   const max = Math.max(1, ...data.map((d) => d.minutes));
@@ -207,6 +211,7 @@ function Action({ icon, label, onPress, testID }: any) {
 }
 
 function PercentageLoader({ progress }: { progress: number }) {
+  const { t } = useLanguage();
   const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -226,7 +231,7 @@ function PercentageLoader({ progress }: { progress: number }) {
         <View style={styles.loaderBar}>
           <View style={[styles.loaderFill, { width: `${Math.min(100, progress)}%` }]} />
         </View>
-        <Text style={styles.loaderText}>Loading dashboard…</Text>
+        <Text style={styles.loaderText}>{t.home.loadingDashboard}</Text>
       </View>
     </Animated.View>
   );
@@ -244,6 +249,7 @@ const getInitials = (name: string) => {
 
 export default function Home() {
   useTheme(); // re-render this screen when light/dark changes
+  const { t } = useLanguage();
   const { user } = useAuth();
   const router = useRouter();
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -252,7 +258,7 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingProgress, setLoadingProgress] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
@@ -293,7 +299,7 @@ export default function Home() {
   }, [user?.user_id]);
 
   const loadData = useCallback(async () => {
-    setError(null);
+    setError(false);
     setLoadingProgress(0);
     setLoadingProgress(10);
 
@@ -334,7 +340,7 @@ export default function Home() {
       setLoading(false);
     } catch (err: any) {
       console.log("Dashboard load error:", err);
-      setError("Could not load some data. Pull to refresh.");
+      setError(true);
       setLoading(false);
     }
   }, []);
@@ -419,62 +425,67 @@ export default function Home() {
                 </View>
               )}
               <View>
-                <Text style={styles.greet}>Hello, {user?.full_name?.split(" ")[0] || "Student"}</Text>
+                <Text style={styles.greet}>
+                  {t.home.greeting}, {user?.full_name?.split(" ")[0] || t.profile.student}
+                </Text>
                 <Text style={styles.brandTop}>GCSHARP</Text>
               </View>
             </View>
           </View>
-          <Pressable style={styles.bell} onPress={() => setModalVisible(true)} testID="notifications-btn">
-            <Ionicons name="notifications-outline" size={22} color={theme.brand} />
-            {unreadCount > 0 && (
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
-              </View>
-            )}
-          </Pressable>
+          <View style={styles.headerActions}>
+            <LanguageSwitcher />
+            <Pressable style={styles.bell} onPress={() => setModalVisible(true)} testID="notifications-btn">
+              <Ionicons name="notifications-outline" size={22} color={theme.brand} />
+              {unreadCount > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
+                </View>
+              )}
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.statsRow}>
           <View style={[styles.stat, { backgroundColor: theme.brand }]}>
             <Ionicons name="flame" size={20} color="#FDBA74" />
             <Text style={styles.statValue}>{data?.streak ?? 0}</Text>
-            <Text style={styles.statLabel}>Day Streak</Text>
+            <Text style={styles.statLabel}>{t.home.streak}</Text>
           </View>
           <View style={styles.stat}>
             <Ionicons name="trophy-outline" size={20} color={theme.warning} />
             <Text style={[styles.statValue, { color: theme.onSurface }]}>{data?.xp ?? 0}</Text>
-            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>XP Points</Text>
+            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>{t.home.xpPoints}</Text>
           </View>
           <View style={styles.stat}>
             <Ionicons name="checkmark-circle-outline" size={20} color={theme.success} />
             <Text style={[styles.statValue, { color: theme.onSurface }]}>{data?.accuracy ?? 0}%</Text>
-            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>Accuracy</Text>
+            <Text style={[styles.statLabel, { color: theme.onSurfaceMuted }]}>{t.home.accuracy}</Text>
           </View>
         </View>
 
-        <Text style={styles.sectionTitle}>Quick actions</Text>
+        <Text style={styles.sectionTitle}>{t.home.quickActions}</Text>
         <View style={styles.actions}>
           <Action
             icon="document-text-outline"
-            label="Past Questions"
+            label={t.home.pastQuestions}
             onPress={() => router.push("/past-questions")}
             testID="action-past-questions"
           />
           <Action
             icon="chatbubble-ellipses-outline"
-            label="AI Tutor"
+            label={t.home.aiTutor}
             onPress={() => router.push("/(tabs)/ai")}
             testID="action-ai"
           />
           <Action
             icon="stats-chart-outline"
-            label="Stats"
+            label={t.home.stats}
             onPress={() => router.push("/stats")}
             testID="action-stats"
           />
           <Action
             icon="book-outline"
-            label="Library"
+            label={t.home.library}
             onPress={() => router.push("/(tabs)/library")}
             testID="action-library"
           />
@@ -485,75 +496,75 @@ export default function Home() {
           onPress={() => router.push("/past-questions")}
           testID="start-practice-btn"
         >
-          <Text style={styles.startPracticeText}>Start Practice</Text>
+          <Text style={styles.startPracticeText}>{t.home.startPractice}</Text>
           <Ionicons name="arrow-forward" size={18} color="#fff" />
         </Pressable>
 
-        <Text style={styles.sectionTitle}>Study Consistency</Text>
+        <Text style={styles.sectionTitle}>{t.home.studyConsistency}</Text>
         <View style={styles.card}>
           <View style={styles.chartHeader}>
-            <Text style={styles.chartSubtitle}>Minutes studied · last 7 days</Text>
+            <Text style={styles.chartSubtitle}>{t.home.minutesLast7}</Text>
             <View style={styles.trendBadge}>
               <Ionicons name="trending-up" size={14} color={theme.success} />
-              <Text style={styles.trendText}>Keep it up</Text>
+              <Text style={styles.trendText}>{t.home.keepItUp}</Text>
             </View>
           </View>
           {data?.consistency ? (
             <ConsistencyChart data={data.consistency} />
           ) : (
-            <Text style={styles.emptyChart}>No data yet</Text>
+            <Text style={styles.emptyChart}>{t.home.noDataYet}</Text>
           )}
           <Pressable onPress={() => router.push("/stats")} style={styles.detailsBtn}>
-            <Text style={styles.detailsText}>View full analytics</Text>
+            <Text style={styles.detailsText}>{t.home.viewAnalytics}</Text>
             <Ionicons name="arrow-forward" size={14} color={theme.brandPrimary} />
           </Pressable>
         </View>
 
-        <Text style={styles.sectionTitle}>AI Recommendations</Text>
+        <Text style={styles.sectionTitle}>{t.home.aiRecommendations}</Text>
         <View style={[styles.card, styles.aiCard]}>
           <View style={styles.aiHeader}>
             <Ionicons name="sparkles" size={20} color={theme.brandPrimary} />
-            <Text style={styles.aiTitle}>GC AI Suggestions</Text>
+            <Text style={styles.aiTitle}>{t.home.aiSuggestions}</Text>
           </View>
           {data?.weak_topics && data.weak_topics.length > 0 ? (
             <>
-              <Text style={styles.aiSub}>Focus on these weak topics:</Text>
+              <Text style={styles.aiSub}>{t.home.focusWeakTopics}</Text>
               <View style={styles.topicTags}>
-                {data.weak_topics.slice(0, 3).map((t) => (
-                  <View key={t} style={styles.weakTag}>
-                    <Text style={styles.weakTagText}>{t}</Text>
+                {data.weak_topics.slice(0, 3).map((topic) => (
+                  <View key={topic} style={styles.weakTag}>
+                    <Text style={styles.weakTagText}>{topic}</Text>
                   </View>
                 ))}
               </View>
             </>
           ) : (
-            <Text style={styles.aiSub}>Complete a practice test and GC AI will pinpoint your weak topics.</Text>
+            <Text style={styles.aiSub}>{t.home.aiWeakHint}</Text>
           )}
           <View style={styles.aiButtons}>
             <Pressable style={styles.aiBtn} onPress={() => router.push("/(tabs)/ai")}>
               <Ionicons name="chatbubble-ellipses" size={16} color={theme.brandPrimary} />
-              <Text style={styles.aiBtnText}>Ask AI Tutor</Text>
+              <Text style={styles.aiBtnText}>{t.home.askAiTutor}</Text>
             </Pressable>
             <Pressable style={styles.aiBtn} onPress={() => router.push("/past-questions")}>
               <Ionicons name="compass-outline" size={16} color={theme.brandPrimary} />
-              <Text style={styles.aiBtnText}>Practice weak topics</Text>
+              <Text style={styles.aiBtnText}>{t.home.practiceWeak}</Text>
             </Pressable>
           </View>
         </View>
 
         <View style={styles.ringRow}>
           <View style={[styles.card, styles.ringCard]}>
-            <Text style={styles.ringTitle}>Level Progress</Text>
+            <Text style={styles.ringTitle}>{t.home.levelProgress}</Text>
             {data ? (
               <XPRing xp={data.xp} level={data.level} toNext={data.xp_to_next} />
             ) : (
-              <Text style={styles.ringSub}>No data</Text>
+              <Text style={styles.ringSub}>{t.home.noData}</Text>
             )}
-            <Text style={styles.ringSub}>{data?.xp_to_next ?? 0} XP to next level</Text>
+            <Text style={styles.ringSub}>{data?.xp_to_next ?? 0} {t.home.xpToNext}</Text>
           </View>
         </View>
 
-        <Text style={styles.sectionTitle}>Lesson Videos for You</Text>
+        <Text style={styles.sectionTitle}>{t.home.lessonVideos}</Text>
         {courses.length > 0 ? (
           <FlatList
             horizontal
@@ -582,17 +593,17 @@ export default function Home() {
             )}
           />
         ) : (
-          <Text style={styles.emptyText}>No lessons yet. Check back soon.</Text>
+          <Text style={styles.emptyText}>{t.home.noLessonsYet}</Text>
         )}
 
-        <Text style={styles.sectionTitle}>Leaderboard</Text>
+        <Text style={styles.sectionTitle}>{t.home.leaderboard}</Text>
         <View style={styles.card}>
           {leaderboard?.my_rank ? (
             <View style={styles.leaderboardHeader}>
-              <Text style={styles.leaderboardRank}>Your rank: #{leaderboard.my_rank.rank}</Text>
+              <Text style={styles.leaderboardRank}>{t.home.yourRank}: #{leaderboard.my_rank.rank}</Text>
             </View>
           ) : (
-            <Text style={styles.leaderboardRank}>Complete a quiz to see your rank</Text>
+            <Text style={styles.leaderboardRank}>{t.home.completeQuizRank}</Text>
           )}
           {leaderboard?.top && leaderboard.top.length > 0 ? (
             leaderboard.top.slice(0, 5).map((entry) => {
@@ -613,15 +624,15 @@ export default function Home() {
                   )}
                   <Text style={[styles.leaderboardName, isMe && styles.leaderboardNameYou]} numberOfLines={1}>
                     {entry.name}
-                    {isMe && <Text style={styles.leaderboardYou}> (You)</Text>}
+                    {isMe && <Text style={styles.leaderboardYou}> {t.home.you}</Text>}
                   </Text>
-                  <Text style={styles.leaderboardLevel}>Lvl {entry.level}</Text>
+                  <Text style={styles.leaderboardLevel}>{t.home.lvl} {entry.level}</Text>
                   <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
                 </View>
               );
             })
           ) : (
-            <Text style={styles.emptyText}>Be the first on the leaderboard — start practicing!</Text>
+            <Text style={styles.emptyText}>{t.home.leaderboardEmpty}</Text>
           )}
         </View>
       </ScrollView>
@@ -637,11 +648,11 @@ export default function Home() {
             <View style={styles.modalHandle} />
 
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Notifications</Text>
+              <Text style={styles.modalTitle}>{t.home.notifications}</Text>
               <View style={styles.modalHeaderActions}>
                 {unreadCount > 0 && (
                   <TouchableOpacity onPress={markAllAsRead} style={styles.markAllBtn}>
-                    <Text style={styles.markAllText}>Mark all as read</Text>
+                    <Text style={styles.markAllText}>{t.home.markAllRead}</Text>
                   </TouchableOpacity>
                 )}
                 <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeBtn}>
@@ -652,13 +663,13 @@ export default function Home() {
 
             {loadingNotifications ? (
               <View style={styles.modalLoading}>
-                <Text style={styles.modalLoadingText}>Loading notifications...</Text>
+                <Text style={styles.modalLoadingText}>{t.home.loadingNotifications}</Text>
               </View>
             ) : notifications.length === 0 ? (
               <View style={styles.emptyNotifications}>
                 <Ionicons name="notifications-off-outline" size={48} color={theme.onSurfaceMuted} />
-                <Text style={styles.emptyNotificationsText}>No notifications yet</Text>
-                <Text style={styles.emptyNotificationsSub}>Check back later for updates</Text>
+                <Text style={styles.emptyNotificationsText}>{t.home.noNotifications}</Text>
+                <Text style={styles.emptyNotificationsSub}>{t.home.checkBackLater}</Text>
               </View>
             ) : (
               <ScrollView style={styles.notificationList}>
@@ -721,6 +732,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
     paddingVertical: spacing.md,
   },
   avatarRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
   profileRow: { flexDirection: "row", alignItems: "center", gap: 12 },
   profileImage: { width: 50, height: 50, borderRadius: 25, borderWidth: 2, borderColor: t.brandPrimary },
   profileFallback: {

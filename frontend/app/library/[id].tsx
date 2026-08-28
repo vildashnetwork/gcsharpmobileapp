@@ -428,6 +428,8 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { useNetworkStatus } from "@/src/lib/useNetworkStatus";
 import { getLocalMediaUri, cacheMediaBytes } from "@/src/lib/mediaStore";
+import { useLanguage } from "@/src/i18n";
+import { LanguageSwitcher } from "@/src/components/LanguageSwitcher";
 
 type Course = {
   id?: string;
@@ -469,11 +471,14 @@ const DESCRIPTION_COLLAPSED_LINES = 3;
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const VIDEO_HEIGHT = Math.round((SCREEN_WIDTH * 9) / 16);
 
-function formatViews(n: number | undefined): string {
+function formatViews(
+  n: number | undefined,
+  labels: { view: string; views: string }
+): string {
   const v = n ?? 0;
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M views`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K views`;
-  return `${v} view${v === 1 ? "" : "s"}`;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M ${labels.views}`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K ${labels.views}`;
+  return `${v} ${v === 1 ? labels.view : labels.views}`;
 }
 
 function useShimmer() {
@@ -524,6 +529,7 @@ function SimilarRowSkeleton() {
 
 export default function CourseDetail() {
   useTheme(); // re-render this screen when light/dark changes
+  const { t } = useLanguage();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
@@ -606,7 +612,7 @@ export default function CourseDetail() {
       }
     } catch (error) {
       console.error("[CourseDetail] Failed to load course:", error);
-      Alert.alert("Error", "Could not load course details. Please try again.");
+      Alert.alert(t.video.errorTitle, t.video.loadCourseError);
     }
   }, [id, player, resolveVideoSource]);
 
@@ -709,7 +715,7 @@ export default function CourseDetail() {
       console.error("[CourseDetail] Like error:", error);
       setLiked(prevLiked);
       setLikesCount(prevCount);
-      Alert.alert("Error", "Could not update like. Please try again.");
+      Alert.alert(t.video.errorTitle, t.video.likeError);
     }
   };
 
@@ -723,18 +729,18 @@ export default function CourseDetail() {
         { method: "POST", auth: true }
       );
       if (res.__offlineQueued) {
-        Alert.alert("Saved offline", "This video will be saved to your library when you're back online.");
+        Alert.alert(t.video.savedOfflineTitle, t.video.savedOfflineMsg);
         return;
       }
       setSaved(res.saved);
       Alert.alert(
-        res.saved ? "Saved" : "Removed",
-        res.saved ? "Video saved to your library." : "Video removed from saved."
+        res.saved ? t.video.savedTitle : t.video.removedTitle,
+        res.saved ? t.video.savedMsg : t.video.removedMsg
       );
     } catch (error) {
       console.error("[CourseDetail] Save error:", error);
       setSaved(prevSaved);
-      Alert.alert("Error", "Could not save video. Please try again.");
+      Alert.alert(t.video.errorTitle, t.video.saveError);
     }
   };
 
@@ -746,7 +752,7 @@ export default function CourseDetail() {
             <Ionicons name="arrow-back" size={22} color={theme.brand} />
           </Pressable>
           <Text style={styles.brand}>GCSHARP</Text>
-          <View style={{ width: 22 }} />
+          <LanguageSwitcher />
         </View>
         <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
           <DetailSkeleton />
@@ -762,7 +768,8 @@ export default function CourseDetail() {
           <Ionicons name="arrow-back" size={22} color={theme.brand} />
         </Pressable>
         <Text style={styles.brand}>GCSHARP</Text>
-        <View style={{ flexDirection: "row", gap: 12 }}>
+        <View style={styles.headerActions}>
+          <LanguageSwitcher />
           <Pressable onPress={toggleLike} testID="like-btn">
             <Ionicons
               name={liked ? "heart" : "heart-outline"}
@@ -783,14 +790,14 @@ export default function CourseDetail() {
       {!course.video_url ? (
         <View style={[styles.video, styles.videoErrorBox]}>
           <Ionicons name="videocam-off-outline" size={28} color="#fff" />
-          <Text style={styles.videoErrorText}>No video available for this course.</Text>
+          <Text style={styles.videoErrorText}>{t.video.noVideo}</Text>
         </View>
       ) : playerStatus === "error" ? (
         <View style={[styles.video, styles.videoErrorBox]}>
           <Ionicons name="alert-circle-outline" size={28} color="#fff" />
-          <Text style={styles.videoErrorText}>Couldn't load this video. The link may be broken or unsupported.</Text>
+          <Text style={styles.videoErrorText}>{t.video.videoError}</Text>
           <Pressable onPress={retryPlayback} style={styles.retryBtn} testID="video-retry-btn">
-            <Text style={styles.retryBtnTxt}>Retry</Text>
+            <Text style={styles.retryBtnTxt}>{t.common.retry}</Text>
           </Pressable>
         </View>
       ) : (
@@ -826,7 +833,7 @@ export default function CourseDetail() {
           <Text style={styles.title}>{course.title}</Text>
 
           <View style={styles.metaRow}>
-            <Text style={styles.meta}>{formatViews(course.views)}</Text>
+            <Text style={styles.meta}>{formatViews(course.views, t.video)}</Text>
             <Text style={styles.metaDot}>-</Text>
             <Ionicons name="star" size={13} color={theme.warning} />
             <Text style={styles.meta}>{(course.rating ?? 5).toFixed(1)}</Text>
@@ -850,7 +857,7 @@ export default function CourseDetail() {
                 {course.teacher_name || "GC Teacher"}
               </Text>
               <Text style={styles.teacherSub} numberOfLines={1}>
-                {course.subject_name} teacher
+                {course.subject_name} {t.video.teacher}
               </Text>
             </View>
           </View>
@@ -863,7 +870,9 @@ export default function CourseDetail() {
               >
                 {course.description}
               </Text>
-              <Text style={styles.showMore}>{descExpanded ? "Show less" : "Show more"}</Text>
+              <Text style={styles.showMore}>
+                {descExpanded ? t.video.showLess : t.video.showMore}
+              </Text>
             </Pressable>
           )}
         </View>
@@ -872,7 +881,7 @@ export default function CourseDetail() {
 
         {course.methodology && course.methodology.length > 0 && (
           <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}>
-            <Text style={styles.sectionTitle}>Methodology</Text>
+            <Text style={styles.sectionTitle}>{t.video.methodology}</Text>
             {course.methodology.map((m: any, i: number) => (
               <View key={i} style={styles.stepCard}>
                 <View style={styles.stepNum}>
@@ -891,7 +900,7 @@ export default function CourseDetail() {
           <>
             <View style={styles.divider} />
             <View style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.md }}>
-              <Text style={styles.sectionTitle}>Chapters</Text>
+              <Text style={styles.sectionTitle}>{t.video.chapters}</Text>
               {course.chapters.map((c: any, i: number) => (
                 <View key={i} style={styles.chapter}>
                   <View style={styles.chapNum}>
@@ -911,7 +920,7 @@ export default function CourseDetail() {
         <View style={styles.divider} />
 
         <View style={{ paddingTop: spacing.md }}>
-          <Text style={styles.sectionTitle}>Similar courses</Text>
+          <Text style={styles.sectionTitle}>{t.video.similarCourses}</Text>
 
           {loadingSimilar ? (
             <>
@@ -920,7 +929,7 @@ export default function CourseDetail() {
               <SimilarRowSkeleton />
             </>
           ) : similar.length === 0 ? (
-            <Text style={styles.emptySimilar}>No similar courses yet.</Text>
+            <Text style={styles.emptySimilar}>{t.video.noSimilar}</Text>
           ) : (
             similar.map((item) => (
               <Pressable
@@ -941,7 +950,7 @@ export default function CourseDetail() {
                     {item.teacher_name || "GC Teacher"}
                   </Text>
                   <Text style={styles.similarMeta}>
-                    {formatViews(item.views)} - {item.subject_name}
+                    {formatViews(item.views, t.video)} - {item.subject_name}
                   </Text>
                 </View>
               </Pressable>
@@ -963,6 +972,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
     paddingVertical: spacing.md,
   },
   brand: { fontSize: 16, fontWeight: "800", color: t.brand, letterSpacing: 1 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
   video: { width: "100%", height: VIDEO_HEIGHT, backgroundColor: "#000" },
   videoErrorBox: { alignItems: "center", justifyContent: "center", paddingHorizontal: spacing.lg },
   videoErrorText: { color: t.onBrandPrimary, marginTop: 8, fontSize: 13, textAlign: "center" },
