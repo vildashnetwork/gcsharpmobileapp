@@ -40,13 +40,6 @@
       ],
       "expo-video",
       "expo-audio",
-      [
-        "expo-notifications",
-        {
-          "color": "#1D4ED8",
-          "mode": "production"
-        }
-      ],
       "expo-asset"
     ],
     "experiments": {
