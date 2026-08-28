@@ -20,8 +20,6 @@ eas build:configure
 
 eas build --platform android
 
-[expo.dev/accounts/gcsharp/projects/GCSHARP/builds/ef7786e3-91e6-4664-ba1c-8f0b40dc488f](https://expo.dev/accounts/gcsharp/projects/GCSHARP/builds/ef7786e3-91e6-4664-ba1c-8f0b40dc488f)
-
 eas build --platform android --android-app-bundle --profile production
 
 eas build --platform android --profile production --output aab
@@ -29,6 +27,8 @@ eas build --platform android --profile production --output aab
 npx  expo prebuild -p android
 
 npm run android
+
+eas build:list
 
 `adb logcat *:E | Select-String "gcsharp"`
 

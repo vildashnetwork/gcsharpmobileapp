@@ -20,7 +20,10 @@
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "pan",
       "package": "com.gcsharp",
-      "versionCode": 10
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -50,6 +53,7 @@
       "eas": {
         "projectId": "4ea50a82-7983-4ca0-bb9a-b22297bb304d"
       }
-    }
+    },
+    "owner": "gcsharp8"
   }
 }
