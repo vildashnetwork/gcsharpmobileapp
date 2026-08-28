@@ -2,7 +2,7 @@
   "expo": {
     "name": "GCSHARP",
     "slug": "GCSHARP",
-    "version": "2.0",
+    "version": "2.1",
     "orientation": "portrait",
     "icon": "./assets/images/gcsharp.png",
     "scheme": "gcsharp",
@@ -20,7 +20,7 @@
       "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "pan",
       "package": "com.gcsharp",
-      "versionCode": 5
+      "versionCode": 10
     },
     "web": {
       "bundler": "metro",
