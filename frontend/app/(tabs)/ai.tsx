@@ -13,7 +13,10 @@ import {
   Dimensions,
   Modal,
   TouchableWithoutFeedback,
+  Alert,
+  Clipboard,
 } from "react-native";
+import { Swipeable } from "react-native-gesture-handler";
 import { FontAwesome6 } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
@@ -56,7 +59,10 @@ function TypingIndicator({ status }: { status: string }) {
   const dots = ".".repeat(dotCount) + " ".repeat(3 - dotCount);
   return (
     <View style={[styles.bubble, styles.aiBubble, styles.typingContainer]}>
-      <Text style={styles.aiTxt}>{status}{dots}</Text>
+      <View style={styles.typingDotsRow}>
+        <Text style={styles.typingDot}>{dots.trim() || "."}</Text>
+      </View>
+      <Text style={styles.typingStatus}>{status}</Text>
     </View>
   );
 }
@@ -103,9 +109,20 @@ export default function AITutor() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isNewChat, setIsNewChat] = useState(true);
   const [titleGenerated, setTitleGenerated] = useState(false);
+  const [feedbackMap, setFeedbackMap] = useState<Record<number, "good" | "bad">>({});
+  const [replyContext, setReplyContext] = useState<string | null>(null);
+  const [feedbackModalIndex, setFeedbackModalIndex] = useState<number | null>(null);
+  const [feedbackReason, setFeedbackReason] = useState("");
+  const [thinkingStage, setThinkingStage] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const seededRef = useRef(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
+  const typingMessages = [
+    "Checking your question",
+    "Looking for the best explanation",
+    "Providing accurate steps",
+    "Finalising the answer",
+  ];
 
   // ----- Load sessions -----
   const loadSessions = useCallback(async () => {
@@ -177,6 +194,23 @@ export default function AITutor() {
     }
   };
 
+  const refreshActiveSession = useCallback(async (sessionId: string | null) => {
+    if (!sessionId) return;
+    try {
+      const token = await readToken();
+      const res = await fetch(`${API_BASE}/ai/sessions/${sessionId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setMsgs(Array.isArray(data.messages) ? data.messages : []);
+      setCurrentSessionId(sessionId);
+      setIsNewChat(false);
+    } catch (error) {
+      console.error("Failed to refresh session:", error);
+    }
+  }, []);
+
   // ----- Toggle pin -----
   const togglePin = async (sessionId: string) => {
     try {
@@ -247,6 +281,13 @@ export default function AITutor() {
     const content = (override ?? text).trim();
     if (!content || busy) return;
 
+    if (currentSessionId) {
+      await refreshActiveSession(currentSessionId);
+    }
+
+    const attachedContext = replyContext ? `\n\nAttached context:\n${replyContext}` : "";
+    const finalMessage = `${content}${attachedContext}`;
+
     // If it's a new chat, generate a temporary session id (backend will create it)
     const sessionId = currentSessionId || `chat_${Date.now()}`;
     if (isNewChat) {
@@ -254,9 +295,11 @@ export default function AITutor() {
       setIsNewChat(false);
     }
 
-    setMsgs((m) => [...m, { role: "user", content }]);
+    setMsgs((m) => [...m, { role: "user", content: finalMessage }]);
     setText("");
+    setReplyContext(null);
     setBusy(true);
+    setThinkingStage(0);
     setAiStatus("Preparing your question");
 
     // Add placeholder for assistant message
@@ -273,9 +316,9 @@ export default function AITutor() {
         },
         body: JSON.stringify({
           session_id: sessionId,
-          message: content,
+          message: finalMessage,
           subject: "General Mathematics",
-          current_problem: content,
+          current_problem: finalMessage,
         }),
       });
 
@@ -341,9 +384,9 @@ export default function AITutor() {
           },
           body: JSON.stringify({
             session_id: sessionId,
-            message: content,
+            message: finalMessage,
             subject: "General Mathematics",
-            current_problem: content,
+            current_problem: finalMessage,
           }),
         });
         if (fallbackRes.ok) {
@@ -459,6 +502,78 @@ export default function AITutor() {
     return content;
   };
 
+  const handleCopyMessage = async (content: string) => {
+    try {
+      if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        Clipboard.setString(content);
+      }
+      Alert.alert("Copied", "Message copied to your clipboard.");
+    } catch (error) {
+      console.error("Copy failed:", error);
+      Alert.alert("Copy failed", "Unable to copy this message right now.");
+    }
+  };
+
+  const handleAttachMessage = (content: string) => {
+    const clean = content.trim().replace(/\s+/g, " ");
+    const snippet = clean.length > 220 ? `${clean.slice(0, 220)}...` : clean;
+    setReplyContext(snippet);
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
+  };
+
+  const submitFeedback = async (rating: "good" | "bad", content: string, reason?: string) => {
+    if (!currentSessionId) return;
+    try {
+      const token = await readToken();
+      await fetch(`${API_BASE}/ai/feedback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          rating,
+          message: content,
+          reason: reason || "",
+        }),
+      });
+    } catch (error) {
+      console.error("Failed to submit AI feedback:", error);
+    }
+  };
+
+  const handleFeedback = async (index: number, rating: "good" | "bad", content: string) => {
+    if (rating === "bad") {
+      setFeedbackModalIndex(index);
+      setFeedbackReason("");
+      return;
+    }
+
+    setFeedbackMap((prev) => ({ ...prev, [index]: rating }));
+    await submitFeedback(rating, content);
+  };
+
+  const confirmBadFeedback = async (index: number, content: string) => {
+    const reason = feedbackReason.trim();
+    setFeedbackMap((prev) => ({ ...prev, [index]: "bad" }));
+    setFeedbackModalIndex(null);
+    setFeedbackReason("");
+    await submitFeedback("bad", content, reason || "No reason provided");
+  };
+
+  useEffect(() => {
+    if (!busy) return;
+    const interval = setInterval(() => {
+      setThinkingStage((prev) => (prev + 1) % typingMessages.length);
+    }, 1400);
+    return () => clearInterval(interval);
+  }, [busy, typingMessages.length]);
+
+  const typingStatus = busy ? typingMessages[thinkingStage] : "Preparing your question";
+
   // ----- Render -----
   const currentTitle = sessions.find((s) => s.session_id === currentSessionId)?.title || "New Chat";
 
@@ -479,6 +594,18 @@ export default function AITutor() {
 
       {/* Main chat area */}
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="translate-with-padding" keyboardVerticalOffset={0}>
+        {replyContext && (
+          <View style={styles.replyPreview}>
+            <View style={styles.replyPreviewRow}>
+              <Ionicons name="attach" size={14} color={theme.brandPrimary} />
+              <Text style={styles.replyPreviewLabel}>Attached message</Text>
+              <Pressable onPress={() => setReplyContext(null)}>
+                <Ionicons name="close-circle" size={16} color={theme.onSurfaceMuted} />
+              </Pressable>
+            </View>
+            <Text style={styles.replyPreviewText} numberOfLines={2}>{replyContext}</Text>
+          </View>
+        )}
         <ScrollView
           ref={scrollRef}
           style={{ flex: 1 }}
@@ -504,18 +631,70 @@ export default function AITutor() {
               </View>
             </View>
           )}
-          {msgs.map((m, i) => (
-            <View
-              key={i}
-              testID={`msg-${i}`}
-              style={[styles.bubble, m.role === "user" ? styles.userBubble : styles.aiBubble]}
-            >
-              <Text style={m.role === "user" ? styles.userTxt : styles.aiTxt}>
-                {m.role === "user" ? m.content : renderMessage(m.content, m.role)}
-              </Text>
-            </View>
-          ))}
-          {busy && <TypingIndicator status={aiStatus} />}
+          {msgs.map((m, i) => {
+            if (m.role === "assistant") {
+              const isGood = feedbackMap[i] === "good";
+              const isBad = feedbackMap[i] === "bad";
+              return (
+                <Swipeable
+                  key={`msg-${i}`}
+                  renderRightActions={() => (
+                    <View style={styles.swipeActions}>
+                      <Pressable
+                        onPress={() => handleCopyMessage(m.content)}
+                        style={[styles.swipeAction, styles.copyAction]}
+                      >
+                        <Ionicons name="copy-outline" size={16} color="#fff" />
+                        <Text style={styles.swipeActionText}>Copy</Text>
+                      </Pressable>
+                    </View>
+                  )}
+                  onSwipeableOpen={() => handleAttachMessage(m.content)}
+                >
+                  <View testID={`msg-${i}`} style={[styles.bubble, styles.aiBubble]}>
+                    <Text style={styles.aiTxt}>{renderMessage(m.content, m.role)}</Text>
+                    <View style={styles.messageActionsRow}>
+                      <Pressable onPress={() => handleCopyMessage(m.content)} style={styles.copyInlineBtn}>
+                        <Ionicons name="copy-outline" size={14} color={theme.onSurfaceMuted} />
+                        <Text style={styles.copyInlineText}>Copy</Text>
+                      </Pressable>
+                      <View style={styles.feedbackRow}>
+                        <Pressable
+                          onPress={() => handleFeedback(i, "good", m.content)}
+                          style={[styles.feedbackBtn, isGood && styles.feedbackActiveGood]}
+                        >
+                          <Ionicons name="thumbs-up-outline" size={14} color={isGood ? "#fff" : theme.brandPrimary} />
+                        </Pressable>
+                        <Pressable
+                          onPress={() => handleFeedback(i, "bad", m.content)}
+                          style={[styles.feedbackBtn, isBad && styles.feedbackActiveBad]}
+                        >
+                          <Ionicons name="thumbs-down-outline" size={14} color={isBad ? "#fff" : theme.error} />
+                        </Pressable>
+                      </View>
+                    </View>
+                  </View>
+                </Swipeable>
+              );
+            }
+
+            return (
+              <View
+                key={`msg-${i}`}
+                testID={`msg-${i}`}
+                style={[styles.bubble, styles.userBubble]}
+              >
+                <Text style={styles.userTxt}>{m.content}</Text>
+                <View style={styles.messageActionsRowRight}>
+                  <Pressable onPress={() => handleCopyMessage(m.content)} style={styles.copyInlineBtnAlt}>
+                    <Ionicons name="copy-outline" size={14} color={theme.onBrandPrimary} />
+                    <Text style={styles.copyInlineTextAlt}>Copy</Text>
+                  </Pressable>
+                </View>
+              </View>
+            );
+          })}
+          {busy && <TypingIndicator status={typingStatus} />}
         </ScrollView>
 
         {/* Input area */}
@@ -539,6 +718,39 @@ export default function AITutor() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal visible={feedbackModalIndex !== null} transparent animationType="fade" onRequestClose={() => setFeedbackModalIndex(null)}>
+        <TouchableWithoutFeedback onPress={() => setFeedbackModalIndex(null)}>
+          <View style={styles.modalBackdrop} />
+        </TouchableWithoutFeedback>
+        <View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>Why was that answer not helpful?</Text>
+          <TextInput
+            value={feedbackReason}
+            onChangeText={setFeedbackReason}
+            placeholder="Tell us what went wrong"
+            placeholderTextColor={theme.onSurfaceMuted}
+            style={styles.modalInput}
+            multiline
+          />
+          <View style={styles.modalActions}>
+            <Pressable onPress={() => setFeedbackModalIndex(null)} style={styles.modalCancelBtn}>
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                if (feedbackModalIndex !== null) {
+                  const msg = msgs[feedbackModalIndex]?.content || "";
+                  confirmBadFeedback(feedbackModalIndex, msg);
+                }
+              }}
+              style={styles.modalSubmitBtn}
+            >
+              <Text style={styles.modalSubmitText}>Send feedback</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       {/* Drawer Overlay */}
       {drawerOpen && (
@@ -644,6 +856,94 @@ const createStyles = (t: Palette) => StyleSheet.create({
   aiBubble: { alignSelf: "flex-start", backgroundColor: t.surfaceSecondary, ...shadow1 },
   userTxt: { color: t.onBrandPrimary, fontSize: 15, lineHeight: 21 },
   aiTxt: { color: t.onSurface, fontSize: 15, lineHeight: 21 },
+  swipeActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 180,
+    gap: 8,
+    marginLeft: 8,
+  },
+  swipeAction: {
+    minWidth: 80,
+    height: 42,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    gap: 6,
+  },
+  replyAction: { backgroundColor: t.brandPrimary },
+  copyAction: { backgroundColor: t.brand },
+  swipeActionText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  feedbackRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 8,
+    marginTop: 10,
+  },
+  feedbackBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: t.surface,
+    borderWidth: 1,
+    borderColor: t.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  feedbackActiveGood: { backgroundColor: t.success },
+  feedbackActiveBad: { backgroundColor: t.error },
+  replyPreview: {
+    backgroundColor: t.surfaceSecondary,
+    borderTopWidth: 1,
+    borderTopColor: t.divider,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: 4,
+  },
+  replyPreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  replyPreviewLabel: { color: t.brandPrimary, fontSize: 12, fontWeight: "700", flex: 1 },
+  replyPreviewText: { color: t.onSurfaceMuted, fontSize: 12, marginTop: 4 },
+  messageActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 10,
+    gap: 10,
+  },
+  messageActionsRowRight: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    marginTop: 10,
+  },
+  copyInlineBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: t.surface,
+    borderWidth: 1,
+    borderColor: t.border,
+  },
+  copyInlineBtnAlt: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.1)",
+  },
+  copyInlineText: { color: t.onSurfaceMuted, fontSize: 11, fontWeight: "600" },
+  copyInlineTextAlt: { color: t.onBrandPrimary, fontSize: 11, fontWeight: "600" },
   inputWrap: {
     flexDirection: "row",
     padding: spacing.md,
@@ -672,9 +972,25 @@ const createStyles = (t: Palette) => StyleSheet.create({
     justifyContent: "center",
   },
   typingContainer: {
+    alignItems: "flex-start",
+    gap: 4,
+  },
+  typingDotsRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 4,
+    minHeight: 18,
+  },
+  typingDot: {
+    color: t.brandPrimary,
+    fontSize: 20,
+    lineHeight: 20,
+    fontWeight: "700",
+  },
+  typingStatus: {
+    color: t.onSurfaceMuted,
+    fontSize: 12,
+    marginTop: 2,
   },
   overlay: {
     position: "absolute",
@@ -724,6 +1040,53 @@ const createStyles = (t: Palette) => StyleSheet.create({
   drawerItemSubject: { color: t.brandPrimary, fontWeight: "500" },
   drawerItemActions: { flexDirection: "row", gap: 8, marginLeft: 8 },
   drawerActionBtn: { padding: 4 },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+  },
+  modalCard: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    top: "35%",
+    backgroundColor: t.surfaceSecondary,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    ...shadow1,
+  },
+  modalTitle: { color: t.onSurface, fontSize: 16, fontWeight: "700", marginBottom: 12 },
+  modalInput: {
+    minHeight: 90,
+    borderWidth: 1,
+    borderColor: t.border,
+    borderRadius: radii.md,
+    backgroundColor: t.surface,
+    color: t.onSurface,
+    padding: spacing.md,
+    textAlignVertical: "top",
+  },
+  modalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+    marginTop: 14,
+  },
+  modalCancelBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: t.surface,
+    borderWidth: 1,
+    borderColor: t.border,
+  },
+  modalCancelText: { color: t.onSurface, fontWeight: "600" },
+  modalSubmitBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: t.brandPrimary,
+  },
+  modalSubmitText: { color: "#fff", fontWeight: "700" },
 });
 
 // Rebuild the module styles whenever the active palette changes so

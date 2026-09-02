@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI):
         await db.chat_messages.create_index("session_id", 1)
         await db.chat_messages.create_index("user_id", 1)
         await db.ai_sessions.create_index("session_id", unique=True)
+        await db.ai_feedback.create_index([("user_id", 1), ("session_id", 1), ("created_at", -1)])
         await db.study_sessions.create_index("user_id", 1)
         await db.study_sessions.create_index("day", 1)
         
@@ -250,9 +251,9 @@ app.add_middleware(
 # ============================================================
 
 DEFAULT_MODEL_CHAIN = [
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
     "openai/gpt-oss-20b:free",
+    "google/gemma-3n-e4b-it:free",
+    "google/gemma-4-31b-it:free",
     "openrouter/free",
 ]
 
@@ -297,7 +298,8 @@ class SimpleLLM:
                 {"role": "user", "content": message},
             ],
             "temperature": 0.2,
-            "max_tokens": 700,
+            "max_tokens": 600,
+            "stream": False,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -323,16 +325,16 @@ class SimpleLLM:
                 logger.warning(f"Model {model} returned unparseable response: {e}")
                 return None
 
-        logger.warning(f"Model {model} failed: {response.status_code}")
+        logger.warning(f"Model {model} failed: {response.status_code} ({response.text[:300]})")
         return None
 
     async def send_message(self, message: str) -> str:
         if not self.api_key:
             return "AI service not configured. Please set OPENROUTER_API_KEY in .env"
-        models_to_try = self.models[:2] if self.models else []
+        models_to_try = (self.models or [])[:3]
         if not models_to_try:
             return "AI model list is empty."
-        async with httpx.AsyncClient(timeout=15.0) as hc:
+        async with httpx.AsyncClient(timeout=25.0) as hc:
             for model in models_to_try:
                 result = await self._call_model(hc, model, message)
                 if result is not None:
@@ -2614,7 +2616,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         "learning_style": user.get("learning_style") or "Not set",
         "daily_commitment": user.get("daily_commitment") or "Not set",
     }
-    recent_history = history[-12:]
+    recent_history = history[-30:]
     history_context = ""
     if recent_history:
         history_context = "Conversation memory:\n" + "\n".join(
@@ -2652,7 +2654,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         new_user_msg = {"role": "user", "content": req.message, "ts": datetime.utcnow().isoformat()}
         new_assistant_msg = {"role": "assistant", "content": full, "ts": datetime.utcnow().isoformat()}
         history = history + [new_user_msg, new_assistant_msg]
-        history = history[-30:]
+        history = history[-50:]
 
         await db.ai_sessions.update_one(
             {"session_id": session_id, "user_id": user["user_id"]},
@@ -2753,6 +2755,27 @@ async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
 # ============================================================
 # AI SESSIONS MANAGEMENT (new routes for frontend)
 # ============================================================
+
+@api_router.post("/ai/feedback")
+async def ai_feedback(req: dict, user: dict = Depends(get_current_user)):
+    """Store quick thumbs up/down feedback for a model response."""
+    rating = str(req.get("rating", "")).strip().lower()
+    session_id = str(req.get("session_id") or "").strip()
+    message = (req.get("message") or "").strip()
+    reason = (req.get("reason") or "").strip()
+    if rating not in {"good", "bad"}:
+        raise HTTPException(400, "rating must be 'good' or 'bad'")
+    if not session_id:
+        raise HTTPException(400, "session_id is required")
+    await db.ai_feedback.insert_one({
+        "user_id": user["user_id"],
+        "session_id": session_id,
+        "rating": rating,
+        "message": message,
+        "reason": reason,
+        "created_at": datetime.utcnow().isoformat(),
+    })
+    return {"ok": True}
 
 @api_router.get("/ai/sessions")
 async def list_ai_sessions(user: dict = Depends(get_current_user)):
