@@ -157,20 +157,56 @@ import { useTheme } from "@/src/theme-context";
 
 
 
-import { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { View, Text, StyleSheet, ScrollView, Pressable, Animated, Easing } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { useLanguage } from "@/src/i18n";
 
 const TARGET_PAPERS = 20;
+
+
+
+
+
+
+function StatsSkeletonCard({ height }: { height: number }) {
+  const pulse = useRef(new Animated.Value(0.4)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: 700,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0.4,
+          duration: 700,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <Animated.View style={[styles.skeletonCard, { height, opacity: pulse }]} />
+  );
+}
 
 export default function Stats() {
   useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
+  const { t } = useLanguage();
   const [data, setData] = useState<any>(null);
   const [range, setRange] = useState<"Daily" | "Weekly">("Daily");
 
@@ -188,7 +224,17 @@ export default function Stats() {
   if (!data) {
     return (
       <SafeAreaView style={styles.root}>
-        <ActivityIndicator style={{ marginTop: 60 }} color={theme.brandPrimary} />
+        <View style={styles.header}>
+          <View style={styles.skeletonIcon} />
+          <View style={styles.skeletonHeader} />
+          <View style={styles.skeletonIcon} />
+        </View>
+        <ScrollView contentContainerStyle={styles.skeletonContent}>
+          <StatsSkeletonCard height={86} />
+          <StatsSkeletonCard height={150} />
+          <StatsSkeletonCard height={130} />
+          <StatsSkeletonCard height={220} />
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -215,17 +261,17 @@ export default function Stats() {
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 40 }}>
         <View>
-          <Text style={styles.h1}>Academic Analytics</Text>
-          <Text style={styles.sub}>Track your progress and optimize your study routine.</Text>
+          <Text style={styles.h1}>{t.stats.title}</Text>
+          <Text style={styles.sub}>{t.stats.subtitle}</Text>
         </View>
 
         <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.cardTitle}>Study Time</Text>
+            <Text style={styles.cardTitle}>{t.stats.studyTime}</Text>
             <Ionicons name="time-outline" size={20} color={theme.brand} />
           </View>
           <Text style={[styles.big, { color: theme.brand }]}>{data.study_hours}</Text>
-          <Text style={styles.metaMuted}>Hours</Text>
+          <Text style={styles.metaMuted}>{t.stats.hours}</Text>
         </View>
 
         {/* <View style={styles.card}>
@@ -243,7 +289,7 @@ export default function Stats() {
             <Ionicons name="document-text-outline" size={20} color={theme.error} />
           </View>
           <Text style={[styles.big, { color: theme.onSurface }]}>{papersRead}</Text>
-          <Text style={styles.metaMuted}>Target: {TARGET_PAPERS} per month</Text>
+          <Text style={styles.metaMuted}>{t.stats.targetPerMonth.replace("{count}", String(TARGET_PAPERS))}</Text>
           <View style={styles.progressContainer}>
             <View style={styles.progressBg}>
               <View style={[styles.progressFg, { width: `${papersPct}%` }]} />
@@ -254,7 +300,7 @@ export default function Stats() {
 
         <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.cardTitle}>Level {level}</Text>
+            <Text style={styles.cardTitle}>{t.stats.level} {level}</Text>
             <View style={{ flexDirection: "row", gap: 12 }}>
               <View style={styles.streakItem}>
                 <Ionicons name="flame" size={18} color={data.streak > 0 ? theme.warning : theme.onSurfaceMuted} />
@@ -268,7 +314,7 @@ export default function Stats() {
           </View>
           <View style={styles.xpRow}>
             <Text style={styles.xpLabel}>XP: {xp}</Text>
-            <Text style={styles.xpToNext}>{xpToNext} XP to next level</Text>
+            <Text style={styles.xpToNext}>{t.stats.xpToNext.replace("{count}", String(xpToNext))}</Text>
           </View>
           <View style={styles.progressContainer}>
             <View style={styles.progressBg}>
@@ -280,7 +326,7 @@ export default function Stats() {
 
         <View style={styles.card}>
           <View style={styles.rowBetween}>
-            <Text style={styles.cardTitle}>Weekly Activity</Text>
+            <Text style={styles.cardTitle}>{t.stats.weeklyActivity}</Text>
             <View style={styles.toggle}>
               {(["Daily", "Weekly"] as const).map((r) => (
                 <Pressable
@@ -289,7 +335,7 @@ export default function Stats() {
                   style={[styles.togItem, range === r && styles.togActive]}
                   testID={`range-${r}`}
                 >
-                  <Text style={[styles.togTxt, range === r && styles.togTxtActive]}>{r}</Text>
+                  <Text style={[styles.togTxt, range === r && styles.togTxtActive]}>{r === "Daily" ? t.stats.daily : t.stats.weekly}</Text>
                 </Pressable>
               ))}
             </View>
@@ -314,6 +360,24 @@ export default function Stats() {
 
 const createStyles = (t: Palette) => StyleSheet.create({
   root: { flex: 1, backgroundColor: t.surface },
+  skeletonContent: { padding: spacing.lg, gap: spacing.md, paddingBottom: 40 },
+  skeletonCard: {
+    backgroundColor: t.surfaceSecondary,
+    borderRadius: radii.md,
+    ...shadow1,
+  },
+  skeletonIcon: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: t.surfaceTertiary,
+  },
+  skeletonHeader: {
+    width: 96,
+    height: 18,
+    borderRadius: 4,
+    backgroundColor: t.surfaceTertiary,
+  },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",

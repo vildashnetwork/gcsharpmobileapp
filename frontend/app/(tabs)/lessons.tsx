@@ -199,8 +199,10 @@ type Course = {
   course_id: string;
   title: string;
   description: string;
-  subject_name: string;
-  exam_level: string;
+  subject?: string;
+  subject_name?: string;
+  level?: string;
+  exam_level?: string;
   teacher_name: string;
   teacher_avatar?: string;
   thumbnail: string;
@@ -210,10 +212,24 @@ type Course = {
   video_url?: string;
 };
 
-const LEVELS = ["All", "GCE O", "GCE A", "HND", "Concours"];
+const LEVELS = [
+  { label: "All", value: "All" },
+  { label: "GCE O Level", value: "GCE O" },
+  { label: "GCE A Level", value: "GCE A" },
+  { label: "HND", value: "HND" },
+  { label: "Concours", value: "CONCOUR" },
+] as const;
 const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_THUMBNAIL =
   "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&q=85&w=800";
+
+function normalizeExamLevel(value: string | undefined) {
+  return (value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+LEVEL$/, "")
+    .replace("CONCOURS", "CONCOUR");
+}
 
 // Extracted + memoized so scrolling or unrelated parent state changes
 // (search text, refreshing flag) don't force every visible card to
@@ -246,10 +262,10 @@ const CourseCard = memo(function CourseCard({
       <View style={{ padding: spacing.md, gap: 4 }}>
         <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
           <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{course.exam_level || "GCE A"}</Text>
+            <Text style={styles.pillTxt}>{course.level || course.exam_level || "GCE A"}</Text>
           </View>
           <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{course.subject_name || "Mathematics"}</Text>
+            <Text style={styles.pillTxt}>{course.subject || course.subject_name || "Mathematics"}</Text>
           </View>
         </View>
         <Text style={styles.cardTitle} numberOfLines={2}>{course.title}</Text>
@@ -328,7 +344,7 @@ export default function Library() {
   const { user } = useAuth();
   const router = useRouter();
   const [items, setItems] = useState<Course[]>([]);
-  const [level, setLevel] = useState("All");
+  const [level, setLevel] = useState<(typeof LEVELS)[number]["value"]>("All");
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -350,10 +366,7 @@ export default function Library() {
   const load = useCallback(async (opts: { silent?: boolean } = {}) => {
     try {
       if (!opts.silent) setLoading(true);
-      let url = "/library/courses";
-      if (level !== "All") {
-        url = `/library/courses?exam_level=${encodeURIComponent(level)}`;
-      }
+      const url = "/library/courses";
 
       console.log(`[Lessons] Fetching: ${url}`);
 
@@ -394,14 +407,20 @@ export default function Library() {
   // fetched — matches title, description, teacher, and subject so a
   // search for a teacher's name or topic works, not just exact titles.
   const filteredItems = useMemo(() => {
-    if (!query) return items;
+    const levelItems = level === "All"
+      ? items
+      : items.filter((course) =>
+        normalizeExamLevel(course.level || course.exam_level) === normalizeExamLevel(level)
+      );
+
+    if (!query) return levelItems;
     const q = query.toLowerCase();
-    return items.filter((c) =>
-      [c.title, c.description, c.teacher_name, c.subject_name]
+    return levelItems.filter((c) =>
+      [c.title, c.description, c.teacher_name, c.subject, c.subject_name]
         .filter(Boolean)
         .some((field) => field!.toLowerCase().includes(q))
     );
-  }, [items, query]);
+  }, [items, level, query]);
 
   const openCourse = useCallback(
     (c: Course) => router.push(`/library/${c.course_id}`),
@@ -458,18 +477,18 @@ export default function Library() {
         <FlatList
           horizontal
           data={LEVELS}
-          keyExtractor={(x) => x}
+          keyExtractor={(option) => option.value}
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 8 }}
-          renderItem={({ item: l }) => {
-            const active = level === l;
+          renderItem={({ item: option }) => {
+            const active = level === option.value;
             return (
               <Pressable
-                testID={`level-${l}`}
-                onPress={() => setLevel(l)}
+                testID={`level-${option.label}`}
+                onPress={() => setLevel(option.value)}
                 style={[styles.chip, active && styles.chipActive]}
               >
-                <Text style={[styles.chipTxt, active && styles.chipTxtActive]}>{l}</Text>
+                <Text style={[styles.chipTxt, active && styles.chipTxtActive]}>{option.label}</Text>
               </Pressable>
             );
           }}
