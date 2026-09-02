@@ -2545,17 +2545,52 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
 # AI Tutor (Streaming with OpenRouter) – with notification after reply
 # ============================================================
 
+async def _load_ai_session_history(user_id: str, session_id: str) -> list:
+    session = await db.ai_sessions.find_one({"session_id": session_id, "user_id": user_id}, {"_id": 0})
+    history = list(session.get("messages", [])) if session else []
+
+    legacy_msgs = await db.chat_messages.find(
+        {"user_id": user_id, "session_id": session_id},
+        {"_id": 0, "role": 1, "content": 1, "created_at": 1}
+    ).sort("created_at", 1).to_list(200)
+
+    if legacy_msgs:
+        legacy_history = []
+        for m in legacy_msgs:
+            if m.get("role") not in {"user", "assistant"}:
+                continue
+            legacy_history.append({
+                "role": m.get("role"),
+                "content": m.get("content", ""),
+                "ts": str(m.get("created_at") or datetime.utcnow().isoformat()),
+            })
+        if legacy_history:
+            merged = history + legacy_history
+            seen = set()
+            deduped = []
+            for message in merged:
+                key = (message.get("role"), message.get("content"), message.get("ts"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(message)
+            history = deduped
+
+    return history[-30:]
+
+
 @api_router.post("/ai/chat")
 async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     session_id = (req.session_id or "").strip() or f"chat_{uuid.uuid4().hex[:12]}"
     session = await db.ai_sessions.find_one({"session_id": session_id, "user_id": user["user_id"]}, {"_id": 0})
     if not session:
+        history = await _load_ai_session_history(user["user_id"], session_id)
         session = {
             "session_id": session_id,
             "user_id": user["user_id"],
             "title": (req.message or "New chat")[:50],
             "subject": req.subject,
-            "messages": [],
+            "messages": history,
             "profile_snapshot": {
                 "full_name": user.get("full_name", "Student"),
                 "exam_level": user.get("exam_level") or "Not set",
@@ -2568,8 +2603,9 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             "updated_at": datetime.utcnow().isoformat(),
         }
         await db.ai_sessions.insert_one(dict(session))
+    else:
+        history = list(session.get("messages", []))
 
-    history = session.get("messages", [])
     profile_snapshot = session.get("profile_snapshot") or {
         "full_name": user.get("full_name", "Student"),
         "exam_level": user.get("exam_level") or "Not set",
@@ -2582,7 +2618,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     history_context = ""
     if recent_history:
         history_context = "Conversation memory:\n" + "\n".join(
-            f"{m.get('role','user').upper()}: {m.get('content','')}" for m in recent_history
+            f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in recent_history
         ) + "\n\n"
 
     system = (
@@ -2599,6 +2635,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
     chat = _new_chat(session_id, system)
 
     async def event_gen():
+        nonlocal history
         full = ""
         try:
             prompt = history_context + "Current question:\n" + req.message
@@ -2612,14 +2649,19 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
 
-        new_messages = history + [
-            {"role": "user", "content": req.message, "ts": datetime.utcnow().isoformat()},
-            {"role": "assistant", "content": full, "ts": datetime.utcnow().isoformat()},
-        ]
+        new_user_msg = {"role": "user", "content": req.message, "ts": datetime.utcnow().isoformat()}
+        new_assistant_msg = {"role": "assistant", "content": full, "ts": datetime.utcnow().isoformat()}
+        history = history + [new_user_msg, new_assistant_msg]
+        history = history[-30:]
+
         await db.ai_sessions.update_one(
             {"session_id": session_id, "user_id": user["user_id"]},
-            {"$set": {"messages": new_messages[-30:], "updated_at": datetime.utcnow().isoformat()}},
+            {"$set": {"messages": history, "updated_at": datetime.utcnow().isoformat()}},
         )
+        await db.chat_messages.insert_many([
+            {"user_id": user["user_id"], "session_id": session_id, "role": "user", "content": req.message, "created_at": new_user_msg["ts"]},
+            {"user_id": user["user_id"], "session_id": session_id, "role": "assistant", "content": full, "created_at": new_assistant_msg["ts"]},
+        ])
         yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
         await create_notification(
