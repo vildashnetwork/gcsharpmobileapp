@@ -176,7 +176,7 @@ import { useTheme } from "@/src/theme-context";
 
 // app/(tabs)/profile.tsx
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Image, Switch } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, Image, Switch, Linking } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
@@ -188,6 +188,7 @@ import { storage } from "@/src/utils/storage";
 import { useLanguage, type Lang } from "@/src/i18n";
 
 const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
+const HELP_CENTER_URL = "https://support.gcsharp.com";
 
 export default function Profile() {
   useTheme(); // re-render this screen when light/dark changes
@@ -394,6 +395,7 @@ export default function Profile() {
         <Row icon="chatbubble-ellipses-outline" label={t.tabs.ai} onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
         <Row icon="videocam-outline" label={t.tabs.lessons} onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
         <Row icon="book-outline" label={t.tabs.library} onPress={() => router.push("/(tabs)/library")} testID="row-library" />
+        <Row icon="help-circle-outline" label="Help Center" onPress={() => Linking.openURL(HELP_CENTER_URL)} testID="row-help-center" />
         <Row icon="log-out-outline" label={t.profile.logout} danger onPress={doLogout} testID="row-logout" />
       </ScrollView>
     </SafeAreaView>

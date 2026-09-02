@@ -54,6 +54,7 @@ type DashboardStats = {
 };
 
 type LeaderboardEntry = {
+  user_id: string;
   rank: number;
   name: string;
   picture?: string;
@@ -613,7 +614,12 @@ export default function Home() {
             leaderboard.top.slice(0, 5).map((entry) => {
               const isMe = entry.is_me;
               return (
-                <View key={entry.rank} style={[styles.leaderboardRow, isMe && styles.leaderboardMe]}>
+                <Pressable
+                  key={entry.rank}
+                  onPress={() => router.push(`/student-profile/${entry.user_id}`)}
+                  style={[styles.leaderboardRow, isMe && styles.leaderboardMe]}
+                  testID={`leaderboard-student-${entry.user_id}`}
+                >
                   <Text style={[styles.leaderboardRankNum, entry.rank <= 3 && styles.leaderboardTopRank]}>
                     {entry.rank}
                   </Text>
@@ -632,7 +638,7 @@ export default function Home() {
                   </Text>
                   <Text style={styles.leaderboardLevel}>{t.home.lvl} {entry.level}</Text>
                   <Text style={styles.leaderboardXp}>{entry.xp} XP</Text>
-                </View>
+                </Pressable>
               );
             })
           ) : (

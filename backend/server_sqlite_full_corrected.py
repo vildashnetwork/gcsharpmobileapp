@@ -2349,6 +2349,7 @@ async def leaderboard(user: dict = Depends(get_current_user_optional)):
     my_rank = None
     for i, u in enumerate(users):
         entry = {
+            "user_id": u["user_id"],
             "rank": i + 1,
             "name": u.get("full_name", "Student"),
             "picture": u.get("profile_photo") or u.get("picture") or None,
@@ -2361,6 +2362,27 @@ async def leaderboard(user: dict = Depends(get_current_user_optional)):
         board.append(entry)
 
     return {"top": board[:10], "my_rank": my_rank}
+
+
+@api_router.get("/students/{student_id}/profile")
+async def get_student_profile(student_id: str, user: dict = Depends(get_current_user)):
+    student = await db.users.find_one(
+        {"user_id": student_id, "role": "student"},
+        {"_id": 0, "email": 0, "password_hash": 0, "pin_hash": 0},
+    )
+    if not student:
+        raise HTTPException(404, "Student not found")
+    return {
+        "user_id": student.get("user_id"),
+        "full_name": student.get("full_name", "Student"),
+        "bio": student.get("bio", ""),
+        "institution": student.get("institution", ""),
+        "exam_level": student.get("exam_level", ""),
+        "profile_photo": student.get("profile_photo") or student.get("picture"),
+        "xp": student.get("xp", 0),
+        "level": student.get("level", 1),
+        "streak": student.get("streak", 0),
+    }
 
 # ============================================================
 # Library Routes

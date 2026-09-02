@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -70,6 +71,7 @@ const LIGHT_BLUE = "#E9F2FF";
 const WHITE = "#FFFFFF";
 const BORDER = "#D7DEE8";
 const ERROR = "#C62828";
+const HELP_CENTER_URL = "https://support.gcsharp.com";
 
 // Onboarding copy is resolved from the active language dictionary at render
 // time so switching EN/FR (even mid-flow) translates every slide.
@@ -901,6 +903,15 @@ export default function Welcome() {
             >
               <Text style={styles.secondaryButtonText}>{t.welcome.haveAccount}</Text>
             </Pressable>
+            <Pressable
+              testID="help-center-link"
+              onPress={() => Linking.openURL(HELP_CENTER_URL)}
+              style={styles.helpCenterLink}
+            >
+              <Ionicons name="help-circle-outline" size={18} color={theme.brandPrimary} />
+              <Text style={styles.helpCenterText}>Help Center</Text>
+              <Ionicons name="open-outline" size={15} color={theme.brandPrimary} />
+            </Pressable>
           </View>
         </ScrollView>
       </View>
@@ -1363,6 +1374,15 @@ const createStyles = (t: Palette) => StyleSheet.create({
     backgroundColor: t.surfaceSecondary,
   },
   secondaryButtonText: { color: t.brandPrimary, fontSize: 16, fontWeight: "800" },
+  helpCenterLink: {
+    alignSelf: "center",
+    marginTop: 18,
+    padding: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  helpCenterText: { color: t.brandPrimary, fontSize: 14, fontWeight: "700" },
   disabledButton: { opacity: 0.5 },
 
   // AuthChoice
