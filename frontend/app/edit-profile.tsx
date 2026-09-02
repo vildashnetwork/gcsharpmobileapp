@@ -11,6 +11,8 @@ import {
     TouchableOpacity,
     Image,
     Alert,
+    KeyboardAvoidingView,
+    Platform,
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -35,7 +37,7 @@ const CLOUD_NAME = "qsmemy5r";
 const UPLOAD_PRESET = "gcsharp";
 
 export default function EditProfile() {
-  useTheme(); // re-render this screen when light/dark changes
+    useTheme(); // re-render this screen when light/dark changes
     const { user, refresh } = useAuth(); // ✅ Use refresh instead of setUser
     const router = useRouter();
     const insets = useSafeAreaInsets();
@@ -201,156 +203,167 @@ export default function EditProfile() {
                 <View style={{ width: 24 }} />
             </View>
 
-            <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: insets.bottom + 20 }}>
-                {/* Avatar */}
-                <View style={styles.avatarSection}>
-                    <View style={styles.avatarWrapper}>
-                        {form.picture ? (
-                            <Image source={{ uri: form.picture }} style={styles.avatarImage} />
-                        ) : (
-                            <View style={styles.avatarPlaceholder}>
-                                <Text style={styles.avatarPlaceholderText}>{initials}</Text>
-                            </View>
-                        )}
-                        <TouchableOpacity
-                            style={styles.cameraBtn}
-                            onPress={showImagePickerOptions}
-                            disabled={uploading}
-                        >
-                            {uploading ? (
-                                <ActivityIndicator size="small" color="#fff" />
+            <KeyboardAvoidingView
+                style={styles.keyboardContainer}
+                behavior={Platform.OS === "ios" ? "padding" : "height"}
+                keyboardVerticalOffset={insets.top + 56}
+            >
+                <ScrollView
+                    contentContainerStyle={{ padding: spacing.lg, paddingBottom: insets.bottom + 40 }}
+                    keyboardShouldPersistTaps="handled"
+                    keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+                >
+                    {/* Avatar */}
+                    <View style={styles.avatarSection}>
+                        <View style={styles.avatarWrapper}>
+                            {form.picture ? (
+                                <Image source={{ uri: form.picture }} style={styles.avatarImage} />
                             ) : (
-                                <Ionicons name="camera" size={18} color="#fff" />
+                                <View style={styles.avatarPlaceholder}>
+                                    <Text style={styles.avatarPlaceholderText}>{initials}</Text>
+                                </View>
                             )}
-                        </TouchableOpacity>
+                            <TouchableOpacity
+                                style={styles.cameraBtn}
+                                onPress={showImagePickerOptions}
+                                disabled={uploading}
+                            >
+                                {uploading ? (
+                                    <ActivityIndicator size="small" color="#fff" />
+                                ) : (
+                                    <Ionicons name="camera" size={18} color="#fff" />
+                                )}
+                            </TouchableOpacity>
+                        </View>
+                        <Text style={styles.avatarHint}>Tap camera to change photo</Text>
                     </View>
-                    <Text style={styles.avatarHint}>Tap camera to change photo</Text>
-                </View>
 
-                {/* Name */}
-                <View style={styles.field}>
-                    <Text style={styles.label}>Full Name</Text>
-                    <TextInput
-                        style={styles.input}
-                        value={form.name}
-                        onChangeText={(v) => updateField("name", v)}
-                        placeholder="Your full name"
-                        placeholderTextColor={theme.onSurfaceMuted}
-                    />
-                </View>
-
-                {/* Institution */}
-                <View style={styles.field}>
-                    <Text style={styles.label}>Institution</Text>
-                    <TextInput
-                        style={styles.input}
-                        value={form.institution}
-                        onChangeText={(v) => updateField("institution", v)}
-                        placeholder="School or university"
-                        placeholderTextColor={theme.onSurfaceMuted}
-                    />
-                </View>
-
-                {/* Exam Level */}
-                {user?.role !== "teacher" && (
+                    {/* Name */}
                     <View style={styles.field}>
-                        <Text style={styles.label}>Exam Level</Text>
+                        <Text style={styles.label}>Full Name</Text>
+                        <TextInput
+                            style={styles.input}
+                            value={form.name}
+                            onChangeText={(v) => updateField("name", v)}
+                            placeholder="Your full name"
+                            placeholderTextColor={theme.onSurfaceMuted}
+                        />
+                    </View>
+
+                    {/* Institution */}
+                    <View style={styles.field}>
+                        <Text style={styles.label}>Institution</Text>
+                        <TextInput
+                            style={styles.input}
+                            value={form.institution}
+                            onChangeText={(v) => updateField("institution", v)}
+                            placeholder="School or university"
+                            placeholderTextColor={theme.onSurfaceMuted}
+                        />
+                    </View>
+
+                    {/* Exam Level */}
+                    {user?.role !== "teacher" && (
+                        <View style={styles.field}>
+                            <Text style={styles.label}>Exam Level</Text>
+                            <Pressable
+                                style={styles.select}
+                                onPress={() => setShowLevelPicker(!showLevelPicker)}
+                            >
+                                <Text style={[styles.selectText, !form.exam_level && { color: theme.onSurfaceMuted }]}>
+                                    {form.exam_level || "Select your level"}
+                                </Text>
+                                <Ionicons name="chevron-down" size={20} color={theme.onSurfaceMuted} />
+                            </Pressable>
+                            {showLevelPicker && (
+                                <View style={styles.options}>
+                                    {LEVELS.map((l) => (
+                                        <Pressable
+                                            key={l}
+                                            style={[styles.optionItem, form.exam_level === l && styles.optionSelected]}
+                                            onPress={() => {
+                                                updateField("exam_level", l);
+                                                setShowLevelPicker(false);
+                                            }}
+                                        >
+                                            <Text style={[styles.optionText, form.exam_level === l && styles.optionTextSelected]}>
+                                                {l}
+                                            </Text>
+                                        </Pressable>
+                                    ))}
+                                </View>
+                            )}
+                        </View>
+                    )}
+
+                    {/* Daily Commitment */}
+                    <View style={styles.field}>
+                        <Text style={styles.label}>Daily Study Goal</Text>
                         <Pressable
                             style={styles.select}
-                            onPress={() => setShowLevelPicker(!showLevelPicker)}
+                            onPress={() => setShowCommitmentPicker(!showCommitmentPicker)}
                         >
-                            <Text style={[styles.selectText, !form.exam_level && { color: theme.onSurfaceMuted }]}>
-                                {form.exam_level || "Select your level"}
+                            <Text style={styles.selectText}>
+                                {DAILY_COMMITMENTS.find((c) => c.value === form.daily_commitment)?.label || "Select goal"}
                             </Text>
                             <Ionicons name="chevron-down" size={20} color={theme.onSurfaceMuted} />
                         </Pressable>
-                        {showLevelPicker && (
+                        {showCommitmentPicker && (
                             <View style={styles.options}>
-                                {LEVELS.map((l) => (
+                                {DAILY_COMMITMENTS.map((c) => (
                                     <Pressable
-                                        key={l}
-                                        style={[styles.optionItem, form.exam_level === l && styles.optionSelected]}
+                                        key={c.value}
+                                        style={[styles.optionItem, form.daily_commitment === c.value && styles.optionSelected]}
                                         onPress={() => {
-                                            updateField("exam_level", l);
-                                            setShowLevelPicker(false);
+                                            updateField("daily_commitment", c.value);
+                                            setShowCommitmentPicker(false);
                                         }}
                                     >
-                                        <Text style={[styles.optionText, form.exam_level === l && styles.optionTextSelected]}>
-                                            {l}
+                                        <Text style={[styles.optionText, form.daily_commitment === c.value && styles.optionTextSelected]}>
+                                            {c.label}
                                         </Text>
                                     </Pressable>
                                 ))}
                             </View>
                         )}
+                        <Text style={styles.helperText}>This determines your daily streak target.</Text>
                     </View>
-                )}
 
-                {/* Daily Commitment */}
-                <View style={styles.field}>
-                    <Text style={styles.label}>Daily Study Goal</Text>
+                    {/* Bio */}
+                    <View style={styles.field}>
+                        <Text style={styles.label}>Bio</Text>
+                        <TextInput
+                            style={[styles.input, styles.textArea]}
+                            value={form.bio}
+                            onChangeText={(v) => updateField("bio", v)}
+                            placeholder="Tell us about yourself"
+                            placeholderTextColor={theme.onSurfaceMuted}
+                            multiline
+                            numberOfLines={4}
+                        />
+                    </View>
+
+                    {/* Save Button */}
                     <Pressable
-                        style={styles.select}
-                        onPress={() => setShowCommitmentPicker(!showCommitmentPicker)}
+                        style={[styles.saveBtn, (saving || uploading) && styles.saveBtnDisabled]}
+                        onPress={save}
+                        disabled={saving || uploading}
                     >
-                        <Text style={styles.selectText}>
-                            {DAILY_COMMITMENTS.find((c) => c.value === form.daily_commitment)?.label || "Select goal"}
-                        </Text>
-                        <Ionicons name="chevron-down" size={20} color={theme.onSurfaceMuted} />
+                        {saving ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                        ) : (
+                            <Text style={styles.saveBtnText}>Save Changes</Text>
+                        )}
                     </Pressable>
-                    {showCommitmentPicker && (
-                        <View style={styles.options}>
-                            {DAILY_COMMITMENTS.map((c) => (
-                                <Pressable
-                                    key={c.value}
-                                    style={[styles.optionItem, form.daily_commitment === c.value && styles.optionSelected]}
-                                    onPress={() => {
-                                        updateField("daily_commitment", c.value);
-                                        setShowCommitmentPicker(false);
-                                    }}
-                                >
-                                    <Text style={[styles.optionText, form.daily_commitment === c.value && styles.optionTextSelected]}>
-                                        {c.label}
-                                    </Text>
-                                </Pressable>
-                            ))}
-                        </View>
-                    )}
-                    <Text style={styles.helperText}>This determines your daily streak target.</Text>
-                </View>
-
-                {/* Bio */}
-                <View style={styles.field}>
-                    <Text style={styles.label}>Bio</Text>
-                    <TextInput
-                        style={[styles.input, styles.textArea]}
-                        value={form.bio}
-                        onChangeText={(v) => updateField("bio", v)}
-                        placeholder="Tell us about yourself"
-                        placeholderTextColor={theme.onSurfaceMuted}
-                        multiline
-                        numberOfLines={4}
-                    />
-                </View>
-
-                {/* Save Button */}
-                <Pressable
-                    style={[styles.saveBtn, (saving || uploading) && styles.saveBtnDisabled]}
-                    onPress={save}
-                    disabled={saving || uploading}
-                >
-                    {saving ? (
-                        <ActivityIndicator color="#fff" size="small" />
-                    ) : (
-                        <Text style={styles.saveBtnText}>Save Changes</Text>
-                    )}
-                </Pressable>
-            </ScrollView>
+                </ScrollView>
+            </KeyboardAvoidingView>
         </SafeAreaView>
     );
 }
 
 const createStyles = (t: Palette) => StyleSheet.create({
     root: { flex: 1, backgroundColor: t.surface },
+    keyboardContainer: { flex: 1 },
     header: {
         flexDirection: "row",
         alignItems: "center",
@@ -443,5 +456,5 @@ const createStyles = (t: Palette) => StyleSheet.create({
 // function) picks up light/dark without prop drilling.
 let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => {
-  styles = createStyles(getPaletteSnapshot());
+    styles = createStyles(getPaletteSnapshot());
 });

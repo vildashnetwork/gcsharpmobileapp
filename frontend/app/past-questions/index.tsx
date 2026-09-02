@@ -1293,6 +1293,7 @@ import { useRouter, Stack } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { useAuth } from "@/src/auth";
 import { useLanguage } from "@/src/i18n";
 
 // ---------- Types ----------
@@ -1366,14 +1367,24 @@ export default function PastQuestions() {
   useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
   const { t } = useLanguage();
+  const { user, loading: authLoading } = useAuth();
+
+  const userLevel = useMemo(() => {
+    const profileLevel = (user?.exam_level || "").trim().toLowerCase();
+    const matchingLevel = DISPLAY_LEVELS.find((level) =>
+      profileLevel === level.label.toLowerCase() ||
+      profileLevel === level.backend.toLowerCase()
+    );
+    return matchingLevel || null;
+  }, [user?.exam_level]);
 
   // ---------- State ----------
   const [structure, setStructure] = useState<ExamStructure | null>(null);
   const [selectedDisplayLevel, setSelectedDisplayLevel] = useState<string>(
-    DISPLAY_LEVELS[0].label
+    ""
   );
   const [selectedBackendLevel, setSelectedBackendLevel] = useState<string>(
-    DISPLAY_LEVELS[0].backend
+    ""
   );
 
   // `subjects` is the subject list for the CURRENT selected level.
@@ -1412,8 +1423,8 @@ export default function PastQuestions() {
 
         setStructure(data);
 
-        const firstBackendLevel = DISPLAY_LEVELS[0].backend;
-        setSubjects(data.levels[firstBackendLevel] || []);
+        const profileBackendLevel = userLevel?.backend || "";
+        setSubjects(data.levels[profileBackendLevel] || []);
       } catch (err) {
         console.error("Failed to load subjects:", err);
         Alert.alert("Error", "Could not load subjects. Please try again.");
@@ -1423,7 +1434,7 @@ export default function PastQuestions() {
     };
 
     fetchStructure();
-  }, []);
+  }, [userLevel]);
 
   // ---------- Load database-backed filter metadata ----------
   useEffect(() => {
@@ -1443,19 +1454,28 @@ export default function PastQuestions() {
 
   // ---------- Update subjects when level changes ----------
   useEffect(() => {
-    if (!structure) return;
+    if (!structure || !userLevel) return;
 
-    const levelSubjects = structure.levels[selectedBackendLevel] || [];
+    const levelSubjects = structure.levels[userLevel.backend] || [];
 
     setSubjects(levelSubjects);
     setSelectedSubject(null);
-  }, [selectedBackendLevel, structure]);
+    setSelectedDisplayLevel(userLevel.label);
+    setSelectedBackendLevel(userLevel.backend);
+  }, [structure, userLevel]);
 
   // ---------- Fetch papers ----------
   const loadPapers = useCallback(
     async (opts?: { silent?: boolean }) => {
       if (!opts?.silent) setLoading(true);
       setSearchError(null);
+
+      if (authLoading || !userLevel) {
+        setPapers([]);
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
 
       try {
         const params = new URLSearchParams();
@@ -1495,6 +1515,8 @@ export default function PastQuestions() {
       selectedSubject,
       selectedBackendLevel,
       selectedYear,
+      authLoading,
+      userLevel,
     ]
   );
 
@@ -1595,12 +1617,9 @@ export default function PastQuestions() {
 
   // ---------- Handle level change ----------
   const handleLevelChange = (displayLabel: string) => {
-    setSelectedDisplayLevel(displayLabel);
-
-    const backendLevel =
-      DISPLAY_LEVELS.find((dl) => dl.label === displayLabel)?.backend || "";
-
-    setSelectedBackendLevel(backendLevel);
+    if (!userLevel || displayLabel !== userLevel.label) return;
+    setSelectedDisplayLevel(userLevel.label);
+    setSelectedBackendLevel(userLevel.backend);
   };
 
   // ---------- Skeleton loader ----------
@@ -1663,7 +1682,7 @@ export default function PastQuestions() {
           contentContainerStyle={styles.chipRow}
           keyboardShouldPersistTaps="handled"
         >
-          {DISPLAY_LEVELS.map((dl) => (
+          {DISPLAY_LEVELS.filter((dl) => dl.label === userLevel?.label).map((dl) => (
             <Pressable
               key={dl.label}
               testID={`level-${dl.label}`}

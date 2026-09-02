@@ -316,7 +316,7 @@ import { useAuth } from "@/src/auth";
 
 // ---------- Constants ----------
 const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
-const SUBJECTS = ["Mathematics", "Physics", "Chemistry", "Biology", "English Language", "French", "Economics", "Computer Science", "Accounting", "Literature"];
+const SUBJECTS = ["Others","Mathematics", "Physics", "Chemistry", "Biology", "English Language", "French", "Economics", "Computer Science", "Accounting", "Literature"];
 const COMMIT = ["15 mins", "30 mins", "1 hour", "2+ hours"];
 const PROF = ["Beginner", "Intermediate", "Advanced"];
 const STYLE = ["Visual", "Auditory", "Reading", "Kinesthetic"];
@@ -515,7 +515,7 @@ export default function Onboarding() {
         </View>
       ) : (
         <View style={styles.field}>
-          <SectionLabel>Subject specialization</SectionLabel>
+          <SectionLabel>Subject specialization {"( don't bother if your subjects are not here!!"} </SectionLabel>
           <View style={styles.optionsGrid}>
             {SUBJECTS.map((s) => (
               <OptionChip key={s} label={s} selected={form.specialization === s} onPress={() => set("specialization", s)} />
@@ -554,7 +554,7 @@ export default function Onboarding() {
         <View style={styles.stepContainer}>
           <Text style={styles.title}>Teaching expertise</Text>
           <View style={styles.field}>
-            <SectionLabel>Subjects you teach</SectionLabel>
+            <SectionLabel>Subjects you teach  {"(dont worry if your subject is not here)"}</SectionLabel>
             <View style={styles.optionsGrid}>
               {SUBJECTS.map((s) => (
                 <OptionChip key={s} label={s} selected={form.subjects.includes(s)} onPress={() => toggleArr("subjects", s)} />
