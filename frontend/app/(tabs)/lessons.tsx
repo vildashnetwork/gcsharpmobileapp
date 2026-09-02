@@ -388,7 +388,7 @@ export default function Library() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [level]);
+  }, []);
 
   useEffect(() => {
     load();
