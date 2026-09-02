@@ -54,7 +54,7 @@ type DashboardStats = {
 };
 
 type LeaderboardEntry = {
-  user_id: string;
+  user_id?: string;
   rank: number;
   name: string;
   picture?: string;
@@ -616,7 +616,18 @@ export default function Home() {
               return (
                 <Pressable
                   key={entry.rank}
-                  onPress={() => router.push(`/student-profile/${entry.user_id}`)}
+                  onPress={() => {
+                    router.push({
+                      pathname: "/student-profile/[id]",
+                      params: {
+                        id: entry.user_id || `rank-${entry.rank}`,
+                        name: entry.name,
+                        picture: entry.picture || "",
+                        xp: String(entry.xp),
+                        level: String(entry.level),
+                      },
+                    });
+                  }}
                   style={[styles.leaderboardRow, isMe && styles.leaderboardMe]}
                   testID={`leaderboard-student-${entry.user_id}`}
                 >

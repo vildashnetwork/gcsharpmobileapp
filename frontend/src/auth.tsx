@@ -745,7 +745,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       "lesson",
       "library",
       "ai",
-      "edit-profile"
+      "edit-profile",
+      "student-profile"
     ];
 
     const isWelcomePage = currentRoute === "welcome" || currentRoute === "";
