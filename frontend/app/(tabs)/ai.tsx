@@ -115,6 +115,7 @@ export default function AITutor() {
   const [feedbackReason, setFeedbackReason] = useState("");
   const [thinkingStage, setThinkingStage] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
   const seededRef = useRef(false);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const typingMessages = [
@@ -285,8 +286,7 @@ export default function AITutor() {
       await refreshActiveSession(currentSessionId);
     }
 
-    const attachedContext = replyContext ? `\n\nAttached context:\n${replyContext}` : "";
-    const finalMessage = `${content}${attachedContext}`;
+    const finalMessage = content;
 
     // If it's a new chat, generate a temporary session id (backend will create it)
     const sessionId = currentSessionId || `chat_${Date.now()}`;
@@ -517,9 +517,15 @@ export default function AITutor() {
   };
 
   const handleAttachMessage = (content: string) => {
-    const clean = content.trim().replace(/\s+/g, " ");
-    const snippet = clean.length > 220 ? `${clean.slice(0, 220)}...` : clean;
-    setReplyContext(snippet);
+    const fullMessage = content.trim();
+    if (!fullMessage) return;
+    const attachment = `"${fullMessage}"`;
+    setReplyContext(fullMessage);
+    setText((previous) => {
+      const current = previous.trim();
+      return current ? `${current}\n\n${attachment}` : attachment;
+    });
+    requestAnimationFrame(() => inputRef.current?.focus());
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 120);
   };
 
@@ -700,6 +706,7 @@ export default function AITutor() {
         {/* Input area */}
         <View style={styles.inputWrap}>
           <TextInput
+            ref={inputRef}
             testID="chat-input"
             value={text}
             onChangeText={setText}

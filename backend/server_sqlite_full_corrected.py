@@ -2571,12 +2571,15 @@ async def _load_ai_session_history(user_id: str, session_id: str) -> list:
             seen = set()
             deduped = []
             for message in merged:
-                key = (message.get("role"), message.get("content"), message.get("ts"))
+                key = (message.get("role"), message.get("content"))
                 if key in seen:
                     continue
                 seen.add(key)
                 deduped.append(message)
-            history = deduped
+            history = sorted(
+                deduped,
+                key=lambda message: str(message.get("ts") or ""),
+            )
 
     return history[-30:]
 
@@ -2606,7 +2609,9 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         }
         await db.ai_sessions.insert_one(dict(session))
     else:
-        history = list(session.get("messages", []))
+        # Reconcile both stores on every turn so older chats and messages
+        # written by another request are available without a page refresh.
+        history = await _load_ai_session_history(user["user_id"], session_id)
 
     profile_snapshot = session.get("profile_snapshot") or {
         "full_name": user.get("full_name", "Student"),
