@@ -130,15 +130,7 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Starting Unified GCSMART API Server...")
-    
-    try:
-        collections = await db.list_collection_names()
-        if "drafts" in collections:
-            await db.drafts.drop()
-            print("Dropped drafts collection to fix index issues")
-    except Exception as e:
-        print(f"Could not drop drafts: {e}")
-    
+
     try:
         # Existing indexes
         await db.users.create_index("email", unique=True)
@@ -151,7 +143,14 @@ async def lifespan(app: FastAPI):
         await db.questions_cache.create_index("cache_key", unique=True)
         await db.courses.create_index("course_id", unique=True)
         await db.lesson_videos.create_index("lesson_id", unique=True)
-        await db.drafts.create_index("draft_id", unique=True)
+        # FIX: drafts uniqueness is per (user_id, paper_id), not on an unused
+        # "draft_id" field. The old `create_index("draft_id", unique=True)`
+        # caused every document (which never set draft_id) to be treated as
+        # having a null draft_id — and a non-sparse unique index treats all
+        # nulls as duplicates of each other. That meant the *second* draft
+        # any user ever saved would hit a duplicate-key error and 500.
+        await db.drafts.create_index([("user_id", 1), ("paper_id", 1)], unique=True)
+        await db.drafts.create_index("draft_id", unique=True, sparse=True)
         await db.papers.create_index("paper_id", unique=True)
         await db.attempts.create_index("attempt_id", unique=True)
         await db.chat_messages.create_index("session_id", 1)
@@ -496,6 +495,11 @@ def public_user(user: dict) -> dict:
 # ============================================================
 # Pydantic Models for PIN Auth
 # ============================================================
+# NOTE: PIN "strength" rejection has been intentionally removed everywhere
+# in this file. The only remaining constraint is the structural one — a PIN
+# must be exactly 6 digits — so the app can render a fixed 6-digit PIN pad.
+# There is no longer a blocklist of "weak" PINs (000000, 123456, etc.) at
+# registration, setup, or reset time.
 
 class RegisterWithPinRequest(BaseModel):
     email: EmailStr
@@ -567,16 +571,6 @@ class ResetPinWithOtpRequest(BaseModel):
     def validate_new_pin(cls, value: str) -> str:
         if not re.fullmatch(r"\d{6}", value):
             raise ValueError("PIN must contain exactly 6 digits")
-        weak_pins = {
-            "000000",
-            "111111",
-            "123456",
-            "654321",
-            "121212",
-            "112233",
-        }
-        if value in weak_pins:
-            raise ValueError("Choose a less predictable PIN")
         return value
 
 # ============================================================
@@ -669,76 +663,6 @@ def _new_chat(session_id: str, system: str) -> SimpleLLM:
     chat.system_message = system
     chat.session_id = session_id
     return chat
-
-# async def get_current_user(authorization: Optional[str] = Header(None)):
-#     if not authorization or not authorization.startswith("Bearer "):
-#         raise HTTPException(status_code=401, detail="Missing token")
-#     token = authorization.split(" ", 1)[1]
-    
-#     user_id = None
-    
-#     try:
-#         decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-#         user_id = decoded.get("sub")
-#     except:
-#         session = await db.user_sessions.find_one({"session_token": token})
-#         if session:
-#             exp = session.get("expires_at")
-#             if exp:
-#                 if isinstance(exp, str):
-#                     try:
-#                         exp = datetime.fromisoformat(exp)
-#                     except:
-#                         pass
-#                 if exp and exp > datetime.utcnow():
-#                     user_id = session["user_id"]
-#                 else:
-#                     raise HTTPException(status_code=401, detail="Session expired")
-#             else:
-#                 user_id = session["user_id"]
-#         else:
-#             raise HTTPException(status_code=401, detail="Invalid token")
-    
-#     if not user_id:
-#         raise HTTPException(status_code=401, detail="Invalid token")
-    
-#     user = await db.users.find_one({"user_id": user_id})
-#     if not user:
-#         raise HTTPException(status_code=401, detail="User not found")
-    
-#     user.pop("_id", None)
-#     user.pop("password_hash", None)
-    
-#     user.setdefault("onboarded", False)
-#     user.setdefault("xp", 0)
-#     user.setdefault("level", 1)
-#     user.setdefault("streak", 0)
-#     user.setdefault("profile_photo", None)
-#     user.setdefault("exam_level", None)
-#     user.setdefault("full_name", user.get("full_name", "User"))
-#     user.setdefault("role", "student")
-#     user.setdefault("bio", "")
-#     user.setdefault("institution", "")
-#     user.setdefault("study_year", None)
-#     user.setdefault("subjects", [])
-#     user.setdefault("goals", [])
-#     user.setdefault("daily_commitment", "")
-#     user.setdefault("proficiency", "")
-#     user.setdefault("learning_style", "")
-#     user.setdefault("specialization", "")
-#     user.setdefault("accuracy", 0.0)
-#     user.setdefault("settings", DEFAULT_SETTINGS)
-#     user.setdefault("last_goal_met_date", None)
-    
-#     return user
-
-
-
-
-
-
-
-
 
 async def get_current_user(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -1264,35 +1188,6 @@ async def logout(request: Request, response: Response):
     response.delete_cookie("session_token", path="/")
     return {"ok": True}
 
-# @api_router.put("/auth/profile")
-# async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
-#     update = {}
-#     for k, v in payload.model_dump().items():
-#         if v is not None:
-#             if k == "full_name":
-#                 update["name"] = v      # DB stores name
-#             elif k == "picture":
-#                 update["picture"] = v
-#             else:
-#                 update[k] = v
-#     if update:
-#         await db.users.update_one({"user_id": user["user_id"]}, {"$set": update})
-#     fresh = await db.users.find_one({"user_id": user["user_id"]})
-#     fresh.pop("_id", None)
-#     fresh.pop("password_hash", None)
-#     # Normalise for frontend
-#     if "name" in fresh and "full_name" not in fresh:
-#         fresh["full_name"] = fresh["name"]
-#     if "picture" in fresh and "profile_photo" not in fresh:
-#         fresh["profile_photo"] = fresh["picture"]
-#     return fresh
-
-
-
-
-
-
-
 @api_router.put("/auth/profile")
 async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_current_user)):
     update = {}
@@ -1317,7 +1212,6 @@ async def update_profile(payload: ProfileUpdate, user: dict = Depends(get_curren
     if "picture" in fresh and "profile_photo" not in fresh:
         fresh["profile_photo"] = fresh["picture"]
     return fresh
-
 
 
 # ============================================================
@@ -1360,20 +1254,7 @@ async def register_with_pin(
             detail="An account already exists for this email",
         )
 
-    weak_pins = {
-        "000000",
-        "111111",
-        "123456",
-        "654321",
-        "121212",
-        "112233",
-    }
-
-    if req.pin in weak_pins:
-        raise HTTPException(
-            status_code=400,
-            detail="Choose a less predictable PIN",
-        )
+    # NOTE: no weak-PIN blocklist here anymore — any 6-digit PIN is accepted.
 
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     biometric_token = new_biometric_token()
@@ -1603,21 +1484,7 @@ async def setup_pin(
     req: PinSetupRequest,
     user: dict = Depends(get_current_user),
 ):
-    weak_pins = {
-        "000000",
-        "111111",
-        "123456",
-        "654321",
-        "121212",
-        "112233",
-    }
-
-    if req.pin in weak_pins:
-        raise HTTPException(
-            status_code=400,
-            detail="Choose a less predictable PIN",
-        )
-
+    # NOTE: no weak-PIN blocklist here anymore — any 6-digit PIN is accepted.
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$set": {
@@ -1684,21 +1551,7 @@ async def reset_pin(
     req: PinSetupRequest,
     user: dict = Depends(get_current_user),
 ):
-    weak_pins = {
-        "000000",
-        "111111",
-        "123456",
-        "654321",
-        "121212",
-        "112233",
-    }
-
-    if req.pin in weak_pins:
-        raise HTTPException(
-            status_code=400,
-            detail="Choose a less predictable PIN",
-        )
-
+    # NOTE: no weak-PIN blocklist here anymore — any 6-digit PIN is accepted.
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$set": {
@@ -3164,34 +3017,23 @@ async def upload_pdf(request: Request, user: dict = Depends(get_current_user)):
 # Drafts
 # ============================================================
 
-# @api_router.get("/drafts")
-# async def list_drafts(user: dict = Depends(get_current_user)):
-#     drafts = await db.drafts.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(500)
-#     ids = [d["paper_id"] for d in drafts]
-#     papers = await db.papers.find({"paper_id": {"$in": ids}}, {"_id": 0}).to_list(500)
-#     pmap = {p["paper_id"]: p for p in papers}
-#     result = []
-#     for d in drafts:
-#         pp = pmap.get(d["paper_id"])
-#         if pp:
-#             pp = dict(pp)
-#             pp["saved"] = True
-#             pp["saved_at"] = d["created_at"]
-#             result.append(pp)
-#     return result
-
 @api_router.post("/drafts")
 async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
     existing = await db.drafts.find_one({"user_id": user["user_id"], "paper_id": req.paper_id})
     if existing:
         await db.drafts.delete_one({"user_id": user["user_id"], "paper_id": req.paper_id})
         return {"saved": False}
-    await db.drafts.insert_one({"user_id": user["user_id"], "paper_id": req.paper_id,
-                                "created_at": datetime.utcnow().isoformat()})
+    # FIX: always give the document a real, unique draft_id. Combined with
+    # the (user_id, paper_id) unique index above, this is what makes saving
+    # a second (or third, ...) draft work instead of 500ing on a duplicate
+    # null draft_id.
+    await db.drafts.insert_one({
+        "draft_id": f"draft_{uuid.uuid4().hex[:12]}",
+        "user_id": user["user_id"],
+        "paper_id": req.paper_id,
+        "created_at": datetime.utcnow().isoformat(),
+    })
     return {"saved": True}
-
-
-
 
 
 @api_router.get("/drafts")

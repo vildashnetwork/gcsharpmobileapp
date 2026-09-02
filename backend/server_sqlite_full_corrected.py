@@ -296,8 +296,8 @@ class SimpleLLM:
                 {"role": "system", "content": self.system_message},
                 {"role": "user", "content": message},
             ],
-            "temperature": 0.3,
-            "max_tokens": 1000,
+            "temperature": 0.2,
+            "max_tokens": 700,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -329,8 +329,11 @@ class SimpleLLM:
     async def send_message(self, message: str) -> str:
         if not self.api_key:
             return "AI service not configured. Please set OPENROUTER_API_KEY in .env"
-        async with httpx.AsyncClient(timeout=30.0) as hc:
-            for model in self.models:
+        models_to_try = self.models[:2] if self.models else []
+        if not models_to_try:
+            return "AI model list is empty."
+        async with httpx.AsyncClient(timeout=15.0) as hc:
+            for model in models_to_try:
                 result = await self._call_model(hc, model, message)
                 if result is not None:
                     return result
@@ -1585,7 +1588,7 @@ async def send_phone_otp(req: PhoneLoginRequest):
         })
 
         full_number = f"{req.country_code}{req.phone}"
-        sms_message = f"Your GCSMART verification code is: {otp_code}. Valid for 5 minutes."
+        sms_message = f"Your GCSHARP verification code is: {otp_code}. Valid for 5 minutes."
         result = send_sms_via_twilio(full_number, sms_message)
 
         if result["success"]:
@@ -2544,47 +2547,69 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
 
 @api_router.post("/ai/chat")
 async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
-    session_id = req.session_id or f"chat_{uuid.uuid4().hex[:12]}"
+    session_id = (req.session_id or "").strip() or f"chat_{uuid.uuid4().hex[:12]}"
     session = await db.ai_sessions.find_one({"session_id": session_id, "user_id": user["user_id"]}, {"_id": 0})
     if not session:
         session = {
             "session_id": session_id,
             "user_id": user["user_id"],
-            "title": req.message[:50],
+            "title": (req.message or "New chat")[:50],
             "subject": req.subject,
             "messages": [],
+            "profile_snapshot": {
+                "full_name": user.get("full_name", "Student"),
+                "exam_level": user.get("exam_level") or "Not set",
+                "subjects": user.get("subjects", []),
+                "goals": user.get("goals", []),
+                "learning_style": user.get("learning_style") or "Not set",
+                "daily_commitment": user.get("daily_commitment") or "Not set",
+            },
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         }
         await db.ai_sessions.insert_one(dict(session))
 
     history = session.get("messages", [])
+    profile_snapshot = session.get("profile_snapshot") or {
+        "full_name": user.get("full_name", "Student"),
+        "exam_level": user.get("exam_level") or "Not set",
+        "subjects": user.get("subjects", []),
+        "goals": user.get("goals", []),
+        "learning_style": user.get("learning_style") or "Not set",
+        "daily_commitment": user.get("daily_commitment") or "Not set",
+    }
+    recent_history = history[-12:]
+    history_context = ""
+    if recent_history:
+        history_context = "Conversation memory:\n" + "\n".join(
+            f"{m.get('role','user').upper()}: {m.get('content','')}" for m in recent_history
+        ) + "\n\n"
+
     system = (
-        f"You are GC AI, an expert, patient tutor for Cameroon students preparing for "
-        f"GCE O/A Level, HND and Concours exams. Subject focus: {req.subject}. "
-        "Explain step by step, use clear structure, give worked examples, and end with a short "
-        "'Related topics' list when helpful. Be encouraging and exam-focused."
+        f"You are a patient academic tutor helping a student in Cameroon. "
+        f"Never introduce yourself as GCSharp, GC AI, or the app name unless the student asks directly. "
+        f"Keep the conversation personal and continuous across this thread. "
+        f"Student profile: {json.dumps(profile_snapshot, ensure_ascii=False)}. "
+        f"Subject focus: {req.subject}. "
+        "Use the memory above to remember the student's previous questions, goals, and context. "
+        "Explain step by step, use clear structure, give worked examples, and keep the tone encouraging and exam-focused. "
+        "If the question is multiple-choice, end the answer with a final line exactly in this format: 'Final answer: X' where X is the option letter or final result. "
+        "If the question is not multiple-choice, still finish with a final line starting with 'Final answer:' followed by the final result."
     )
     chat = _new_chat(session_id, system)
 
     async def event_gen():
         full = ""
         try:
-            context_prefix = ""
-            if history:
-                recent = history[-6:]
-                context_prefix = "Conversation so far:\n" + "\n".join(
-                    f"{m['role'].upper()}: {m['content']}" for m in recent
-                ) + "\n\nNow answer the new question.\n\n"
-            response = await chat.send_message(context_prefix + req.message)
-            full = response
-            for chunk in [response[i:i+50] for i in range(0, len(response), 50)]:
+            prompt = history_context + "Current question:\n" + req.message
+            response = await chat.send_message(prompt)
+            full = response.strip()
+            for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
         except Exception as e:
             logger.error(f"AI stream error: {e}")
-            error_msg = "I'm having trouble connecting to my AI service. Please try again in a moment."
-            full = error_msg
-            for chunk in [error_msg[i:i+50] for i in range(0, len(error_msg), 50)]:
+            full = "I'm having trouble connecting to my AI service. Please try again in a moment."
+            for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
 
         new_messages = history + [
@@ -2593,11 +2618,10 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         ]
         await db.ai_sessions.update_one(
             {"session_id": session_id, "user_id": user["user_id"]},
-            {"$set": {"messages": new_messages, "updated_at": datetime.utcnow().isoformat()}},
+            {"$set": {"messages": new_messages[-30:], "updated_at": datetime.utcnow().isoformat()}},
         )
         yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
-        # Send a notification that AI replied
         await create_notification(
             user["user_id"],
             f"🤖 AI Tutor replied to your question: \"{req.message[:40]}...\"",
@@ -3269,14 +3293,17 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
     data = await fetch_pdf_bytes(p["pdf_url"])
     text = extract_pdf_text(data, max_chars=7000)
     system = ("You are a master teacher creating a narrated video lesson that solves an exam question "
-              "step by step on a virtual whiteboard. Return STRICT JSON only, with no reasoning or thinking text before or after it.")
+              "step by step on a virtual whiteboard. Return STRICT JSON only, with no reasoning or thinking text before or after it. "
+              "If the question has multiple-choice options, clearly state the final answer at the end of the final scene and in the final narration sentence. "
+              "Use the exact ending format: 'Final answer: X' where X is the correct option letter or final result.")
     prompt = (
         f"This is {p['level']} {p['subject']} {p['year']} Paper {p['paper_number']}.\n\n"
         f"PAPER TEXT:\n{text}\n\n"
         "Pick the FIRST substantial question and create a video walkthrough that solves it. "
         "Return JSON: {\"title\":\"...\",\"question\":\"...\",\"scenes\":[{\"heading\":\"Step title\","
         "\"board\":[\"line shown on whiteboard\",\"another line\"],\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
-        "Create 4 to 6 scenes ending with the final answer. Narration must be natural spoken English. Return ONLY JSON."
+        "Create 4 to 6 scenes, and the last scene must end with a clear final answer, e.g. 'Final answer: B'. "
+        "Narration must be natural spoken English. Return ONLY JSON."
     )
     chat = _new_chat(f"vid_{uuid.uuid4().hex}", system)
     resp = await chat.send_message(prompt)
@@ -3323,7 +3350,8 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
     system = (
         "You are a master teacher creating a narrated video lesson that solves a specific "
         "exam question that a student has highlighted. Return STRICT JSON only, "
-        "with no reasoning or thinking text before or after it."
+        "with no reasoning or thinking text before or after it. If the highlighted work is a multiple-choice question, "
+        "the last narration sentence must clearly end with 'Final answer: X' where X is the correct option letter or result."
     )
     prompt = (
         f"This is {p['level']} {p['subject']} {p['year']} Paper {p['paper_number']}.\n\n"
@@ -3336,7 +3364,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
         "\"scenes\":[{\"heading\":\"Step title\","
         "\"board\":[\"line shown on whiteboard\",\"another line\"],"
         "\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
-        "Create 3-6 scenes. Narration must be natural spoken English. Return ONLY JSON."
+        "Create 3-6 scenes. Ensure the final scene ends with a final answer, e.g. 'Final answer: B'. Return ONLY JSON."
     )
     chat = _new_chat(f"highlight_vid_{uuid.uuid4().hex}", system)
 
