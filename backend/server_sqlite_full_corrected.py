@@ -247,14 +247,20 @@ app.add_middleware(
 )
 
 # ============================================================
-# LLM Client (unchanged)
+# LLM Client (fixed for long JSON video generation)
 # ============================================================
 
+# NOTE: these must all be REAL OpenRouter model IDs. The old chain contained
+# "google/gemma-4-31b-it:free" and "openrouter/free" which do not exist, so
+# every call to those models returned 404 and video generation always failed
+# once the (few) working models were exhausted / rate-limited.
 DEFAULT_MODEL_CHAIN = [
     "openai/gpt-oss-20b:free",
     "google/gemma-3n-e4b-it:free",
-    "google/gemma-4-31b-it:free",
-    "openrouter/free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free",
+    "deepseek/deepseek-chat-v3-0324:free",
+    "google/gemma-3-27b-it:free",
 ]
 
 def _sanitize_model_id(raw: str) -> str:
@@ -281,7 +287,8 @@ def _get_model_chain() -> List[str]:
     return ordered
 
 class SimpleLLM:
-    def __init__(self, api_key: str = "", models: Optional[List[str]] = None):
+    def __init__(self, api_key: str = "", models: Optional[List[str]] = None,
+                 max_tokens: int = 600, timeout: float = 25.0):
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self.models = models or _get_model_chain()
         self.base_url = "https://openrouter.ai/api/v1"
@@ -289,8 +296,13 @@ class SimpleLLM:
         self.session_id = None
         self.referer = APP_URL
         self.title = APP_NAME
+        # Long-form endpoints (video walkthroughs, paper Q&A) override these
+        # per-call via send_message(..., max_tokens=..., timeout=...).
+        self.default_max_tokens = max_tokens
+        self.default_timeout = timeout
 
-    async def _call_model(self, hc: httpx.AsyncClient, model: str, message: str) -> Optional[str]:
+    async def _call_model(self, hc: httpx.AsyncClient, model: str, message: str,
+                          max_tokens: int) -> Optional[str]:
         payload = {
             "model": model,
             "messages": [
@@ -298,7 +310,7 @@ class SimpleLLM:
                 {"role": "user", "content": message},
             ],
             "temperature": 0.2,
-            "max_tokens": 600,
+            "max_tokens": max_tokens,
             "stream": False,
         }
         headers = {
@@ -328,15 +340,19 @@ class SimpleLLM:
         logger.warning(f"Model {model} failed: {response.status_code} ({response.text[:300]})")
         return None
 
-    async def send_message(self, message: str) -> str:
+    async def send_message(self, message: str, max_tokens: Optional[int] = None,
+                           timeout: Optional[float] = None,
+                           num_models: int = 3) -> str:
         if not self.api_key:
             return "AI service not configured. Please set OPENROUTER_API_KEY in .env"
-        models_to_try = (self.models or [])[:3]
+        models_to_try = (self.models or [])[:max(1, num_models)]
         if not models_to_try:
             return "AI model list is empty."
-        async with httpx.AsyncClient(timeout=25.0) as hc:
+        use_tokens = max_tokens or self.default_max_tokens
+        use_timeout = timeout or self.default_timeout
+        async with httpx.AsyncClient(timeout=use_timeout) as hc:
             for model in models_to_try:
-                result = await self._call_model(hc, model, message)
+                result = await self._call_model(hc, model, message, use_tokens)
                 if result is not None:
                     return result
         return "I'm having trouble reaching the AI service. Please try again."
@@ -3273,16 +3289,44 @@ async def fetch_pdf_bytes(url: str) -> bytes:
 
 def extract_pdf_text(data: bytes, max_chars: int = 9000) -> str:
     try:
-        from PyPDF2 import PdfReader
+        try:
+            from pypdf import PdfReader  # requirements.txt installs `pypdf`
+        except ImportError:
+            from PyPDF2 import PdfReader  # fallback for older envs
         reader = PdfReader(io.BytesIO(data))
         parts = []
         for p in reader.pages:
-            parts.append(p.extract_text() or "")
+            try:
+                parts.append(p.extract_text() or "")
+            except Exception:
+                continue
         return "\n".join(parts)[:max_chars]
-    except:
+    except Exception as e:
+        logger.warning(f"PDF text extraction failed: {e}")
         return ""
 
-async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retries: int = 1) -> dict:
+# Tokens/timeouts sized for long structured JSON (video walkthroughs, Q&A).
+# The old defaults (600 tokens / 25s / 3 models) truncated every video JSON,
+# which is why generation always ended in a 502.
+VIDEO_MAX_TOKENS = 2500
+VIDEO_TIMEOUT = 90.0
+VIDEO_NUM_MODELS = 6
+QA_MAX_TOKENS = 2500
+QA_TIMEOUT = 90.0
+
+AI_NOT_CONFIGURED_MARKERS = (
+    "AI service not configured",
+    "having trouble reaching the AI service",
+    "AI model list is empty",
+)
+
+def _is_ai_error_text(resp: str) -> bool:
+    return any(m in resp for m in AI_NOT_CONFIGURED_MARKERS)
+
+async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retries: int = 2,
+                           max_tokens: int = VIDEO_MAX_TOKENS,
+                           timeout: float = VIDEO_TIMEOUT,
+                           num_models: int = VIDEO_NUM_MODELS) -> dict:
     last_resp = ""
     for attempt in range(retries + 1):
         this_prompt = prompt if attempt == 0 else (
@@ -3290,8 +3334,12 @@ async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retr
             "Reply again with ONLY the JSON object — no markdown code fences, "
             "no explanation, nothing before or after it."
         )
-        resp = await chat.send_message(this_prompt)
+        resp = await chat.send_message(this_prompt, max_tokens=max_tokens,
+                                       timeout=timeout, num_models=num_models)
         last_resp = resp
+        if _is_ai_error_text(resp):
+            # No point retrying — key missing or every model is down.
+            break
         try:
             parsed = _clean_json(resp)
             if parsed.get(required_key):
@@ -3300,6 +3348,66 @@ async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retr
             continue
     logger.error(f"AI JSON generation failed for key '{required_key}'. Last raw (truncated): {last_resp[:500]!r}")
     raise ValueError(f"Could not get valid JSON with key '{required_key}' from AI")
+
+def _normalise_video_scenes(raw_scenes: list, limit: int = 6) -> list:
+    """Coerce model output into the {heading, board, narration, audio} shape.
+
+    Models sometimes return scenes as plain strings or with missing keys;
+    without this the endpoint crashed with AttributeError -> HTTP 500.
+    """
+    scenes = []
+    for i, sc in enumerate(raw_scenes[:limit]):
+        if isinstance(sc, str):
+            sc = {"heading": f"Step {i+1}", "board": [sc], "narration": sc}
+        elif not isinstance(sc, dict):
+            continue
+        narration = (sc.get("narration") or sc.get("text") or sc.get("heading") or "")[:900]
+        board = sc.get("board") or sc.get("lines") or []
+        if isinstance(board, str):
+            board = [board]
+        board = [str(line)[:300] for line in board][:8]
+        if not narration and not board:
+            continue
+        scenes.append({
+            "heading": sc.get("heading", f"Step {i+1}"),
+            "board": board,
+            "narration": narration,
+            "audio": "",
+        })
+    return scenes
+
+async def _load_paper_or_404(paper_id: str) -> dict:
+    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Paper not found")
+    return p
+
+async def _fetch_paper_text(p: dict, max_chars: int = 7000) -> str:
+    pdf_url = (p.get("pdf_url") or "").strip()
+    if not pdf_url:
+        raise HTTPException(502, "This paper has no PDF attached, so a video solution can't be built for it.")
+    try:
+        data = await fetch_pdf_bytes(pdf_url)
+    except Exception as e:
+        logger.error(f"PDF download failed for paper {p.get('paper_id')}: {e}")
+        raise HTTPException(502, "Could not download the paper PDF. Check the paper link and try again.")
+    text = extract_pdf_text(data, max_chars=max_chars)
+    if not text or len(text.strip()) < 50:
+        # Scanned-image PDFs have no extractable text.
+        raise HTTPException(
+            422,
+            "This paper looks like a scanned image with no readable text, "
+            "so an automatic video solution can't be generated. Try the highlight option on a typed question instead.",
+        )
+    return text
+
+def _ensure_openrouter_key():
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(
+            503,
+            "AI video generation is not configured on the server (OPENROUTER_API_KEY is missing). "
+            "Add it to backend/.env and restart the server.",
+        )
 
 def _strip_reasoning_preamble(text: str) -> str:
     match = re.search(r'##\s*(Given|Solution)', text)
@@ -3340,15 +3448,13 @@ async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user
 
 @api_router.post("/papers/{paper_id}/qa")
 async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user)):
-    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
-    if not p:
-        raise HTTPException(404, "Paper not found")
+    p = await _load_paper_or_404(paper_id)
     cached = await db.paper_qa_cache.find_one({"paper_id": paper_id}, {"_id": 0})
     if cached:
         return {"items": cached["items"], "cached": True}
 
-    data = await fetch_pdf_bytes(p["pdf_url"])
-    text = extract_pdf_text(data)
+    _ensure_openrouter_key()
+    text = await _fetch_paper_text(p, max_chars=9000)
     system = ("You are a senior Cameroon GCE examiner. Read the exam paper text and produce a clear, "
               "step-by-step worked solution section. Return STRICT JSON only, with no reasoning or thinking text before or after it.")
     prompt = (
@@ -3359,14 +3465,16 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
         "Solve at least the first 8 questions you can identify. Keep steps concise and mathematically correct. Return ONLY JSON."
     )
     chat = _new_chat(f"qa_{uuid.uuid4().hex}", system)
-    resp = await chat.send_message(prompt)
     try:
-        parsed = _clean_json(resp)
+        parsed = await _ask_ai_for_json(chat, prompt, "items", retries=2,
+                                        max_tokens=QA_MAX_TOKENS, timeout=QA_TIMEOUT)
         items = parsed.get("items", [])
         if not items:
             raise ValueError("empty items")
-    except Exception:
-        logger.error(f"QA parse fail: {resp[:200]}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"QA generation failed for paper {paper_id}: {e}")
         raise HTTPException(502, "Couldn't generate a solution for this paper right now. Please try again shortly.")
     await db.paper_qa_cache.insert_one({"paper_id": paper_id, "items": items,
                                         "created_at": datetime.utcnow().isoformat()})
@@ -3375,15 +3483,14 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
 
 @api_router.post("/papers/{paper_id}/video")
 async def generate_video_solution(paper_id: str, user: dict = Depends(get_current_user)):
-    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
-    if not p:
-        raise HTTPException(404, "Paper not found")
+    p = await _load_paper_or_404(paper_id)
     cached = await db.paper_video_cache.find_one({"paper_id": paper_id}, {"_id": 0})
     if cached:
-        return {"scenes": cached["scenes"], "cached": True}
+        return {"scenes": cached["scenes"], "title": cached.get("title", p.get("title", "")),
+                "question": cached.get("question", ""), "cached": True}
 
-    data = await fetch_pdf_bytes(p["pdf_url"])
-    text = extract_pdf_text(data, max_chars=7000)
+    _ensure_openrouter_key()
+    text = await _fetch_paper_text(p, max_chars=7000)
     system = ("You are a master teacher creating a narrated video lesson that solves an exam question "
               "step by step on a virtual whiteboard. Return STRICT JSON only, with no reasoning or thinking text before or after it. "
               "If the question has multiple-choice options, clearly state the final answer at the end of the final scene and in the final narration sentence. "
@@ -3398,25 +3505,20 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
         "Narration must be natural spoken English. Return ONLY JSON."
     )
     chat = _new_chat(f"vid_{uuid.uuid4().hex}", system)
-    resp = await chat.send_message(prompt)
     try:
-        parsed = _clean_json(resp)
+        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=2)
         raw_scenes = parsed.get("scenes", [])
         if not raw_scenes:
             raise ValueError("empty scenes")
-    except Exception:
-        logger.error(f"Video parse fail: {resp[:200]}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Video generation failed for paper {paper_id}: {e}")
         raise HTTPException(502, "Couldn't build a video solution right now. Please try again shortly.")
 
-    scenes = []
-    for i, sc in enumerate(raw_scenes[:6]):
-        narration = (sc.get("narration") or sc.get("heading") or "")[:900]
-        scenes.append({
-            "heading": sc.get("heading", f"Step {i+1}"),
-            "board": sc.get("board", []),
-            "narration": narration,
-            "audio": "",
-        })
+    scenes = _normalise_video_scenes(raw_scenes, limit=6)
+    if not scenes:
+        raise HTTPException(502, "The AI returned an empty video script. Please try again.")
     doc = {"paper_id": paper_id, "title": parsed.get("title", p["title"]),
            "question": parsed.get("question", ""), "scenes": scenes,
            "created_at": datetime.utcnow().isoformat()}
@@ -3426,9 +3528,11 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
 
 @api_router.post("/papers/{paper_id}/video/highlight")
 async def generate_video_from_highlight(paper_id: str, req: HighlightVideoRequest, user: dict = Depends(get_current_user)):
-    p = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
-    if not p:
-        raise HTTPException(404, "Paper not found")
+    p = await _load_paper_or_404(paper_id)
+
+    highlighted = (req.text or "").strip()
+    if len(highlighted) < 5:
+        raise HTTPException(400, "Please highlight a longer piece of text (at least a few words).")
 
     text_hash = hashlib.sha256(req.text.encode("utf-8")).hexdigest()[:16]
     cache_key = f"{paper_id}_{text_hash}"
@@ -3436,8 +3540,19 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
     if cached:
         return {"scenes": cached["scenes"], "title": cached["title"], "question": cached["question"], "cached": True}
 
-    data = await fetch_pdf_bytes(p["pdf_url"])
-    full_text = extract_pdf_text(data, max_chars=3000)
+    _ensure_openrouter_key()
+    # Highlight videos don't strictly need the full PDF — the selection itself
+    # is enough. Only use the PDF as optional context so a broken PDF link
+    # can't break this endpoint.
+    full_text = ""
+    try:
+        full_text = await _fetch_paper_text(p, max_chars=3000)
+    except HTTPException as e:
+        if e.status_code == 422:
+            raise
+        logger.warning(f"Highlight video proceeding without PDF context for {paper_id}: {e.detail}")
+    except Exception as e:
+        logger.warning(f"Highlight video proceeding without PDF context for {paper_id}: {e}")
 
     system = (
         "You are a master teacher creating a narrated video lesson that solves a specific "
@@ -3461,21 +3576,17 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
     chat = _new_chat(f"highlight_vid_{uuid.uuid4().hex}", system)
 
     try:
-        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=1)
+        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=2)
         raw_scenes = parsed["scenes"]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Highlight video generation failed for paper {paper_id}: {e}")
         raise HTTPException(502, "Couldn't build a video solution for your selection. Please try again.")
 
-    scenes = []
-    for i, sc in enumerate(raw_scenes[:8]):
-        narration = (sc.get("narration") or sc.get("heading") or "")[:900]
-        scenes.append({
-            "heading": sc.get("heading", f"Step {i+1}"),
-            "board": sc.get("board", []),
-            "narration": narration,
-            "audio": "",
-        })
+    scenes = _normalise_video_scenes(raw_scenes, limit=8)
+    if not scenes:
+        raise HTTPException(502, "The AI returned an empty video script. Please try again.")
 
     doc = {
         "cache_key": cache_key, "paper_id": paper_id,
