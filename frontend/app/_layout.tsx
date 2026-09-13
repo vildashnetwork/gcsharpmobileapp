@@ -250,6 +250,7 @@ import { LanguageProvider, useLanguage } from "@/src/i18n";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { storage } from "@/src/utils/storage";
+import { useAppUpdates } from "@/src/hooks/useAppUpdates";
 
 LogBox.ignoreAllLogs(true);
 
@@ -362,6 +363,7 @@ function AppLoader() {
 function AppContent() {
   const { loading } = useAuth();
   const t = useTheme();
+  useAppUpdates();
 
   // Show loader over the entire app during auth initialization
   if (loading) {

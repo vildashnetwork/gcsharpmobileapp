@@ -8,6 +8,14 @@
     "scheme": "gcsharp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "url": "https://u.expo.dev/4ea50a82-7983-4ca0-bb9a-b22297bb304d"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.gcsharp"
@@ -43,7 +51,12 @@
       ],
       "expo-video",
       "expo-audio",
-      "expo-asset"
+      "expo-asset",
+      "expo-font",
+      "expo-image",
+      "expo-secure-store",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
