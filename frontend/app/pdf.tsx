@@ -674,6 +674,7 @@ type LocalHighlight = {
 };
 
 const HIGHLIGHTS_KEY = "gcsmart_saved_highlights";
+const OFFLINE_PILL_VISIBLE_KEY = "gcsmart_pdf_offline_pill_visible";
 
 function readableSolutionText(value: unknown): string[] {
   if (value === null || value === undefined) return [];
@@ -829,6 +830,24 @@ export default function PdfViewer() {
   const [downloadingUrls, setDownloadingUrls] = useState<string[]>([]);
   const [currentCached, setCurrentCached] = useState(false);
   const [downloadingCurrent, setDownloadingCurrent] = useState(false);
+
+  // Whether the floating "available offline" pill is shown. Persisted
+  // on-device so a student who hides it keeps it hidden across papers.
+  const [offlinePillVisible, setOfflinePillVisible] = useState(true);
+
+  useEffect(() => {
+    storage.getItem<boolean>(OFFLINE_PILL_VISIBLE_KEY, true).then((saved) => {
+      setOfflinePillVisible(saved !== false);
+    });
+  }, []);
+
+  const toggleOfflinePill = () => {
+    setOfflinePillVisible((prev) => {
+      const next = !prev;
+      storage.setItem(OFFLINE_PILL_VISIBLE_KEY, next).catch(() => { });
+      return next;
+    });
+  };
 
   // Fetch paper details
   useEffect(() => {
@@ -1203,14 +1222,28 @@ export default function PdfViewer() {
   return (
     <View style={styles.root} testID="pdf-viewer">
       <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
-        <Pressable onPress={() => router.back()} testID="back-btn">
-          <Ionicons name="arrow-back" size={22} color={theme.brand} />
-        </Pressable>
+        <View style={styles.headerTopRow}>
+          <Pressable onPress={() => router.back()} testID="back-btn" hitSlop={8}>
+            <Ionicons name="arrow-back" size={22} color={theme.brand} />
+          </Pressable>
 
-        <Text style={styles.title} numberOfLines={1}>{title || t.pdf.paper}</Text>
-
-        <View style={styles.headerRight}>
           <View style={styles.headerActions}>
+            <Pressable
+              onPress={toggleOfflinePill}
+              testID="toggle-offline-pill-btn"
+              accessibilityLabel={
+                offlinePillVisible ? t.pdf.hideOfflineBtn : t.pdf.showOfflineBtn
+              }
+              accessibilityRole="switch"
+              accessibilityState={{ checked: offlinePillVisible }}
+              style={styles.saveButton}
+            >
+              <Ionicons
+                name={offlinePillVisible ? "eye-off-outline" : "eye-outline"}
+                size={20}
+                color={theme.brand}
+              />
+            </Pressable>
             <Pressable onPress={openDownloads} testID="downloads-btn" style={styles.saveButton}>
               <Ionicons name="cloud-download-outline" size={20} color={theme.brand} />
             </Pressable>
@@ -1218,13 +1251,31 @@ export default function PdfViewer() {
               <Ionicons name={draftSaved ? "bookmark" : "bookmark-outline"} size={20} color={theme.brand} />
             </Pressable>
           </View>
-          <View style={styles.headerMeta}>
-            <View style={styles.timer}>
-              <Ionicons name="time-outline" size={16} color={theme.onSurfaceMuted} />
-              <Text style={styles.timerText}>{formatDuration(displaySeconds)}</Text>
-            </View>
-            <StreakBadge />
+        </View>
+
+        {/* Paper title is always fully visible — 2 lines max, never clipped
+            by the timer / streak badges (they live on their own row below). */}
+        <Text style={styles.title} numberOfLines={2}>
+          {title || paper?.title || t.pdf.paper}
+        </Text>
+        {(paper?.subject || paper?.year || paper?.paper_number) && (
+          <Text style={styles.subtitle} numberOfLines={1}>
+            {[
+              paper?.subject,
+              paper?.year,
+              paper?.paper_number ? `Paper ${paper.paper_number}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </Text>
+        )}
+
+        <View style={styles.headerMeta}>
+          <View style={styles.timer}>
+            <Ionicons name="time-outline" size={16} color={theme.onSurfaceMuted} />
+            <Text style={styles.timerText}>{formatDuration(displaySeconds)}</Text>
           </View>
+          <StreakBadge />
         </View>
       </View>
 
@@ -1252,36 +1303,47 @@ export default function PdfViewer() {
           <Text style={styles.hintTxt}>{t.pdf.highlightHint}</Text>
         </View>
 
-        {/* Offline download status / action for the open paper */}
-        {fullUrl && (
-          <Pressable
-            onPress={downloadCurrentPdf}
-            disabled={downloadingCurrent || currentCached}
-            style={[styles.offlinePill, currentCached && styles.offlinePillDone]}
-            testID="offline-download-pill"
-          >
-            {downloadingCurrent ? (
-              <ActivityIndicator size="small" color={theme.onBrandPrimary} />
-            ) : (
-              <Ionicons
-                name={currentCached ? "checkmark-circle" : "cloud-download-outline"}
-                size={15}
-                color={currentCached ? theme.success : theme.onBrandPrimary}
-              />
-            )}
-            <Text
-              style={[
-                styles.offlinePillTxt,
-                currentCached && { color: theme.onSurface },
-              ]}
+        {/* Offline download status / action for the open paper.
+            Students can hide this pill from the eye button in the top bar. */}
+        {fullUrl && offlinePillVisible && (
+          <View style={styles.offlinePillWrap} testID="offline-download-pill">
+            <Pressable
+              onPress={downloadCurrentPdf}
+              disabled={downloadingCurrent || currentCached}
+              style={[styles.offlinePill, currentCached && styles.offlinePillDone]}
             >
-              {downloadingCurrent
-                ? t.pdf.downloading
-                : currentCached
-                  ? t.pdf.availableOffline
-                  : t.pdf.downloadOffline}
-            </Text>
-          </Pressable>
+              {downloadingCurrent ? (
+                <ActivityIndicator size="small" color={theme.onBrandPrimary} />
+              ) : (
+                <Ionicons
+                  name={currentCached ? "checkmark-circle" : "cloud-download-outline"}
+                  size={15}
+                  color={currentCached ? theme.success : theme.onBrandPrimary}
+                />
+              )}
+              <Text
+                style={[
+                  styles.offlinePillTxt,
+                  currentCached && { color: theme.onSurface },
+                ]}
+              >
+                {downloadingCurrent
+                  ? t.pdf.downloading
+                  : currentCached
+                    ? t.pdf.availableOffline
+                    : t.pdf.downloadOffline}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={toggleOfflinePill}
+              testID="hide-offline-pill-btn"
+              accessibilityLabel={t.pdf.hideOfflineBtn}
+              hitSlop={8}
+              style={styles.offlinePillClose}
+            >
+              <Ionicons name="close" size={14} color={theme.onSurfaceMuted} />
+            </Pressable>
+          </View>
         )}
 
         {/* AI action button - Paper1 vs Paper2 */}
@@ -1547,19 +1609,25 @@ export default function PdfViewer() {
 const createStyles = (t: Palette) => StyleSheet.create({
   root: { flex: 1, backgroundColor: t.surface },
   header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: 4,
     backgroundColor: t.surfaceSecondary,
     borderBottomWidth: 1,
     borderBottomColor: t.divider,
   },
-  title: { fontSize: 16, fontWeight: "800", color: t.brand, flex: 1, textAlign: "center", marginHorizontal: 12 },
-  headerRight: { alignItems: "flex-end", gap: 4 },
-  saveButton: { padding: 2 },
-  headerMeta: { flexDirection: "row", alignItems: "center", gap: 8 },
+  headerTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  // Paper title always gets its own full-width row(s) — 2 lines max —
+  // so timer / streak badges can never squeeze or hide it.
+  title: { fontSize: 16, fontWeight: "800", color: t.brand, lineHeight: 21 },
+  subtitle: { fontSize: 12, fontWeight: "600", color: t.onSurfaceMuted },
+  headerMeta: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 2 },
+  saveButton: { padding: 4 },
   timer: { flexDirection: "row", alignItems: "center", gap: 4 },
   timerText: { fontSize: 13, fontWeight: "500", color: t.onSurface },
   loader: { position: "absolute", inset: 0, alignItems: "center", justifyContent: "center", backgroundColor: t.surface, gap: 8 },
@@ -1650,10 +1718,16 @@ const createStyles = (t: Palette) => StyleSheet.create({
   qaStep: { fontSize: 13, color: t.onSurface, marginLeft: 8, marginBottom: 2 },
   qaAnswer: { fontWeight: '600', fontSize: 14, marginTop: 4, color: t.success },
   headerActions: { flexDirection: "row", alignItems: "center", gap: 10 },
-  offlinePill: {
+  offlinePillWrap: {
     position: "absolute",
     bottom: 56,
     alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    maxWidth: "92%",
+  },
+  offlinePill: {
+    flexShrink: 1,
     flexDirection: "row",
     alignItems: "center",
     gap: 6,
@@ -1664,7 +1738,19 @@ const createStyles = (t: Palette) => StyleSheet.create({
     ...shadow1,
   },
   offlinePillDone: { backgroundColor: t.successBg },
-  offlinePillTxt: { color: t.onBrandPrimary, fontSize: 12, fontWeight: "700" },
+  offlinePillTxt: { color: t.onBrandPrimary, fontSize: 12, fontWeight: "700", flexShrink: 1 },
+  offlinePillClose: {
+    width: 26,
+    height: 26,
+    marginLeft: 6,
+    borderRadius: 13,
+    backgroundColor: t.surfaceSecondary,
+    borderWidth: 1,
+    borderColor: t.border,
+    alignItems: "center",
+    justifyContent: "center",
+    ...shadow1,
+  },
   dlSection: {
     fontSize: 11,
     fontWeight: "800",

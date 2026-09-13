@@ -396,6 +396,17 @@ export default function Profile() {
         <Row icon="videocam-outline" label={t.tabs.lessons} onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
         <Row icon="book-outline" label={t.tabs.library} onPress={() => router.push("/(tabs)/library")} testID="row-library" />
         <Row icon="help-circle-outline" label="Help Center" onPress={() => Linking.openURL(HELP_CENTER_URL)} testID="row-help-center" />
+
+
+        <Row
+          icon="globe-outline"
+          label="Use Web"
+          onPress={() => Linking.openURL("https://www.gcsharp.com")}
+          testID="row-help-center"
+        />
+
+
+
         <Row icon="log-out-outline" label={t.profile.logout} danger onPress={doLogout} testID="row-logout" />
       </ScrollView>
     </SafeAreaView>
