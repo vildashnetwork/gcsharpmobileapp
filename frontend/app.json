@@ -2,12 +2,11 @@
   "expo": {
     "name": "GCSHARP",
     "slug": "GCSHARP",
-    "version": "2.2",
+    "version": "2.3",
     "orientation": "portrait",
     "icon": "./assets/images/gcsharp.png",
     "scheme": "gcsharp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "runtimeVersion": {
       "policy": "appVersion"
     },
@@ -25,7 +24,6 @@
         "foregroundImage": "./assets/images/gcsharp.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
       "softwareKeyboardLayoutMode": "pan",
       "package": "com.gcsharp",
       "permissions": [
