@@ -764,21 +764,16 @@ export default function PdfViewer() {
   // Android: blocks screenshots + recording entirely (FLAG_SECURE) while this screen is mounted.
   // iOS: blocks screen recording + live app-switcher preview; screenshots themselves cannot be
   // blocked by any app on iOS (Apple restriction) — we can only detect them after the fact below.
-  const [privacyBlur, setPrivacyBlur] = useState(false);
+        const [privacyBlur, setPrivacyBlur] = useState(false);
 
-  useEffect(() => {
-    let screenshotSub: ScreenCapture.Subscription | undefined;
-
-    (async () => {
-      try {
-        await ScreenCapture.preventScreenCaptureAsync();
-      } catch (e) {
-        console.warn("Failed to enable screen capture prevention", e);
-      }
-    })();
+    useEffect(() => {
+    // Blocks screenshots + screen recording (FLAG_SECURE) while on this screen.
+    // iOS: blocks screen recording + live app-switcher preview; screenshots cannot be
+    // blocked by any app on iOS (Apple restriction) — we detect them post-capture below.
+    ScreenCapture.preventScreenCaptureAsync().catch(() => { });
 
     // iOS-only: fires after a screenshot is taken. No-op on Android.
-    screenshotSub = ScreenCapture.addScreenshotListener(() => {
+    const screenshotSub = ScreenCapture.addScreenshotListener(() => {
       setSavedMsg(t.pdf.highlightHint);
       setTimeout(() => setSavedMsg(null), 3000);
     });

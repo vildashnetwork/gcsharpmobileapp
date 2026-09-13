@@ -1,5 +1,5 @@
 // app/edit-profile.tsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
     View,
     Text,
@@ -11,6 +11,7 @@ import {
     TouchableOpacity,
     Image,
     Alert,
+    Modal,
     KeyboardAvoidingView,
     Platform,
 } from "react-native";
@@ -22,7 +23,8 @@ import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
-import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
+import { CameraView, Camera } from "expo-camera";
 
 const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
 const DAILY_COMMITMENTS = [
@@ -54,6 +56,8 @@ export default function EditProfile() {
     const [uploading, setUploading] = useState(false);
     const [showLevelPicker, setShowLevelPicker] = useState(false);
     const [showCommitmentPicker, setShowCommitmentPicker] = useState(false);
+    const [showCamera, setShowCamera] = useState(false);
+    const cameraRef = useRef<any>(null);
 
     useEffect(() => {
         if (user) {
@@ -103,51 +107,54 @@ export default function EditProfile() {
         }
     };
 
-    // 🔧 Fixed pickImage with proper guard against undefined ImagePicker
+    // Gallery → system document/photo picker (no media permissions needed).
     const pickImage = async (useCamera: boolean) => {
-        // Check if ImagePicker is available (e.g., in Expo Go or dev build)
-        if (!ImagePicker || typeof ImagePicker.requestMediaLibraryPermissionsAsync !== "function") {
-            Alert.alert(
-                "Unavailable",
-                "Image picker is not available. Please use a development build or update the app."
-            );
+        if (useCamera) {
+            await openCamera();
             return;
         }
 
         try {
-            if (useCamera) {
-                const { status } = await ImagePicker.requestCameraPermissionsAsync();
-                if (status !== "granted") {
-                    Alert.alert("Permission needed", "Camera access is required.");
-                    return;
-                }
-            } else {
-                const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-                if (status !== "granted") {
-                    Alert.alert("Permission needed", "Gallery access is required.");
-                    return;
-                }
-            }
+            const result = await DocumentPicker.getDocumentAsync({
+                type: "image/*",
+                copyToCacheDirectory: true,
+            });
 
-            const result = useCamera
-                ? await ImagePicker.launchCameraAsync({
-                    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-                    allowsEditing: true,
-                    quality: 0.8,
-                })
-                : await ImagePicker.launchImageLibraryAsync({
-                    mediaTypes: ImagePicker.MediaTypeOptions.Images,
-                    allowsEditing: true,
-                    quality: 0.8,
-                });
-
-            if (!result.canceled && result.assets[0]) {
-                const uri = result.assets[0].uri;
-                await uploadImage(uri);
+            if (!result.canceled && result.assets && result.assets[0]) {
+                await uploadImage(result.assets[0].uri);
             }
         } catch (error) {
             console.error("Image picker error:", error);
             Alert.alert("Error", "Could not pick image. Please try again.");
+        }
+    };
+
+    // Camera → in-app CameraView modal (only needs the CAMERA permission).
+    const openCamera = async () => {
+        try {
+            const { status } = await Camera.requestCameraPermissionsAsync();
+            if (status !== "granted") {
+                Alert.alert("Permission needed", "Camera access is required.");
+                return;
+            }
+            setShowCamera(true);
+        } catch (error) {
+            console.error("Camera permission error:", error);
+            Alert.alert("Error", "Could not open camera. Please try again.");
+        }
+    };
+
+    const takePhoto = async () => {
+        try {
+            const photo = await cameraRef.current?.takePictureAsync({ quality: 0.8 });
+            setShowCamera(false);
+            if (photo && photo.uri) {
+                await uploadImage(photo.uri);
+            }
+        } catch (error) {
+            setShowCamera(false);
+            console.error("Camera capture error:", error);
+            Alert.alert("Error", "Could not take photo. Please try again.");
         }
     };
 
@@ -357,6 +364,23 @@ export default function EditProfile() {
                     </Pressable>
                 </ScrollView>
             </KeyboardAvoidingView>
+
+            {/* In-app camera modal (expo-camera, no media permissions) */}
+            <Modal visible={showCamera} animationType="slide" onRequestClose={() => setShowCamera(false)}>
+                <View style={styles.cameraContainer}>
+                    <CameraView ref={cameraRef} style={styles.cameraPreview} facing="back" />
+                    <View style={styles.cameraControls}>
+                        <TouchableOpacity
+                            style={styles.cameraSideBtn}
+                            onPress={() => setShowCamera(false)}
+                        >
+                            <Ionicons name="close" size={28} color="#fff" />
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.cameraShutter} onPress={takePhoto} />
+                        <View style={styles.cameraSideBtn} />
+                    </View>
+                </View>
+            </Modal>
         </SafeAreaView>
     );
 }
@@ -449,6 +473,27 @@ const createStyles = (t: Palette) => StyleSheet.create({
     },
     saveBtnDisabled: { opacity: 0.6 },
     saveBtnText: { color: t.onBrandPrimary, fontWeight: "700", fontSize: 16 },
+    cameraContainer: { flex: 1, backgroundColor: "#000" },
+    cameraPreview: { flex: 1 },
+    cameraControls: {
+        position: "absolute",
+        bottom: 30,
+        left: 0,
+        right: 0,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        paddingHorizontal: 32,
+    },
+    cameraSideBtn: { width: 56, height: 56, alignItems: "center", justifyContent: "center" },
+    cameraShutter: {
+        width: 72,
+        height: 72,
+        borderRadius: 36,
+        backgroundColor: "#fff",
+        borderWidth: 4,
+        borderColor: "rgba(255,255,255,0.4)",
+    },
 });
 
 // Rebuild the module styles whenever the active palette changes so

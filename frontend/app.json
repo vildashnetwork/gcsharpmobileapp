@@ -2,7 +2,21 @@
   "expo": {
     "name": "GCSHARP",
     "slug": "GCSHARP",
-    "version": "2.3",
+    "version": "2.5.4",
+    "android": {
+      "versionCode": 15,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/gcsharp.png",
+        "backgroundColor": "#ffffff"
+      },
+      "softwareKeyboardLayoutMode": "pan",
+      "package": "com.gcsharp",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA"
+      ]
+    },
     "orientation": "portrait",
     "icon": "./assets/images/gcsharp.png",
     "scheme": "gcsharp",
@@ -18,18 +32,6 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.gcsharp"
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/images/gcsharp.png",
-        "backgroundColor": "#ffffff"
-      },
-      "softwareKeyboardLayoutMode": "pan",
-      "package": "com.gcsharp",
-      "permissions": [
-        "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
-      ]
     },
     "web": {
       "bundler": "metro",
@@ -54,7 +56,10 @@
       "expo-image",
       "expo-secure-store",
       "expo-status-bar",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "./plugins/withRemoveReadMedia.js"
+      ]
     ],
     "experiments": {
       "typedRoutes": true
