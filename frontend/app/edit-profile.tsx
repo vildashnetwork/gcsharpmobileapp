@@ -24,6 +24,7 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import { CameraView, Camera } from "expo-camera";
 
 const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
@@ -79,36 +80,60 @@ export default function EditProfile() {
     const uploadImage = async (uri: string, mimeType: string = "image/jpeg") => {
         setUploading(true);
         try {
-            const formData = new FormData();
             if (Platform.OS === "web") {
                 // On web, FormData only accepts real Blob/File objects — the
                 // { uri, type, name } shape is native-only and would be sent
                 // as the string "[object Object]" (Cloudinary then rejects
                 // it with "Invalid image file"). Convert the blob URL first.
                 const blob = await (await fetch(uri)).blob();
+                const formData = new FormData();
                 formData.append("file", blob, "profile.jpg");
-            } else {
-                const ext = mimeType?.includes("/") ? mimeType.split("/")[1] : "jpg";
-                formData.append("file", {
-                    uri,
-                    type: mimeType || "image/jpeg",
-                    name: `profile.${ext === "jpeg" ? "jpg" : ext}`,
-                } as any);
+                formData.append("upload_preset", UPLOAD_PRESET);
+                const response = await fetch(
+                    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
+                    { method: "POST", body: formData }
+                );
+                const data = await response.json();
+                if (response.ok && data.secure_url) {
+                    updateField("picture", data.secure_url);
+                    return data.secure_url as string;
+                }
+                const webMsg: string =
+                    data?.error?.message || `Upload failed (HTTP ${response.status})`;
+                console.error("Cloudinary upload error:", webMsg);
+                Alert.alert("Upload failed", webMsg);
+                return null;
             }
-            formData.append("upload_preset", UPLOAD_PRESET);
 
-            const response = await fetch(
+            // Native (Android/iOS): SDK 54+ replaced the global `fetch` with the
+            // native (WinterCG) implementation, which does NOT accept the legacy
+            // `{ uri, type, name }` FormData file parts — it throws
+            // "Unsupported FormDataPart implementation". Use expo-file-system's
+            // native multipart uploader instead (no FormData/fetch involved).
+            const uploadResult = await FileSystem.uploadAsync(
                 `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
-                { method: "POST", body: formData }
+                uri,
+                {
+                    uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+                    fieldName: "file",
+                    mimeType: mimeType || "image/jpeg",
+                    parameters: { upload_preset: UPLOAD_PRESET },
+                }
             );
-            const data = await response.json();
-            if (response.ok && data.secure_url) {
+
+            let data: any = null;
+            try {
+                data = uploadResult.body ? JSON.parse(uploadResult.body) : null;
+            } catch {
+                data = null;
+            }
+            if (uploadResult.status >= 200 && uploadResult.status < 300 && data?.secure_url) {
                 updateField("picture", data.secure_url);
                 return data.secure_url as string;
             }
             // Surface the real Cloudinary error so failures are debuggable.
             const cloudMsg: string =
-                data?.error?.message || `Upload failed (HTTP ${response.status})`;
+                data?.error?.message || `Upload failed (HTTP ${uploadResult.status})`;
             console.error("Cloudinary upload error:", cloudMsg);
             Alert.alert("Upload failed", cloudMsg);
             return null;
