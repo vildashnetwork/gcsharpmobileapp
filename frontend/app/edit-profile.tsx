@@ -76,31 +76,48 @@ export default function EditProfile() {
         setForm((prev) => ({ ...prev, [key]: value }));
     };
 
-    const uploadImage = async (uri: string) => {
+    const uploadImage = async (uri: string, mimeType: string = "image/jpeg") => {
         setUploading(true);
-        const formData = new FormData();
-        formData.append("file", {
-            uri,
-            type: "image/jpeg",
-            name: "profile.jpg",
-        } as any);
-        formData.append("upload_preset", UPLOAD_PRESET);
-
         try {
+            const formData = new FormData();
+            if (Platform.OS === "web") {
+                // On web, FormData only accepts real Blob/File objects — the
+                // { uri, type, name } shape is native-only and would be sent
+                // as the string "[object Object]" (Cloudinary then rejects
+                // it with "Invalid image file"). Convert the blob URL first.
+                const blob = await (await fetch(uri)).blob();
+                formData.append("file", blob, "profile.jpg");
+            } else {
+                const ext = mimeType?.includes("/") ? mimeType.split("/")[1] : "jpg";
+                formData.append("file", {
+                    uri,
+                    type: mimeType || "image/jpeg",
+                    name: `profile.${ext === "jpeg" ? "jpg" : ext}`,
+                } as any);
+            }
+            formData.append("upload_preset", UPLOAD_PRESET);
+
             const response = await fetch(
                 `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
                 { method: "POST", body: formData }
             );
             const data = await response.json();
-            if (data.secure_url) {
+            if (response.ok && data.secure_url) {
                 updateField("picture", data.secure_url);
-                return data.secure_url;
-            } else {
-                throw new Error(data.error?.message || "Upload failed");
+                return data.secure_url as string;
             }
-        } catch (error) {
+            // Surface the real Cloudinary error so failures are debuggable.
+            const cloudMsg: string =
+                data?.error?.message || `Upload failed (HTTP ${response.status})`;
+            console.error("Cloudinary upload error:", cloudMsg);
+            Alert.alert("Upload failed", cloudMsg);
+            return null;
+        } catch (error: any) {
             console.error("Cloudinary upload error:", error);
-            Alert.alert("Upload failed", "Could not upload image. Please try again.");
+            Alert.alert(
+                "Upload failed",
+                error?.message || "Could not upload image. Please check your connection and try again."
+            );
             return null;
         } finally {
             setUploading(false);
@@ -121,7 +138,8 @@ export default function EditProfile() {
             });
 
             if (!result.canceled && result.assets && result.assets[0]) {
-                await uploadImage(result.assets[0].uri);
+                const asset = result.assets[0];
+                await uploadImage(asset.uri, asset.mimeType || "image/jpeg");
             }
         } catch (error) {
             console.error("Image picker error:", error);
@@ -190,9 +208,9 @@ export default function EditProfile() {
             await refresh();
             Alert.alert("Success", "Profile updated!");
             router.back();
-        } catch (err) {
+        } catch (err: any) {
             console.error(err);
-            Alert.alert("Error", "Could not save changes. Please try again.");
+            Alert.alert("Error", err?.message || "Could not save changes. Please try again.");
         } finally {
             setSaving(false);
         }
