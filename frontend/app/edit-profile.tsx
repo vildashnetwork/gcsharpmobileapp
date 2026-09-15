@@ -24,7 +24,8 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import * as DocumentPicker from "expo-document-picker";
-import * as FileSystem from "expo-file-system/legacy";
+import { File as ExpoFile } from "expo-file-system";
+import { fetch as expoFetch } from "expo/fetch";
 import { CameraView, Camera } from "expo-camera";
 
 const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
@@ -77,8 +78,12 @@ export default function EditProfile() {
         setForm((prev) => ({ ...prev, [key]: value }));
     };
 
-    const uploadImage = async (uri: string, mimeType: string = "image/jpeg") => {
+    const uploadImage = async (
+        uri: string,
+        mimeType: string = "image/jpeg"
+    ) => {
         setUploading(true);
+
         try {
             if (Platform.OS === "web") {
                 // On web, FormData only accepts real Blob/File objects — the
@@ -86,63 +91,94 @@ export default function EditProfile() {
                 // as the string "[object Object]" (Cloudinary then rejects
                 // it with "Invalid image file"). Convert the blob URL first.
                 const blob = await (await fetch(uri)).blob();
+
                 const formData = new FormData();
                 formData.append("file", blob, "profile.jpg");
                 formData.append("upload_preset", UPLOAD_PRESET);
+
                 const response = await fetch(
                     `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
-                    { method: "POST", body: formData }
+                    {
+                        method: "POST",
+                        body: formData,
+                    }
                 );
+
                 const data = await response.json();
+
                 if (response.ok && data.secure_url) {
                     updateField("picture", data.secure_url);
                     return data.secure_url as string;
                 }
-                const webMsg: string =
-                    data?.error?.message || `Upload failed (HTTP ${response.status})`;
+
+                const webMsg =
+                    data?.error?.message ||
+                    `Upload failed (HTTP ${response.status})`;
+
                 console.error("Cloudinary upload error:", webMsg);
                 Alert.alert("Upload failed", webMsg);
                 return null;
             }
 
-            // Native (Android/iOS): SDK 54+ replaced the global `fetch` with the
-            // native (WinterCG) implementation, which does NOT accept the legacy
-            // `{ uri, type, name }` FormData file parts — it throws
-            // "Unsupported FormDataPart implementation". Use expo-file-system's
-            // native multipart uploader instead (no FormData/fetch involved).
-            const uploadResult = await FileSystem.uploadAsync(
+            // Native (Android/iOS): upload directly from the picker's URI.
+            // Do NOT copy content:// URIs into the cache dir first —
+            // expo-file-system's new File.copy() throws "Invalid URI" on
+            // content:// sources (open bug: expo/expo#42343, still present
+            // as of SDK 57). File already implements the Blob interface and
+            // supports SAF (content://) URIs directly for read/streaming
+            // operations, so we hand it straight to expo/fetch's FormData
+            // without an intermediate copy — this also avoids the earlier
+            // "Unsupported FormDataPart implementation" error you'd get from
+            // native fetch with the legacy { uri, type, name } shape.
+            const fileName = `profile_${Date.now()}.jpg`;
+            const sourceFile = new ExpoFile(uri);
+
+            console.log("Uploading directly from:", sourceFile.uri);
+
+            const formData = new FormData();
+            // File implements the Blob interface, so it can be appended
+            // directly to FormData and streamed by expo/fetch.
+            formData.append("file", sourceFile, fileName);
+            formData.append("upload_preset", UPLOAD_PRESET);
+
+            const uploadResponse = await expoFetch(
                 `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
-                uri,
                 {
-                    uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-                    fieldName: "file",
-                    mimeType: mimeType || "image/jpeg",
-                    parameters: { upload_preset: UPLOAD_PRESET },
+                    method: "POST",
+                    body: formData,
                 }
             );
 
             let data: any = null;
+
             try {
-                data = uploadResult.body ? JSON.parse(uploadResult.body) : null;
+                data = await uploadResponse.json();
             } catch {
                 data = null;
             }
-            if (uploadResult.status >= 200 && uploadResult.status < 300 && data?.secure_url) {
+
+            if (uploadResponse.ok && data?.secure_url) {
                 updateField("picture", data.secure_url);
                 return data.secure_url as string;
             }
-            // Surface the real Cloudinary error so failures are debuggable.
-            const cloudMsg: string =
-                data?.error?.message || `Upload failed (HTTP ${uploadResult.status})`;
+
+            const cloudMsg =
+                data?.error?.message ||
+                `Upload failed (HTTP ${uploadResponse.status})`;
+
             console.error("Cloudinary upload error:", cloudMsg);
             Alert.alert("Upload failed", cloudMsg);
+
             return null;
         } catch (error: any) {
             console.error("Cloudinary upload error:", error);
+
             Alert.alert(
                 "Upload failed",
-                error?.message || "Could not upload image. Please check your connection and try again."
+                error?.message ||
+                "Could not upload image. Please check your connection and try again."
             );
+
             return null;
         } finally {
             setUploading(false);
@@ -159,7 +195,13 @@ export default function EditProfile() {
         try {
             const result = await DocumentPicker.getDocumentAsync({
                 type: "image/*",
-                copyToCacheDirectory: true,
+                // Android: hand back the raw content:// URI — we now upload
+                // straight from it (see uploadImage) instead of copying it
+                // into the host app's cache dir, which was breaking in Expo
+                // Go with a sandbox mismatch and, on the new File API, with
+                // an "Invalid URI" error on File.copy(). iOS keeps its
+                // standard temporary copy.
+                copyToCacheDirectory: Platform.OS === "ios",
             });
 
             if (!result.canceled && result.assets && result.assets[0]) {
