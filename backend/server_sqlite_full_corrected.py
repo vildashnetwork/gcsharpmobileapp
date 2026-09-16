@@ -2015,7 +2015,7 @@ async def analytics_student(user: dict = Depends(get_current_user)):
 # ============================================================
 
 EXAM_STRUCTURE = {
-    "GCE O Level": ["MATHEMATICS", "BIOLOGY", "CHEMISTRY", "History", "ENGLISH LANGUAGE","GEOGRAPHY", "Literature in English", "CITIZENSHIP", "COMMERCE", "ECONOMICS", "FOOD AND NUTRITION",
+    "GCE O Level": ["MATHEMATICS", "BIOLOGY", "FRENCH", "CHEMISTRY", "History", "ENGLISH LANGUAGE","GEOGRAPHY", "Literature in English", "CITIZENSHIP", "COMMERCE", "ECONOMICS", "FOOD AND NUTRITION",
                     "HUMAN BIOLOGY", "History", "LOGIC"],
     "GCE A Level": ["Pure Mathematics with stat", "Pure Mathematics with mech", "Further Mathematics", "Physics", "Chemistry", "Biology",
                     "Economics", "Accounting", "Business Studies", "French", "English Literature"],
