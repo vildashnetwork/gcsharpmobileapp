@@ -711,6 +711,54 @@ function readableSolutionText(value: unknown): string[] {
 
   return [String(value)];
 }
+
+/**
+ * Coerces any payload into a plain object. Model output and older cached
+ * responses can arrive as a JSON string, a one-element array wrapper, or
+ * null — every normaliser below funnels through this so no render or
+ * narration path ever reads a property off a non-object (reading `.map`
+ * off `undefined` is what crashed the "read aloud" button before).
+ */
+function asRecord(raw: unknown): Record<string, any> {
+  let value: unknown = raw;
+
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) return {};
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
+
+  if (Array.isArray(value)) {
+    // Some endpoints wrap a single result in a one-element array.
+    value = value.length === 1 ? value[0] : value;
+  }
+
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, any>)
+    : {};
+}
+
+/**
+ * Unwraps the solution payload. The highlight endpoint returns
+ * {scenes, title, question}, but a wrapped envelope ({data|solution|video|
+ * result: {...}}) has been seen from cached responses — peel one layer so
+ * `scenes` / `steps` are found wherever they actually live.
+ */
+function asSolutionRecord(raw: unknown): Record<string, any> {
+  const data = asRecord(raw);
+  if (data.scenes || data.steps || data.title || data.narration) return data;
+
+  for (const key of ['data', 'solution', 'video', 'result', 'response', 'answer']) {
+    const nested = asRecord(data[key]);
+    if (nested.scenes || nested.steps || nested.title || nested.narration) return nested;
+  }
+  return data;
+}
+
 /**
  * Builds one speakable/readable line from a video scene. The backend returns
  * scenes shaped {heading, board, narration}, but board/narration can arrive as
@@ -718,7 +766,13 @@ function readableSolutionText(value: unknown): string[] {
  */
 function sceneLine(scene: any): string {
   if (!scene) return "";
-  if (typeof scene === "string") return scene;
+  if (typeof scene === "string") {
+    // A scene can arrive as a raw JSON string — parse it so the narration
+    // reads as prose instead of dumped JSON.
+    const parsed = asRecord(scene);
+    if (parsed.narration || parsed.board || parsed.heading) return sceneLine(parsed);
+    return scene;
+  }
 
   const narration =
     typeof scene.narration === "string" ? scene.narration.trim() : "";
@@ -748,9 +802,7 @@ function normalizeQaItems(items: unknown): QaItem[] {
   if (!Array.isArray(items)) return [];
   return items
     .map((raw, index): QaItem => {
-      const data = (raw && typeof raw === 'object' && !Array.isArray(raw))
-        ? (raw as Record<string, unknown>)
-        : ({} as Record<string, unknown>);
+      const data = asRecord(raw);
 
       const rawSteps = data.steps ?? data.working ?? data.solution;
       let stepList: unknown[];
@@ -781,6 +833,80 @@ function normalizeQaItems(items: unknown): QaItem[] {
       };
     })
     .filter((item) => item.question || item.steps.length > 0);
+}
+
+/**
+ * The highlight endpoint returns {scenes, title, question} while older cached
+ * responses returned {steps, ...}. Normalising both shapes up-front means no
+ * render or narration path ever has to guess, and `scenes` / `steps` are
+ * guaranteed to be real arrays (never undefined), which is what caused the
+ * "Cannot read property 'map' of undefined" crash.
+ */
+function normalizeSolution(raw: any): any {
+  const data = asSolutionRecord(raw);
+
+  const scenes = Array.isArray(data.scenes) ? data.scenes : [];
+
+  const steps = Array.isArray(data.steps)
+    ? data.steps.map((s: any) => ({
+      heading: typeof s?.heading === "string" ? s.heading : String(s?.heading ?? ""),
+      body: readableSolutionText(s?.body).join(" "),
+    }))
+    : [];
+
+  return {
+    ...data,
+    scenes,
+    steps,
+    title: typeof data.title === "string" ? data.title : "",
+    question: typeof data.question === "string" ? data.question : "",
+    narration: typeof data.narration === "string" ? data.narration : "",
+  };
+}
+
+/**
+ * The video endpoint returns {scenes, title, question}. A scene's `board` can
+ * arrive as an array, a plain string, or an object — and `narration` may be
+ * missing entirely. Coercing it once here means the player and the "read aloud"
+ * narration both receive the same guaranteed {heading, board[], narration}.
+ */
+function normalizeVideoData(raw: any): VideoData {
+  const data = asSolutionRecord(raw);
+
+  const scenes = (Array.isArray(data.scenes) ? data.scenes : [])
+    .map((scene: any) => {
+      const rawBoard = Array.isArray(scene?.board)
+        ? scene.board
+        : typeof scene?.board === "string"
+          ? [scene.board]
+          : [];
+      const board = rawBoard
+        .flatMap((line: unknown) => readableSolutionText(line))
+        .map((line: string) => humanize(line).trim())
+        .filter(Boolean);
+
+      const narration = humanize(
+        typeof scene?.narration === "string" ? scene.narration : ""
+      ).trim();
+
+      return {
+        heading: humanize(
+          typeof scene?.heading === "string" ? scene.heading : String(scene?.heading ?? "")
+        ).trim(),
+        board,
+        // Fall back to the board text so a scene is never silent.
+        narration: narration || board.join(". "),
+      };
+    })
+    .filter((scene: { heading: string; board: string[]; narration: string }) =>
+      scene.heading || scene.board.length > 0 || scene.narration
+    );
+
+  return {
+    scenes,
+    title: typeof data.title === "string" ? data.title : "",
+    question: typeof data.question === "string" ? data.question : "",
+  };
 }
 
 
@@ -952,7 +1078,9 @@ export default function PdfViewer() {
     setVideoData(null);
     try {
       const data = await api<VideoData>(`/papers/${paper_id}/video`, { method: 'POST' });
-      setVideoData(data);
+      // scenes/board/narration shapes are never trusted directly — see
+      // normalizeVideoData. Prevents "map of undefined" in the player + narration.
+      setVideoData(normalizeVideoData(data));
       setShowVideoModal(true);
     } catch (e) {
       // toast error
@@ -1235,9 +1363,13 @@ export default function PdfViewer() {
         method: "POST",
         body: { text: videoOpen.text },
       });
-      setSolution(r);
+      setSolution(normalizeSolution(r));
     } catch (e: any) {
-      setSolution({ title: "Error", steps: [{ heading: "Failed", body: e.message }], narration: "" });
+      setSolution(normalizeSolution({
+        title: "Error",
+        steps: [{ heading: "Failed", body: e.message }],
+        narration: "",
+      }));
     } finally { setSolLoading(false); }
   };
 
@@ -1274,10 +1406,12 @@ export default function PdfViewer() {
   // ---- Read a single QA item aloud (question + steps + answer) ----
   const speakQaItem = (item: QaItem) => {
     if (voice.speaking) { voice.stopSpeaking(); return; }
-    const parts = [humanize(item.question)];
-    (item.steps || []).forEach((step, i) => parts.push(`Step ${i + 1}. ${humanize(step)}`));
-    if (item.answer) parts.push(`Answer: ${humanize(item.answer)}`);
-    const text = parts.join(". ");
+    const parts = [humanize(item?.question || "")];
+    const steps = Array.isArray(item?.steps) ? item.steps : [];
+    steps.forEach((step, i) => parts.push(`Step ${i + 1}. ${humanize(step)}`));
+    if (item?.answer) parts.push(`Answer: ${humanize(item.answer)}`);
+    const text = parts.filter(Boolean).join(". ");
+    if (!text) return;
     setSpeaking(true);
     voice.speak(text).catch(() => {
       Speech.speak(text, { rate: 0.95 });
@@ -1313,6 +1447,13 @@ export default function PdfViewer() {
   useEffect(() => {
     if (!voice.speaking) setSpeaking(false);
   }, [voice.speaking]);
+
+  // Stop any in-flight narration when the student leaves the paper so audio
+  // never keeps playing over another screen.
+  useEffect(() => () => {
+    try { voice.stopSpeaking(); } catch { }
+    try { Speech.stop(); } catch { }
+  }, []);
 
 
   const saveDraft = async () => {
@@ -1594,11 +1735,15 @@ export default function PdfViewer() {
             )}
             {solution && (
               <VideoSolutionPlayer
-                scenes={solution.scenes || (solution.steps || []).map((step: any) => ({
-                  heading: humanize(step?.heading || ""),
-                  board: readableSolutionText(step?.body).map((line) => humanize(line)),
-                  narration: readableSolutionText(step?.body).map((line) => humanize(line)).join('. '),
-                })) || []}
+                scenes={
+                  Array.isArray(solution.scenes) && solution.scenes.length
+                    ? solution.scenes
+                    : (Array.isArray(solution.steps) ? solution.steps : []).map((step: any) => ({
+                      heading: humanize(step?.heading || ""),
+                      board: readableSolutionText(step?.body).map((line) => humanize(line)),
+                      narration: readableSolutionText(step?.body).map((line) => humanize(line)).join('. '),
+                    }))
+                }
                 title={solution.title}
                 question={solution.question || videoOpen?.text}
                 onClose={closeVideoModal}
@@ -1614,6 +1759,20 @@ export default function PdfViewer() {
           <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: spacing.md, borderBottomWidth: 1, borderBottomColor: theme.border }}>
             <Text style={[styles.sheetTitle, { marginBottom: 0 }]}>{t.pdf.videoSolution}</Text>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Pressable
+                onPress={() => setAutoRead((prev) => !prev)}
+                testID="toggle-autoread-btn"
+                style={{ padding: 4 }}
+                accessibilityRole="switch"
+                accessibilityState={{ checked: autoRead }}
+                accessibilityLabel={autoRead ? "Disable auto narration" : "Enable auto narration"}
+              >
+                <Ionicons
+                  name={autoRead ? "musical-notes" : "musical-notes-outline"}
+                  size={22}
+                  color={autoRead ? theme.brandPrimary : theme.onSurfaceMuted}
+                />
+              </Pressable>
               <Pressable
                 onPress={speakVideoSolution}
                 testID="speak-video-btn"
@@ -1659,7 +1818,7 @@ export default function PdfViewer() {
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.qaQuestion}>Q{item.number}. {item.question}</Text>
-                    {(item.steps || []).map((step, j) => (
+                    {(Array.isArray(item.steps) ? item.steps : []).map((step, j) => (
                       <Text key={j} style={styles.qaStep}>{j + 1}. {step}</Text>
                     ))}
                     {!!item.answer && (
