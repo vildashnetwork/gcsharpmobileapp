@@ -637,6 +637,8 @@ import {
   type MediaManifestEntry,
 } from "@/src/lib/mediaStore";
 import { PDFJS_RUNTIME, PDFJS_WORKER } from "@/src/generated/pdfjsRuntime";
+import { useGcVoice } from "@/src/hooks/useGcVoice";
+import { API_BASE, readToken } from "@/src/api";
 
 const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -709,6 +711,53 @@ function readableSolutionText(value: unknown): string[] {
 
   return [String(value)];
 }
+/**
+ * The QA endpoint returns raw model output, so `steps` can arrive missing, as
+ * a plain string, or as an object. Normalising here keeps every render path
+ * (list + "read aloud") crash-proof instead of trusting the payload shape.
+ */
+type QaItemSafe = { number: string; question: string; steps: string[]; answer: string };
+
+function normalizeQaItems(items: unknown): QaItemSafe[] {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((raw, index): QaItemSafe => {
+      const data = (raw && typeof raw === 'object' && !Array.isArray(raw))
+        ? (raw as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+
+      const rawSteps = data.steps ?? data.working ?? data.solution;
+      let stepList: unknown[];
+      if (Array.isArray(rawSteps)) stepList = rawSteps;
+      else if (typeof rawSteps === 'string') stepList = [rawSteps];
+      else if (rawSteps && typeof rawSteps === 'object') stepList = Object.values(rawSteps);
+      else stepList = [];
+
+      const steps = stepList
+        .flatMap((step) => readableSolutionText(step))
+        .map((step) => humanize(step).trim())
+        .filter(Boolean);
+
+      const rawAnswer = data.answer ?? data.final_answer ?? data.result ?? '';
+      const answer = readableSolutionText(rawAnswer).map((line) => humanize(line)).join(' ').trim();
+
+      const number = String(data.number ?? data.question_number ?? index + 1).slice(0, 12);
+      const question = readableSolutionText(data.question ?? data.text ?? '')
+        .map((line) => humanize(line))
+        .join(' ')
+        .trim();
+
+      return {
+        number,
+        question: question || `Question ${number}`,
+        steps,
+        answer,
+      };
+    })
+    .filter((item) => item.question || item.steps.length > 0);
+}
+
+
 
 // ---------- Offline PDF downloads helpers ----------
 
@@ -814,9 +863,13 @@ export default function PdfViewer() {
   const [saveOpen, setSaveOpen] = useState<{ text: string; page: number } | null>(null);
   const [solution, setSolution] = useState<any>(null);
   const [solLoading, setSolLoading] = useState(false);
-  const [speaking, setSpeaking] = useState(false);
+    const [speaking, setSpeaking] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [draftSaved, setDraftSaved] = useState(false);
+
+  // ---- GC AI Voice: human-voice narration for PDF reading ----
+  const voice = useGcVoice();
+  const [autoRead, setAutoRead] = useState(false);
 
   // === OFFLINE PDF DOWNLOADS ===
   const [downloadsOpen, setDownloadsOpen] = useState(false);
@@ -1162,18 +1215,57 @@ export default function PdfViewer() {
     } finally { setSolLoading(false); }
   };
 
-  const speakSolution = () => {
+    const speakSolution = () => {
     if (!solution) return;
-    if (speaking) { Speech.stop(); setSpeaking(false); return; }
-    setSpeaking(true);
-    const text = humanize(solution.narration || solution.steps.map((s: any) => `${s.heading}. ${s.body}`).join(" "));
-    Speech.speak(text, {
-      onDone: () => setSpeaking(false),
-      onStopped: () => setSpeaking(false),
-      onError: () => setSpeaking(false),
-      rate: 0.95,
+    if (speaking || voice.speaking) {
+      voice.stopSpeaking();
+      Speech.stop();
+      setSpeaking(false);
+      return;
+    }
+        setSpeaking(true);
+    // Build narration from scenes, steps, or narration — whichever is available.
+    const parts: string[] = [];
+    if (solution.narration) parts.push(solution.narration);
+    if (solution.scenes?.length) {
+      parts.push(...solution.scenes.map((s: any) =>
+        humanize(s.narration || (s.board || []).join(" "))
+      ));
+    }
+    if (solution.steps?.length) {
+      parts.push(...solution.steps.map((s: any) => `${s.heading || ""}. ${s.body || ""}`));
+    }
+    const text = humanize(parts.filter(Boolean).join(" "));
+    if (!text) { setSpeaking(false); return; }
+    // Use the human-voice TTS via useGcVoice; fall back to on-device Speech.
+    voice.speak(text).catch(() => {
+      Speech.speak(text, { rate: 0.95 });
     });
   };
+
+  // ---- Read a single QA item aloud (question + steps + answer) ----
+  const speakQaItem = (item: QaItem) => {
+    if (voice.speaking) { voice.stopSpeaking(); return; }
+    const parts = [item.question];
+    item.steps.forEach((step, i) => parts.push(`Step ${i + 1}. ${step}`));
+    parts.push(`Answer: ${item.answer}`);
+    const text = parts.join(". ");
+    setSpeaking(true);
+    voice.speak(text).catch(() => {
+      Speech.speak(text, { rate: 0.95 });
+    });
+  };
+
+  // Auto-speak the most recent assistant reply while a video solution is open
+  useEffect(() => {
+    if (!autoRead || !solution || voice.speaking) return;
+    speakSolution();
+  }, [autoRead, solution]);
+
+  useEffect(() => {
+    if (!voice.speaking) setSpeaking(false);
+  }, [voice.speaking]);
+
 
   const saveDraft = async () => {
     if (!paper_id) return;
@@ -1420,9 +1512,23 @@ export default function PdfViewer() {
         <View style={styles.sheetBackdrop}>
           <View style={[styles.sheetLg, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="video-sheet">
             <View style={styles.grabber} />
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
               <Text style={styles.sheetTitle}>{t.pdf.videoSolution}</Text>
-              <Pressable onPress={closeVideoModal} testID="close-video"><Ionicons name="close" size={22} color={theme.onSurface} /></Pressable>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Pressable
+                  onPress={speakSolution}
+                  testID="speak-solution-btn"
+                  style={{ padding: 4 }}
+                  accessibilityLabel={speaking || voice.speaking ? "Stop narration" : "Read solution aloud"}
+                >
+                  <Ionicons
+                    name={speaking || voice.speaking ? "pause" : "volume-high-outline"}
+                    size={22}
+                    color={theme.brandPrimary}
+                  />
+                </Pressable>
+                <Pressable onPress={closeVideoModal} testID="close-video"><Ionicons name="close" size={22} color={theme.onSurface} /></Pressable>
+              </View>
             </View>
             <Text style={styles.sheetSel} numberOfLines={4}>{t.pdf.question}: “{videoOpen?.text}”</Text>
 
@@ -1454,9 +1560,26 @@ export default function PdfViewer() {
         </View>
       </Modal>
 
-      {/* Full video solution modal (Paper 2) */}
+            {/* Full video solution modal (Paper 2) */}
       <Modal visible={showVideoModal} animationType="slide" onRequestClose={() => setShowVideoModal(false)}>
         <SafeAreaView style={{ flex: 1, backgroundColor: theme.surfaceSecondary }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: spacing.md, borderBottomWidth: 1, borderBottomColor: theme.border }}>
+            <Text style={[styles.sheetTitle, { marginBottom: 0 }]}>{t.pdf.videoSolution}</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Pressable
+                onPress={() => voice.speak(videoData?.scenes?.map(s => s.narration).join(". ") || "")
+                  .catch(() => Speech.speak(videoData?.scenes?.map(s => s.narration).join(". ") || "", { rate: 0.95 }))}
+                testID="speak-video-btn"
+                style={{ padding: 4 }}
+                accessibilityLabel="Read video solution aloud"
+              >
+                <Ionicons name="volume-high-outline" size={22} color={theme.brandPrimary} />
+              </Pressable>
+              <Pressable onPress={() => setShowVideoModal(false)} testID="close-video-full">
+                <Ionicons name="close" size={22} color={theme.onSurface} />
+              </Pressable>
+            </View>
+          </View>
           <ScrollView contentContainerStyle={{ padding: spacing.md, paddingBottom: insets.bottom }}>
             {videoData && (
               <VideoSolutionPlayer
@@ -1480,13 +1603,25 @@ export default function PdfViewer() {
             </Pressable>
           </View>
           <ScrollView contentContainerStyle={{ padding: spacing.md, gap: spacing.md }}>
-            {qaItems.map((item, i) => (
+                        {qaItems.map((item, i) => (
               <View key={i} style={styles.qaItem}>
-                <Text style={styles.qaQuestion}>Q{item.number}. {item.question}</Text>
-                {item.steps.map((step, j) => (
-                  <Text key={j} style={styles.qaStep}>{j + 1}. {step}</Text>
-                ))}
-                <Text style={styles.qaAnswer}>{t.pdf.answer}: {item.answer}</Text>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.qaQuestion}>Q{item.number}. {item.question}</Text>
+                    {item.steps.map((step, j) => (
+                      <Text key={j} style={styles.qaStep}>{j + 1}. {step}</Text>
+                    ))}
+                    <Text style={styles.qaAnswer}>{t.pdf.answer}: {item.answer}</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => speakQaItem(item)}
+                    testID={`speak-qa-${i}`}
+                    style={{ padding: 4, marginLeft: 8 }}
+                    accessibilityLabel={`Read question ${item.number} aloud`}
+                  >
+                    <Ionicons name="volume-high-outline" size={18} color={theme.brandPrimary} />
+                  </Pressable>
+                </View>
               </View>
             ))}
           </ScrollView>

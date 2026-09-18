@@ -3566,12 +3566,54 @@ async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user
     return {"answer": resp}
 
 
+def _normalise_qa_items(raw_items: list) -> list:
+    """Coerce model output into the {number, question, steps, answer} shape.
+
+    Models sometimes return `steps` as a single string, as a dict, or omit the
+    key entirely. Without this the mobile app crashed with
+    "Cannot read property 'map' of undefined" while rendering worked solutions.
+    """
+    items = []
+    for i, it in enumerate(raw_items or []):
+        if isinstance(it, str):
+            it = {"number": str(i + 1), "question": it, "steps": [], "answer": ""}
+        elif not isinstance(it, dict):
+            continue
+
+        steps_raw = it.get("steps") or it.get("working") or it.get("solution") or []
+        if isinstance(steps_raw, str):
+            steps_raw = [steps_raw]
+        elif isinstance(steps_raw, dict):
+            steps_raw = [str(v) for v in steps_raw.values()]
+        elif not isinstance(steps_raw, (list, tuple)):
+            steps_raw = []
+        steps = [str(s).strip()[:600] for s in steps_raw if str(s).strip()][:12]
+
+        question = str(it.get("question") or it.get("text") or "").strip()[:1200]
+        answer = it.get("answer") or it.get("final_answer") or it.get("result") or ""
+        if isinstance(answer, (list, tuple)):
+            answer = " ".join(str(a) for a in answer)
+        answer = str(answer).strip()[:600]
+
+        number = str(it.get("number") or it.get("question_number") or (i + 1)).strip()[:12]
+
+        if not question and not steps:
+            continue
+        items.append({
+            "number": number,
+            "question": question or f"Question {number}",
+            "steps": steps,
+            "answer": answer,
+        })
+    return items
+
+
 @api_router.post("/papers/{paper_id}/qa")
 async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user)):
     p = await _load_paper_or_404(paper_id)
     cached = await db.paper_qa_cache.find_one({"paper_id": paper_id}, {"_id": 0})
     if cached:
-        return {"items": cached["items"], "cached": True}
+        return {"items": _normalise_qa_items(cached.get("items")), "cached": True}
 
     _ensure_openrouter_key()
     text = await _fetch_paper_text(p, max_chars=9000)
@@ -3588,7 +3630,7 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
     try:
         parsed = await _ask_ai_for_json(chat, prompt, "items", retries=2,
                                         max_tokens=QA_MAX_TOKENS, timeout=QA_TIMEOUT)
-        items = parsed.get("items", [])
+        items = _normalise_qa_items(parsed.get("items", []))
         if not items:
             raise ValueError("empty items")
     except HTTPException:
