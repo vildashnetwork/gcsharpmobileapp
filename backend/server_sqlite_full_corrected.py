@@ -2857,15 +2857,22 @@ async def ai_knowledge_search(q: str, user: dict = Depends(get_current_user)):
     }
 
 
-@api_router.delete("/ai/knowledge/{entry_id}")
-async def ai_knowledge_delete(entry_id: str, user: dict = Depends(get_current_user)):
-    """Remove a learned entry (admin/teacher housekeeping)."""
+@api_router.post("/ai/knowledge/cleanup")
+async def ai_knowledge_cleanup(user: dict = Depends(get_current_user)):
+    """Remove junk/low-quality entries GC AI learned before the NLP guards
+    existed (e.g. greetings or one-word queries). Teachers/admins only."""
     if user.get("role") not in {"teacher", "admin"}:
         raise HTTPException(403, "Teachers and admins only")
-    kb = gc_ai.KnowledgeBase(db)
-    await db.ai_knowledge.delete_one({"entry_id": entry_id})
-    kb.invalidate_cache()
-    return {"ok": True}
+    # Junk = entries with fewer than 3 distinct terms (e.g. a stored "hi").
+    junk = await db.ai_knowledge.find({}, {"_id": 1, "tf": 1}).to_list(5000)
+    bad_ids = [j["_id"] for j in junk if len(j.get("tf", {})) < 3]
+    deleted_count = 0
+    if bad_ids:
+        res = await db.ai_knowledge.delete_many({"_id": {"$in": bad_ids}})
+        deleted_count = res.deleted_count
+    gc_kb = gc_ai.KnowledgeBase(db)
+    gc_kb.invalidate_cache()
+    return {"ok": True, "deleted_junk_entries": deleted_count}
 
 # ============================================================
 # AI SESSIONS MANAGEMENT (new routes for frontend)

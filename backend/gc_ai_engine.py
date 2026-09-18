@@ -155,24 +155,26 @@ def build_query(question: str) -> str:
 # ------------------------------------------------------------
 
 _SMALL_TALK_RULES: List[Tuple[str, str]] = [
-    (r"^(hi+|hello+|hey+|hiya|yo|howfar|how far|sup|good\s*(morning|afternoon|evening|day)|bonjour|salut|njang?o)\b[\s\W]{0,12}$",
-     "Hello! 👋 I'm GC AI, your personal study tutor. Ask me anything about your "
-     "subjects - explain a topic, solve a problem step by step, or quiz you for "
-     "your exam. What are we learning today?"),
-    (r"^(thanks?|thank you|thx|merci|tanks?|great job|well done)[\s\W]{0,10}$",
-     "You're very welcome! 😊 Keep the questions coming - every question we work "
-     "through makes your exam preparation stronger."),
+    # NOTE: "how are you" style rules must come BEFORE the plain greeting rule
+    # so "hi, how are you" is answered as a how-are-you, not a plain greeting.
     (r"^(how are you|how are u|how far|you dey|wass?up|what'?s up|how you dey)\b[\s\W]{0,10}$",
      "I'm doing great, thanks for asking! 😄 More importantly - how is your study "
      "going? Tell me a topic you're finding difficult and let's break it down together."),
-    (r"^(who are you|what are you|what'?s your name|who made you|are you (a )?(human|robot|bot|ai)|introduce yourself)\b[\s\W]{0,15}$",
+    (r"^(hi+|hello+|hey+|hiya|yo|howfar|bonjour|salut|njang?o)\b(\s+\w+){0,2}[\s!.,?]*$|^(good\s*(morning|afternoon|evening|day))\b(\s+\w+){0,2}[\s!.,?]*$",
+     "Hello! 👋 I'm GC AI, your personal study tutor. Ask me anything about your "
+     "subjects - explain a topic, solve a problem step by step, or quiz you for "
+     "your exam. What are we learning today?"),
+    (r"^(thanks?|thank you|thx|merci|tanks?|great job|well done)\b(\s+\w+){0,2}[\s!.,?]*$",
+     "You're very welcome! 😊 Keep the questions coming - every question we work "
+     "through makes your exam preparation stronger."),
+    (r"^(who are you|what are you|what'?s your name|who made you|introduce yourself)\b[\s\W]{0,15}$|^(are you (a )?(human|robot|bot|ai))\b[\s\W]{0,15}$",
      "I'm GC AI - your AI study companion built to help you prepare for GCE O Level, "
      "A Level, HND and Concours exams. I explain topics step by step, solve problems, "
      "and I actually learn from every question students ask me. Try me with any topic!"),
-    (r"^(bye+|goodbye|good ?night|see you|later|à bientôt|au revoir)[\s\W]{0,10}$",
+    (r"^(bye+|goodbye|good ?night|see you|later|au revoir)\b(\s+\w+){0,2}[\s!.,?]*$",
      "Goodbye and happy studying! 📚 Remember: consistent practice is the secret to "
      "exam success. I'll be right here whenever you need help."),
-    (r"^(ok(ay)?|alright|cool|nice|great|wow|interesting|lol|haha+|hmm+)[\s\W]{0,10}$",
+    (r"^(ok(ay)?|alright|cool|nice|great|wow|interesting|lol|haha+|hmm+)\b[\s!.,?]*$",
      "Got it! 😄 Whenever you're ready, send me a topic or problem - for example "
      "\"Explain differentiation from first principles\" or \"Solve x² + 3x + 2 = 0\"."),
 ]
@@ -424,6 +426,26 @@ async def _call_openrouter(model: str, prompt: str, system: str,
     return None
 
 
+def clean_markdown(text: str) -> str:
+    """Convert common Markdown to app-friendly plain text.
+
+    The app renders plain text only (no markdown renderer), so headers,
+    bold/italic markers, code fences and horizontal rules are stripped.
+    """
+    if not text:
+        return text
+    text = re.sub(r"```[a-zA-Z]*\n?", "", text)      # code fences
+    text = re.sub(r"^\s*[-*]{3,}\s*$", "", text, flags=re.M)  # horizontal rules
+    text = re.sub(r"^\s*#{1,6}\s*", "", text, flags=re.M)     # headers -> plain line
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.S)  # **bold**
+    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"\1", text)  # *italic*
+    text = re.sub(r"__(.+?)__", r"\1", text, flags=re.S)      # __bold__
+    text = re.sub(r"`([^`]+)`", r"\1", text)                  # `code`
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)    # [link](url) -> text
+    text = re.sub(r"^\s*\$\s*", "", text, flags=re.M)         # latex $ wrappers
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 async def _call_pollinations(prompt: str, system: str,
                              max_tokens: int, timeout: float) -> Optional[str]:
     """Keyless free LLM (Pollinations.ai) - needs NO API key at all.
@@ -494,17 +516,17 @@ async def call_llm(prompt: str, system: Optional[str] = None,
     # Provider 1: keyless Pollinations - always available, no API key needed
     text = await _call_pollinations(prompt, sys, max_tokens, timeout)
     if text:
-        return text, "pollinations"
+        return clean_markdown(text), "pollinations"
 
     # Provider 2: Google Gemini (independent of OpenRouter)
     text = await _call_gemini(prompt, sys, max_tokens, timeout)
     if text:
-        return text, "google-gemini"
+        return clean_markdown(text), "google-gemini"
 
     for model in OPENROUTER_CHAIN:
         text = await _call_openrouter(model, prompt, sys, max_tokens, timeout)
         if text:
-            return text, f"openrouter:{model}"
+            return clean_markdown(text), f"openrouter:{model}"
 
     return (
         "I could not reach my learning services right now. Please try again in a "
