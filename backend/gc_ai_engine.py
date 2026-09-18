@@ -390,6 +390,187 @@ async def research_context(question: str) -> Tuple[str, bool]:
 
 
 # ------------------------------------------------------------
+# 3b. SPEECH SYNTHESIS (human voice for GC AI)
+# ------------------------------------------------------------
+
+GEMINI_TTS_VOICES = {
+    "female": "Aoede",   # warm, clear female teacher voice
+    "male": "Charon",    # deep, informative male voice
+    "bright": "Puck",    # upbeat, energetic
+    "calm": "Kore",      # firm, calm female
+}
+
+
+def speakable_text(text: str) -> str:
+    """Rewrite an AI answer so it sounds natural when spoken aloud."""
+    if not text:
+        return ""
+    t = text
+    # Drop the frontend provenance badge lines ("📚 Answered from ...")
+    t = re.sub(r"^\s*[^\w\s]{1,3}\s*(Answered from|Verified with|Solved locally|Powered by|Learned from).*$",
+               "", t, flags=re.M)
+    # Markdown -> plain speech
+    t = re.sub(r"```[a-zA-Z]*\n?", "", t)
+    t = re.sub(r"^\s*#{1,6}\s*", "", t, flags=re.M)
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t, flags=re.S)
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    t = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", t)
+    # Math symbols -> words the voice can pronounce
+    for sym, word in {
+        "√": " square root of ", "π": " pi ", "×": " times ", "÷": " divided by ",
+        "±": " plus or minus ", "≤": " less than or equal to ",
+        "≥": " greater than or equal to ", "≠": " not equal to ",
+        "≈": " approximately equal to ", "²": " squared ", "³": " cubed ",
+        "∑": " sum of ", "∫": " integral of ", "∞": " infinity ",
+        "→": " gives ", "⇒": " which gives ", "°": " degrees ", "•": " ",
+        "θ": " theta ", "α": " alpha ", "β": " beta ", "Δ": " delta ",
+    }.items():
+        t = t.replace(sym, word)
+    t = re.sub(r"final answer\s*:\s*", "The final answer is ", t, flags=re.I)
+    t = re.sub(r"https?://\S+", " (link) ", t)
+    # Strip emoji / symbols / stray markdown characters
+    t = "".join(ch for ch in t if not unicodedata.category(ch).startswith(("So", "Sk")))
+    t = re.sub(r"[#*_`>|~]+", " ", t)
+    t = re.sub(r"\n{2,}", ".\n", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return t.strip()[:4000]
+
+
+def chunk_for_tts(text: str, limit: int = 190) -> List[str]:
+    """Split text into small chunks (Google TTS caps each request)."""
+    parts: List[str] = []
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
+    current = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        while len(s) > limit:
+            cut = s.rfind(" ", 0, limit)
+            cut = cut if cut > 40 else limit
+            parts.append(s[:cut].strip())
+            s = s[cut:].strip()
+        if len(current) + len(s) + 1 <= limit:
+            current = (current + " " + s).strip()
+        else:
+            if current:
+                parts.append(current)
+            current = s
+    if current:
+        parts.append(current)
+    return [p for p in parts if p] or [text[:limit]]
+
+
+def _pcm_to_wav_base64(pcm: bytes, rate: int = 24000,
+                       channels: int = 1, sampwidth: int = 2) -> str:
+    """Wrap raw 16-bit PCM in a WAV header, return base64."""
+    import base64 as _b64
+    import struct as _struct
+    data_size = len(pcm)
+    header = b"RIFF" + _struct.pack("<I", 36 + data_size) + b"WAVEfmt " + \
+        _struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                     rate * channels * sampwidth, channels * sampwidth,
+                     sampwidth * 8) + b"data" + _struct.pack("<I", data_size)
+    return _b64.b64encode(header + pcm).decode()
+
+
+async def _call_gemini_tts(text: str, voice: str = "Aoede",
+                           timeout: float = 60.0):
+    """Gemini TTS (most human, style-aware). Returns (pcm_bytes, rate) or None."""
+    if not GEMINI_API_KEY:
+        return None
+    model = os.environ.get("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+    style = os.environ.get(
+        "GEMINI_TTS_STYLE",
+        "Say this in a warm, friendly and clear teacher's voice, natural pace: ",
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                f"{GEMINI_BASE}/models/{model}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"parts": [{"text": style + text}]}],
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"],
+                        "speechConfig": {"voiceConfig": {
+                            "prebuiltVoiceConfig": {"voiceName": voice}}},
+                    },
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Gemini TTS -> {resp.status_code}")
+                return None
+            part = resp.json()["candidates"][0]["content"]["parts"][0]
+            inline = part.get("inlineData") or {}
+            data = inline.get("data")
+            if not data:
+                return None
+            mime = inline.get("mimeType", "audio/L16;codec=pcm;rate=24000")
+            rate_match = re.search(r"rate=(\d+)", mime)
+            rate = int(rate_match.group(1)) if rate_match else 24000
+            import base64 as _b64
+            return _b64.b64decode(data), rate
+    except Exception as e:
+        logger.warning(f"Gemini TTS error: {e}")
+    return None
+
+
+async def _call_google_translate_tts(text: str, lang: str = "en",
+                                     timeout: float = 20.0) -> Optional[bytes]:
+    """Keyless Google TTS. MP3 chunks are concatenated (valid MP3 stream)."""
+    chunks = chunk_for_tts(text)
+    if not chunks:
+        return None
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    audio = bytearray()
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as hc:
+            for i, chunk in enumerate(chunks):
+                resp = await hc.get(
+                    "https://translate.google.com/translate_tts",
+                    params={
+                        "ie": "UTF-8", "q": chunk, "tl": lang,
+                        "client": "tw-ob", "idx": i, "total": len(chunks),
+                        "textlen": len(chunk),
+                    },
+                )
+                if resp.status_code != 200 or len(resp.content) < 200:
+                    logger.warning(f"Google TTS chunk {i} -> {resp.status_code}")
+                    return None
+                audio.extend(resp.content)
+    except Exception as e:
+        logger.warning(f"Google TTS error: {e}")
+        return None
+    return bytes(audio) if len(audio) > 500 else None
+
+
+async def synthesize_speech(text: str, voice: str = "female",
+                            lang: str = "en") -> Optional[Dict]:
+    """Text -> human speech. Returns {"format", "audio", "engine"} or None
+    if every speech service failed (app falls back to on-device voice)."""
+    spoken = speakable_text(text)
+    if not spoken:
+        return None
+
+    # Tier 1: Gemini TTS - most human voice
+    gemini_voice = GEMINI_TTS_VOICES.get(voice, GEMINI_TTS_VOICES["female"])
+    tts = await _call_gemini_tts(spoken[:2500], voice=gemini_voice)
+    if tts:
+        pcm, rate = tts
+        return {"format": "wav", "audio": _pcm_to_wav_base64(pcm, rate),
+                "engine": "gemini"}
+
+    # Tier 2: keyless Google TTS
+    mp3 = await _call_google_translate_tts(spoken, lang=lang or "en")
+    if mp3:
+        import base64 as _b64
+        return {"format": "mp3", "audio": _b64.b64encode(mp3).decode(),
+                "engine": "google"}
+
+    return None
+
+# ------------------------------------------------------------
 # 4. MULTI-PROVIDER LLM LAYER (Gemini + OpenRouter chain)
 # ------------------------------------------------------------
 

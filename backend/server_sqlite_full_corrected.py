@@ -2831,6 +2831,47 @@ async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
 
 
 # ============================================================
+# GC AI VOICE - text to speech (human voice replies)
+# ============================================================
+
+class VoiceRequest(BaseModel):
+    text: str
+    voice: str = "female"   # female | male | bright | calm (Gemini voices)
+    lang: str = "en"
+
+
+_TTS_CACHE: Dict[str, dict] = {}
+_TTS_CACHE_MAX = 80
+
+
+@api_router.post("/ai/voice")
+async def ai_voice(req: VoiceRequest, user: dict = Depends(get_current_user)):
+    """Convert an AI answer (or any text) to human speech audio.
+
+    Returns {"format": "wav"|"mp3", "audio": <base64>, "engine": ...}.
+    If all speech services fail, returns {"fallback": true} so the app
+    uses the on-device voice instead of showing an error.
+    """
+    key = hashlib.sha1(
+        f"{req.lang}|{req.voice}|{req.text}".encode("utf-8", "ignore")
+    ).hexdigest()
+    if key in _TTS_CACHE:
+        return _TTS_CACHE[key]
+
+    out = await gc_ai.synthesize_speech(req.text, voice=req.voice, lang=req.lang)
+    if not out:
+        return {"fallback": True,
+                "message": "Speech service unavailable - using on-device voice."}
+
+    payload = {"format": out["format"], "audio": out["audio"],
+               "engine": out.get("engine", "google"), "fallback": False}
+    if len(_TTS_CACHE) >= _TTS_CACHE_MAX:
+        _TTS_CACHE.clear()
+    _TTS_CACHE[key] = payload
+    return payload
+
+
+# ============================================================
 # GC AI KNOWLEDGE BASE - learning memory endpoints
 # ============================================================
 
