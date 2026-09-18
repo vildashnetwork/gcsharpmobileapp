@@ -151,6 +151,48 @@ def build_query(question: str) -> str:
 
 
 # ------------------------------------------------------------
+# 1b. SMALL TALK / GREETING DETECTION (instant local answers)
+# ------------------------------------------------------------
+
+_SMALL_TALK_RULES: List[Tuple[str, str]] = [
+    (r"^(hi+|hello+|hey+|hiya|yo|howfar|how far|sup|good\s*(morning|afternoon|evening|day)|bonjour|salut|njang?o)\b[\s\W]{0,12}$",
+     "Hello! 👋 I'm GC AI, your personal study tutor. Ask me anything about your "
+     "subjects - explain a topic, solve a problem step by step, or quiz you for "
+     "your exam. What are we learning today?"),
+    (r"^(thanks?|thank you|thx|merci|tanks?|great job|well done)[\s\W]{0,10}$",
+     "You're very welcome! 😊 Keep the questions coming - every question we work "
+     "through makes your exam preparation stronger."),
+    (r"^(how are you|how are u|how far|you dey|wass?up|what'?s up|how you dey)\b[\s\W]{0,10}$",
+     "I'm doing great, thanks for asking! 😄 More importantly - how is your study "
+     "going? Tell me a topic you're finding difficult and let's break it down together."),
+    (r"^(who are you|what are you|what'?s your name|who made you|are you (a )?(human|robot|bot|ai)|introduce yourself)\b[\s\W]{0,15}$",
+     "I'm GC AI - your AI study companion built to help you prepare for GCE O Level, "
+     "A Level, HND and Concours exams. I explain topics step by step, solve problems, "
+     "and I actually learn from every question students ask me. Try me with any topic!"),
+    (r"^(bye+|goodbye|good ?night|see you|later|à bientôt|au revoir)[\s\W]{0,10}$",
+     "Goodbye and happy studying! 📚 Remember: consistent practice is the secret to "
+     "exam success. I'll be right here whenever you need help."),
+    (r"^(ok(ay)?|alright|cool|nice|great|wow|interesting|lol|haha+|hmm+)[\s\W]{0,10}$",
+     "Got it! 😄 Whenever you're ready, send me a topic or problem - for example "
+     "\"Explain differentiation from first principles\" or \"Solve x² + 3x + 2 = 0\"."),
+]
+
+
+def detect_small_talk(question: str) -> Optional[str]:
+    """Detect greetings/small talk and return an instant local answer.
+
+    Prevents the AI from searching the web or calling an LLM for 'hi'.
+    """
+    q = normalize_text(question).strip()
+    if not q or len(q) > 60:
+        return None
+    for pattern, response in _SMALL_TALK_RULES:
+        if re.match(pattern, q):
+            return response
+    return None
+
+
+# ------------------------------------------------------------
 # 2. KNOWLEDGE BASE (MongoDB, TF-IDF cosine matching)
 # ------------------------------------------------------------
 
@@ -217,6 +259,10 @@ class KnowledgeBase:
 
         best, best_score = None, 0.0
         for e in entries:
+            # Skip junk entries (e.g. one-word greetings accidentally
+            # stored): real knowledge entries always have 3+ terms.
+            if len(e.get("tf", {})) < 3:
+                continue
             e_tfidf = tfidf(Counter(e.get("tf", {})))
             e_norm = math.sqrt(sum(v * v for v in e_tfidf.values())) or 1.0
             common = set(q_tfidf) & set(e_tfidf)
@@ -378,6 +424,36 @@ async def _call_openrouter(model: str, prompt: str, system: str,
     return None
 
 
+async def _call_pollinations(prompt: str, system: str,
+                             max_tokens: int, timeout: float) -> Optional[str]:
+    """Keyless free LLM (Pollinations.ai) - needs NO API key at all.
+
+    This is GC AI's always-available safety net so it can keep giving
+    full tutor answers even when OpenRouter and Gemini are both down.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                "https://text.pollinations.ai/",
+                json={
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "model": "openai",
+                    "max_tokens": max_tokens,
+                },
+            )
+            if resp.status_code == 200:
+                text = resp.text.strip()
+                if text and not text.startswith("<"):
+                    return text
+            logger.warning(f"Pollinations -> {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Pollinations error: {e}")
+    return None
+
+
 async def _call_gemini(prompt: str, system: str,
                        max_tokens: int, timeout: float) -> Optional[str]:
     """Direct Google Gemini call - fully independent of OpenRouter."""
@@ -415,6 +491,12 @@ async def call_llm(prompt: str, system: Optional[str] = None,
     """
     sys = system or FALLBACK_SYSTEM
 
+    # Provider 1: keyless Pollinations - always available, no API key needed
+    text = await _call_pollinations(prompt, sys, max_tokens, timeout)
+    if text:
+        return text, "pollinations"
+
+    # Provider 2: Google Gemini (independent of OpenRouter)
     text = await _call_gemini(prompt, sys, max_tokens, timeout)
     if text:
         return text, "google-gemini"
@@ -444,6 +526,7 @@ async def answer_question(db, question: str, subject: str = "General",
                           use_local_solver=None) -> Dict:
     """The full GC AI brain:
 
+    0. Small talk (greetings, thanks, identity) - instant, local.
     1. Local math solver (sympy) - instant, offline.
     2. Knowledge base lookup - instant, learned from before.
     3. Web research (Google/DuckDuckGo) + LLM synthesis - learns and stores.
@@ -452,6 +535,12 @@ async def answer_question(db, question: str, subject: str = "General",
     Returns {"answer", "source", "learned"}.
     """
     result: Dict = {"answer": "", "source": "", "learned": False}
+
+    # --- Step 0: small talk - answer instantly, no LLM/web needed ---
+    small_talk = detect_small_talk(question)
+    if small_talk:
+        result.update(answer=small_talk, source="small_talk")
+        return result
 
     # --- Step 1: local symbolic math solver -------------------
     if use_local_solver:
@@ -479,7 +568,10 @@ async def answer_question(db, question: str, subject: str = "General",
 
     # --- Step 3: web research, then LLM synthesis -------------
     research, found = "", False
-    if allow_web_learning:
+    # Only research questions with real content - never search one-word
+    # greetings or chit-chat ("hi", "ok", "thanks").
+    meaningful = len(extract_keywords(question, max_keywords=12))
+    if allow_web_learning and meaningful >= 2:
         try:
             research, found = await research_context(question)
         except Exception as e:
