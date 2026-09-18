@@ -794,13 +794,21 @@ function cleanSolutionText(value: unknown): string {
 }
 
 function normalizeScenes(input: Scene[] | undefined): Scene[] {
-    return (input || []).map((item) => {
-        const board = (item.board || [])
+    const list = Array.isArray(input) ? input : [];
+    return list.map((item) => {
+        // board/narration are not guaranteed to be arrays — the model (and the
+        // backend cache) can hand back a plain string or a nested object.
+        const rawBoard: unknown[] = Array.isArray((item as any)?.board)
+            ? (item as any).board
+            : typeof (item as any)?.board === 'string'
+                ? [(item as any).board]
+                : [];
+        const board = rawBoard
             .flatMap((line) => cleanSolutionText(line).split(/\r?\n/))
             .filter(Boolean);
-        const narration = cleanSolutionText(item.narration);
+        const narration = cleanSolutionText((item as any)?.narration);
         return {
-            heading: cleanSolutionText(item.heading),
+            heading: cleanSolutionText((item as any)?.heading),
             board,
             narration: narration || board.join('. '),
         };
@@ -823,8 +831,8 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
     // Animated values for each board line (slide + opacity)
     const lineAnims = useRef<Animated.Value[]>([]);
 
-    const autoAdvanceTimer = useRef<NodeJS.Timeout | null>(null);
-    const progressInterval = useRef<NodeJS.Timeout | null>(null);
+    const autoAdvanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const progressInterval = useRef<ReturnType<typeof setTimeout> | null>(null);
     const playbackGeneration = useRef(0);
 
     const clearPlaybackTimers = useCallback(() => {
@@ -1228,9 +1236,7 @@ export function VideoSolutionPlayer({ scenes, title, question, onClose }: VideoS
 
                 {/* Generic progress bar (web uses same for tts/timer) */}
                 <View style={styles.progressBarBottom}>
-                    <View style={styles.progressBarTrack}>
-                        <View style={[styles.progressFillBottom, { width: `${Math.min(progress, 100)}%` }]} />
-                    </View>
+                    <View style={[styles.progressFillBottom, { width: `${Math.min(progress, 100)}%` }]} />
                 </View>
 
                 {/* Scene labels (start / end) */}

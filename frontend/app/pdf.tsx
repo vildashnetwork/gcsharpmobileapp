@@ -712,16 +712,42 @@ function readableSolutionText(value: unknown): string[] {
   return [String(value)];
 }
 /**
+ * Builds one speakable/readable line from a video scene. The backend returns
+ * scenes shaped {heading, board, narration}, but board/narration can arrive as
+ * objects, arrays, or JSON strings — never assume they are arrays.
+ */
+function sceneLine(scene: any): string {
+  if (!scene) return "";
+  if (typeof scene === "string") return scene;
+
+  const narration =
+    typeof scene.narration === "string" ? scene.narration.trim() : "";
+  if (narration) return narration;
+
+  const board = Array.isArray(scene.board)
+    ? scene.board
+    : typeof scene.board === "string"
+      ? [scene.board]
+      : [];
+  const boardText = board
+    .map((line: unknown) => readableSolutionText(line).join(" "))
+    .filter(Boolean)
+    .join(". ");
+  if (boardText) return boardText;
+
+  return readableSolutionText(scene.narration).join(" ");
+}
+
+
+/**
  * The QA endpoint returns raw model output, so `steps` can arrive missing, as
  * a plain string, or as an object. Normalising here keeps every render path
  * (list + "read aloud") crash-proof instead of trusting the payload shape.
  */
-type QaItemSafe = { number: string; question: string; steps: string[]; answer: string };
-
-function normalizeQaItems(items: unknown): QaItemSafe[] {
+function normalizeQaItems(items: unknown): QaItem[] {
   if (!Array.isArray(items)) return [];
   return items
-    .map((raw, index): QaItemSafe => {
+    .map((raw, index): QaItem => {
       const data = (raw && typeof raw === 'object' && !Array.isArray(raw))
         ? (raw as Record<string, unknown>)
         : ({} as Record<string, unknown>);
@@ -941,8 +967,8 @@ export default function PdfViewer() {
     setQaLoading(true);
     setQaItems([]);
     try {
-      const data = await api<{ items?: QaItem[] }>(`/papers/${paper_id}/qa`, { method: 'POST' });
-      setQaItems(data.items || []);
+      const data = await api<{ items?: unknown[] }>(`/papers/${paper_id}/qa`, { method: 'POST' });
+      setQaItems(normalizeQaItems(data?.items));
       setShowQaModal(true);
     } catch (e) {
       // toast error
@@ -1225,15 +1251,17 @@ export default function PdfViewer() {
     }
         setSpeaking(true);
     // Build narration from scenes, steps, or narration — whichever is available.
+    // Every field is coerced defensively: the backend returns scenes (not steps),
+    // and board/narration can arrive as objects or strings rather than arrays.
     const parts: string[] = [];
-    if (solution.narration) parts.push(solution.narration);
-    if (solution.scenes?.length) {
-      parts.push(...solution.scenes.map((s: any) =>
-        humanize(s.narration || (s.board || []).join(" "))
-      ));
+    if (solution.narration) parts.push(humanize(solution.narration));
+    if (Array.isArray(solution.scenes) && solution.scenes.length) {
+      parts.push(...solution.scenes.map((s: any) => humanize(sceneLine(s))));
     }
-    if (solution.steps?.length) {
-      parts.push(...solution.steps.map((s: any) => `${s.heading || ""}. ${s.body || ""}`));
+    if (Array.isArray(solution.steps) && solution.steps.length) {
+      parts.push(...solution.steps.map((s: any) =>
+        humanize(`${s?.heading ?? ""}. ${s?.body ?? ""}`)
+      ));
     }
     const text = humanize(parts.filter(Boolean).join(" "));
     if (!text) { setSpeaking(false); return; }
@@ -1246,9 +1274,9 @@ export default function PdfViewer() {
   // ---- Read a single QA item aloud (question + steps + answer) ----
   const speakQaItem = (item: QaItem) => {
     if (voice.speaking) { voice.stopSpeaking(); return; }
-    const parts = [item.question];
-    item.steps.forEach((step, i) => parts.push(`Step ${i + 1}. ${step}`));
-    parts.push(`Answer: ${item.answer}`);
+    const parts = [humanize(item.question)];
+    (item.steps || []).forEach((step, i) => parts.push(`Step ${i + 1}. ${humanize(step)}`));
+    if (item.answer) parts.push(`Answer: ${humanize(item.answer)}`);
     const text = parts.join(". ");
     setSpeaking(true);
     voice.speak(text).catch(() => {
@@ -1256,7 +1284,27 @@ export default function PdfViewer() {
     });
   };
 
-  // Auto-speak the most recent assistant reply while a video solution is open
+  // ---- Read the whole generated video solution (Paper 2) aloud ----
+  const speakVideoSolution = () => {
+    if (speaking || voice.speaking) {
+      voice.stopSpeaking();
+      Speech.stop();
+      setSpeaking(false);
+      return;
+    }
+    const parts: string[] = [];
+    const scenes = Array.isArray(videoData?.scenes) ? videoData!.scenes : [];
+    scenes.forEach((s) => {
+      const line = humanize(sceneLine(s));
+      if (line) parts.push(line);
+    });
+    const text = parts.join(" ").trim();
+    if (!text) return;
+    setSpeaking(true);
+    voice.speak(text).catch(() => {
+      Speech.speak(text, { rate: 0.95 });
+    });
+  };
   useEffect(() => {
     if (!autoRead || !solution || voice.speaking) return;
     speakSolution();
@@ -1546,10 +1594,10 @@ export default function PdfViewer() {
             )}
             {solution && (
               <VideoSolutionPlayer
-                scenes={solution.scenes || solution.steps?.map((step: any) => ({
-                  heading: humanize(step.heading),
-                  board: readableSolutionText(step.body).map((line) => humanize(line)),
-                  narration: readableSolutionText(step.body).map((line) => humanize(line)).join('. '),
+                scenes={solution.scenes || (solution.steps || []).map((step: any) => ({
+                  heading: humanize(step?.heading || ""),
+                  board: readableSolutionText(step?.body).map((line) => humanize(line)),
+                  narration: readableSolutionText(step?.body).map((line) => humanize(line)).join('. '),
                 })) || []}
                 title={solution.title}
                 question={solution.question || videoOpen?.text}
@@ -1567,13 +1615,16 @@ export default function PdfViewer() {
             <Text style={[styles.sheetTitle, { marginBottom: 0 }]}>{t.pdf.videoSolution}</Text>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
               <Pressable
-                onPress={() => voice.speak(videoData?.scenes?.map(s => s.narration).join(". ") || "")
-                  .catch(() => Speech.speak(videoData?.scenes?.map(s => s.narration).join(". ") || "", { rate: 0.95 }))}
+                onPress={speakVideoSolution}
                 testID="speak-video-btn"
                 style={{ padding: 4 }}
-                accessibilityLabel="Read video solution aloud"
+                accessibilityLabel={speaking || voice.speaking ? "Stop narration" : "Read video solution aloud"}
               >
-                <Ionicons name="volume-high-outline" size={22} color={theme.brandPrimary} />
+                <Ionicons
+                  name={speaking || voice.speaking ? "pause" : "volume-high-outline"}
+                  size={22}
+                  color={theme.brandPrimary}
+                />
               </Pressable>
               <Pressable onPress={() => setShowVideoModal(false)} testID="close-video-full">
                 <Ionicons name="close" size={22} color={theme.onSurface} />
@@ -1608,10 +1659,12 @@ export default function PdfViewer() {
                 <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.qaQuestion}>Q{item.number}. {item.question}</Text>
-                    {item.steps.map((step, j) => (
+                    {(item.steps || []).map((step, j) => (
                       <Text key={j} style={styles.qaStep}>{j + 1}. {step}</Text>
                     ))}
-                    <Text style={styles.qaAnswer}>{t.pdf.answer}: {item.answer}</Text>
+                    {!!item.answer && (
+                      <Text style={styles.qaAnswer}>{t.pdf.answer}: {item.answer}</Text>
+                    )}
                   </View>
                   <Pressable
                     onPress={() => speakQaItem(item)}

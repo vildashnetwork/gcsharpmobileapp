@@ -3469,29 +3469,62 @@ async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retr
     logger.error(f"AI JSON generation failed for key '{required_key}'. Last raw (truncated): {last_resp[:500]!r}")
     raise ValueError(f"Could not get valid JSON with key '{required_key}' from AI")
 
+def _as_text(value, limit: int = 900) -> str:
+    """Coerce any model-returned value into a plain string.
+
+    Models sometimes answer with a nested object or list where a string is
+    expected; slicing/joining those directly raised TypeError -> HTTP 500.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value[:limit]
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return str(value)[:limit]
+    if isinstance(value, (list, tuple)):
+        return " ".join(_as_text(v, limit) for v in value).strip()[:limit]
+    if isinstance(value, dict):
+        for key in ("text", "body", "narration", "explanation", "answer", "result", "solution", "content"):
+            found = _as_text(value.get(key), limit)
+            if found:
+                return found
+        return " ".join(_as_text(v, limit) for v in value.values()).strip()[:limit]
+    return str(value)[:limit]
+
+
 def _normalise_video_scenes(raw_scenes: list, limit: int = 6) -> list:
     """Coerce model output into the {heading, board, narration, audio} shape.
 
     Models sometimes return scenes as plain strings or with missing keys;
     without this the endpoint crashed with AttributeError -> HTTP 500.
     """
+    if not isinstance(raw_scenes, (list, tuple)):
+        return []
     scenes = []
-    for i, sc in enumerate(raw_scenes[:limit]):
+    for i, sc in enumerate(list(raw_scenes)[:limit]):
         if isinstance(sc, str):
             sc = {"heading": f"Step {i+1}", "board": [sc], "narration": sc}
         elif not isinstance(sc, dict):
             continue
-        narration = (sc.get("narration") or sc.get("text") or sc.get("heading") or "")[:900]
+        narration = _as_text(sc.get("narration") or sc.get("text") or sc.get("heading"), 900)
         board = sc.get("board") or sc.get("lines") or []
         if isinstance(board, str):
             board = [board]
-        board = [str(line)[:300] for line in board][:8]
+        elif isinstance(board, dict):
+            board = list(board.values())
+        elif not isinstance(board, (list, tuple)):
+            board = [board] if board else []
+        board = [_as_text(line, 300) for line in board]
+        board = [line for line in board if line][:8]
         if not narration and not board:
             continue
+        heading = _as_text(sc.get("heading"), 120) or f"Step {i+1}"
         scenes.append({
-            "heading": sc.get("heading", f"Step {i+1}"),
+            "heading": heading,
             "board": board,
-            "narration": narration,
+            "narration": narration or " ".join(board),
             "audio": "",
         })
     return scenes
