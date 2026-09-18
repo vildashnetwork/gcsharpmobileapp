@@ -2871,6 +2871,41 @@ async def ai_voice(req: VoiceRequest, user: dict = Depends(get_current_user)):
     return payload
 
 
+@api_router.post("/ai/transcribe")
+async def ai_transcribe(
+    file: UploadFile = File(...),
+    lang: str = Form("en-US"),
+    user: dict = Depends(get_current_user),
+):
+    """Recorded voice -> text (speech to text) for voice chat.
+
+    Accepts the phone's recording (m4a/aac/3gp/wav/ogg/flac) as multipart
+    `file`. Transcodes server-side and transcribes with keyless Google
+    Speech, falling back to Gemini when configured. Never raises for a
+    failed recognition - returns {"text": ""} so the app can ask again.
+    """
+    try:
+        raw = await file.read()
+    except Exception:
+        raw = b""
+    if not raw:
+        return {"text": "", "engine": None, "fallback": True}
+
+    try:
+        out = await gc_ai.transcribe_audio(
+            raw, filename=file.filename or "clip.m4a", lang=lang or "en-US"
+        )
+    except Exception as e:
+        logger.warning(f"transcribe failed: {e}")
+        out = None
+
+    if not out or not out.get("text"):
+        return {"text": "", "engine": None, "fallback": True,
+                "message": "I could not hear that clearly - please try again."}
+    return {"text": out["text"], "engine": out.get("engine", "google"),
+            "confidence": out.get("confidence", 0.0), "fallback": False}
+
+
 # ============================================================
 # GC AI KNOWLEDGE BASE - learning memory endpoints
 # ============================================================

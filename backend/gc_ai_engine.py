@@ -688,6 +688,197 @@ async def synthesize_speech(text: str, voice: str = "female",
 
     return None
 
+
+# ------------------------------------------------------------
+# 3b. SPEECH-TO-TEXT (voice input) - keyless, works in Expo Go
+# ------------------------------------------------------------
+
+# Public Chromium speech key: the one the browser itself ships with, so it
+# needs no signup. Used as the fast primary tier for voice input.
+_GOOGLE_PUBLIC_SPEECH_KEY = os.environ.get(
+    "GOOGLE_SPEECH_PUBLIC_KEY",
+    "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw",
+)
+_GOOGLE_SPEECH_URL = "https://www.google.com/speech-api/v2/recognize"
+
+_FFMPEG_EXE: Optional[str] = None
+_FFMPEG_CHECKED = False
+
+
+def _ffmpeg_exe() -> Optional[str]:
+    """Locate an ffmpeg binary (imageio-ffmpeg wheel first, then PATH)."""
+    global _FFMPEG_EXE, _FFMPEG_CHECKED
+    if _FFMPEG_CHECKED:
+        return _FFMPEG_EXE
+    _FFMPEG_CHECKED = True
+    try:
+        import imageio_ffmpeg
+        _FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+        return _FFMPEG_EXE
+    except Exception:
+        pass
+    from shutil import which
+    _FFMPEG_EXE = which("ffmpeg")
+    if not _FFMPEG_EXE:
+        logger.warning("ffmpeg not found - voice input needs imageio-ffmpeg")
+    return _FFMPEG_EXE
+
+
+def _transcode_to_flac(data: bytes, suffix: str = ".m4a") -> Optional[bytes]:
+    """Phone M4A / AAC / OGG / WAV / 3GP -> 16 kHz mono FLAC (in memory)."""
+    exe = _ffmpeg_exe()
+    if not exe:
+        return None
+    import subprocess
+    import tempfile
+    src = dst = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+            fh.write(data)
+            src = fh.name
+        dst = tempfile.mktemp(suffix=".flac")
+        proc = subprocess.run(
+            [exe, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
+             "-ac", "1", "-ar", "16000", "-f", "flac", dst],
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            logger.warning(f"ffmpeg transcode failed: {proc.stderr[-200:]!r}")
+            return None
+        with open(dst, "rb") as fh:
+            out = fh.read()
+        return out or None
+    except Exception as e:
+        logger.warning(f"ffmpeg transcode error: {e}")
+        return None
+    finally:
+        for path in (src, dst):
+            if path:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+
+def _parse_google_speech(body: str) -> Optional[Dict]:
+    """Google streams newline-delimited JSON; keep the best-confidence alt."""
+    best: Optional[Dict] = None
+    for line in (body or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        for result in payload.get("result") or []:
+            alts = result.get("alternative") or []
+            if not alts:
+                continue
+            top = alts[0]
+            text = (top.get("transcript") or "").strip()
+            if not text:
+                continue
+            conf = float(top.get("confidence") or 0.0)
+            if best is None or conf >= best["confidence"]:
+                best = {"text": text, "confidence": conf}
+    return best
+
+
+async def _google_speech_stt(flac: bytes, lang: str = "en-US",
+                            timeout: float = 45.0) -> Optional[Dict]:
+    """Keyless Google speech recognition (no API key, no signup)."""
+    headers = {
+        "Content-Type": "audio/x-flac; rate=16000",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                _GOOGLE_SPEECH_URL,
+                params={"client": "chromium", "lang": lang or "en-US",
+                        "key": _GOOGLE_PUBLIC_SPEECH_KEY, "pfilter": "0"},
+                content=flac, headers=headers,
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Google STT -> {resp.status_code}")
+            return None
+        hit = _parse_google_speech(resp.text)
+        if hit:
+            hit["engine"] = "google"
+        return hit
+    except Exception as e:
+        logger.warning(f"Google STT error: {e}")
+        return None
+
+
+async def _gemini_stt(data: bytes, mime: str = "audio/mp4",
+                      timeout: float = 60.0) -> Optional[Dict]:
+    """Gemini audio transcription - used when GEMINI_API_KEY is configured."""
+    if not GEMINI_API_KEY:
+        return None
+    import base64 as _b64
+    model = os.environ.get("GEMINI_STT_MODEL", "gemini-2.5-flash")
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                f"{GEMINI_BASE}/models/{model}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"parts": [
+                        {"text": "Transcribe this audio verbatim. Output ONLY the "
+                                 "spoken words as plain text with no commentary. "
+                                 "If there is no clear speech, output nothing."},
+                        {"inlineData": {"mimeType": mime or "audio/mp4",
+                                        "data": _b64.b64encode(data).decode()}},
+                    ]}],
+                    "generationConfig": {"temperature": 0},
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Gemini STT -> {resp.status_code}")
+            return None
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        text = re.sub(r"\s+", " ", text or "").strip().strip('"')
+        if not text:
+            return None
+        return {"text": text, "confidence": 0.95, "engine": "gemini"}
+    except Exception as e:
+        logger.warning(f"Gemini STT error: {e}")
+        return None
+
+
+async def transcribe_audio(data: bytes, filename: str = "clip.m4a",
+                           lang: str = "en-US") -> Optional[Dict]:
+    """Recorded voice -> text. Returns {"text", "confidence", "engine"}.
+
+    Tier 1: keyless Google Speech (needs a FLAC/16k stream via ffmpeg) - the
+            fast path, typically under a second.
+    Tier 2: Gemini (when GEMINI_API_KEY is set) - takes the phone's container
+            untouched, so voice still works if ffmpeg is unavailable.
+    Returns None only when every recogniser failed.
+    """
+    if not data or len(data) < 1200:
+        return None
+    suffix = os.path.splitext(filename or "")[1].lower() or ".m4a"
+    mime = {
+        ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".aac": "audio/aac",
+        ".3gp": "audio/3gpp", ".caf": "audio/x-caf", ".wav": "audio/wav",
+        ".ogg": "audio/ogg", ".opus": "audio/ogg", ".webm": "audio/webm",
+        ".flac": "audio/flac", ".mp3": "audio/mpeg",
+    }.get(suffix, "audio/mp4")
+
+    # Tier 1: keyless Google Speech (fast)
+    flac = data if suffix == ".flac" else _transcode_to_flac(data, suffix)
+    if flac:
+        hit = await _google_speech_stt(flac, lang=lang or "en-US")
+        if hit:
+            return hit
+
+    # Tier 2: Gemini (robust, no transcoding needed)
+    return await _gemini_stt(data, mime=mime)
+
+
 # ------------------------------------------------------------
 # 4. MULTI-PROVIDER LLM LAYER (Gemini + OpenRouter chain)
 # ------------------------------------------------------------
