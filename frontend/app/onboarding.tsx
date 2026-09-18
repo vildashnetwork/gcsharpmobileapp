@@ -315,8 +315,8 @@ import { api, readToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 
 // ---------- Constants ----------
-const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
-const SUBJECTS = ["Others","Mathematics", "Physics", "Chemistry", "Biology", "English Language", "French", "Economics", "Computer Science", "Accounting", "Literature"];
+const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours", "ITVEE", "ATVEE",];
+const SUBJECTS = ["Others", "Mathematics", "Physics", "Chemistry", "Biology", "English Language", "French", "Economics", "Computer Science", "Accounting", "Literature"];
 const COMMIT = ["15 mins", "30 mins", "1 hour", "2+ hours"];
 const PROF = ["Beginner", "Intermediate", "Advanced"];
 const STYLE = ["Visual", "Auditory", "Reading", "Kinesthetic"];

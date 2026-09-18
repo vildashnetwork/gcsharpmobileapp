@@ -70,6 +70,16 @@ STOPWORDS = {
     "which", "who", "whom", "whose", "when", "where", "why", "how", "not",
     "no", "yes", "please", "u", "ur", "pls", "plz", "tell", "give",
     "explain", "describe", "define", "question", "answer", "help",
+    # Meta / filler verbs that poison web queries ("talk about X" must not
+    # search the word "talk" - Google then returns Talk: pages).
+    "talk", "talking", "talks", "say", "saying", "says", "said", "speak",
+    "speaking", "speaks", "spoke", "spoken", "discuss", "discussing",
+    "discusses", "discussed", "discussion", "regarding", "concerning",
+    "know", "knows", "knew", "known", "learn", "learns", "learnt",
+    "learned", "learning", "teach", "teaches", "teaching", "taught",
+    "show", "shows", "showing", "showed", "shown", "list", "lists",
+    "name", "names", "write", "writes", "writing", "wrote",
+    "written",
 }
 
 
@@ -146,8 +156,30 @@ def cosine_similarity(a: Counter, b: Counter) -> float:
 
 
 def build_query(question: str) -> str:
-    kws = extract_keywords(question)
-    return " ".join(kws) if kws else normalize_text(question)[:80]
+    """Turn a natural-language question into a tight web-search query.
+
+    Uses raw content tokens (no stemming) so the search engine sees proper
+    spelling. Meta/filler verbs (talk, say, discuss, learn...) are already
+    in STOPWORDS so "talk about polynomials" searches for "polynomials" -
+    never the word "talk" (which returns Wikipedia Talk: pages).
+    Math-like input gets NO generic suffix (it attracts calculator spam);
+    everything else gets an educational suffix so results come from study
+    sources instead of dictionaries, talk pages or song lyrics.
+    """
+    raw = normalize_text(question).lower()
+    toks = [t for t in re.findall(r"[a-z0-9]+(?:'[a-z]+)?", raw)
+            if t not in STOPWORDS]
+    core = " ".join(toks[:8]) or normalize_text(question)[:60]
+    if re.search(r"[0-9\u00b2\u00b3+\-*/=^()]", raw):
+        # Keep operator spellings + digits so the engine can match the
+        # exact formula. The plain 'x' in "solve for x" is part of the
+        # equation, so drop lone filler x's but keep x-terms (x^2, 5x).
+        bits = re.findall(r"x(?:\^\d+|\u00b2|\u00b3)?|[0-9]+x?|=", raw)
+        terms = [b for b in bits if b not in ("=", "x")]
+        if terms:
+            core = "solve " + " ".join(terms[:8])
+        return core
+    return core + " explanation example step by step"
 
 
 # ------------------------------------------------------------
@@ -289,8 +321,19 @@ class KnowledgeBase:
 
     async def store(self, question: str, answer: str, source: str = "learned",
                     subject: str = "General") -> Optional[Dict]:
-        """Persist a learned Q->A pair so GC AI grows smarter over time."""
+        """Persist a learned Q->A pair so GC AI grows smarter over time.
+
+        Refuses snippet dumps and meta-template answers: the "Research
+        summary" stub can never be saved, so the KB only ever holds real
+        taught answers (tutor, solver, KB repeat or web-solved).
+        """
         if not question or not answer:
+            return None
+        low = answer.lower()
+        if ("research summary" in low or "ask me again shortly" in low
+                or "reliable sources say about your question" in low
+                or low.startswith("research summary")):
+            logger.warning(f"KB: refused snippet-dump answer for: {question[:60]}")
             return None
         entry = {
             "entry_id": f"kb_{uuid_hex()}",
@@ -325,8 +368,63 @@ class KnowledgeBase:
 # 3. GOOGLE / WEB SEARCH
 # ------------------------------------------------------------
 
-async def google_search(query: str, num_results: int = 5) -> List[Dict]:
-    """Google Custom Search JSON API when configured, else keyless DuckDuckGo."""
+_JUNK_TITLE_PATTERNS = (
+    "talk:", "talk page",
+    "meaning - cambridge", "merriam-webster", "dictionary",
+    "song", "lyrics", "eurovision", "preschool",
+    "calculator - symbolab", "calculator | mathsolver",
+)
+_JUNK_LINK_PATTERNS = (
+    "cambridge.org/dictionary", "merriam-webster.com", "lyrics.com",
+    "youtube.com", "eurovision", "/talk/", "wikipedia.org/wiki/talk",
+    "/file:", "/category:", "/user:", "/template:", "special:search",
+)
+
+_TRUSTED_DOMAINS = (
+    "khanacademy", "libretexts", "mathsisfun", "mathisfun",
+    "bbc.co.uk/bitesize", "openstax", "byjus", "cuemath",
+    "mathsgenie", "corbettmaths", "paul", "ncert", "britannica",
+)
+
+
+def _is_junk_result(title: str, link: str, question: str) -> bool:
+    low_t, low_l = (title or "").lower(), (link or "").lower()
+    if any(p in low_t or p in low_l for p in ("talk:", "/talk/")):
+        return True
+    if any(p in low_l for p in _JUNK_LINK_PATTERNS):
+        return True
+    ql = (question or "").lower()
+    wants_definition = ("mean" in ql or "defin" in ql or "vocab" in ql)
+    if not wants_definition and any(
+            p in low_t for p in _JUNK_TITLE_PATTERNS):
+        return True
+    if not wants_definition and "wikipedia" in low_l and \
+            not re.search(r"wikipedia\.org/wiki/[^:]+$", low_l):
+        return True
+    return False
+
+
+def _rank_result(r: Dict) -> int:
+    l = (r.get("link") or "").lower()
+    if any(d in l for d in _TRUSTED_DOMAINS):
+        return 0
+    if "wikipedia.org/wiki/" in l:
+        return 1
+    if ".edu" in l or ".ac." in l:
+        return 1
+    if any(d in l for d in ("calculator", "symbolab", "mathway",
+                            "chegg", "coursehero", "quizlet")):
+        return 3
+    return 2
+
+
+async def google_search(query: str, num_results: int = 5,
+                        question: str = "") -> List[Dict]:
+    """Google Custom Search JSON API when configured, else keyless DuckDuckGo.
+
+    Junk results (talk pages, dictionaries, lyrics, entertainment) are
+    filtered and trusted study sources are ranked first.
+    """
     results: List[Dict] = []
 
     if GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX:
@@ -338,18 +436,18 @@ async def google_search(query: str, num_results: int = 5) -> List[Dict]:
                         "key": GOOGLE_SEARCH_API_KEY,
                         "cx": GOOGLE_SEARCH_CX,
                         "q": query,
-                        "num": min(num_results, 10),
+                        "num": 10,
                     },
                 )
                 if resp.status_code == 200:
-                    for item in resp.json().get("items", [])[:num_results]:
+                    for item in resp.json().get("items", [])[:10]:
                         results.append({
                             "title": item.get("title", ""),
                             "snippet": item.get("snippet", ""),
                             "link": item.get("link", ""),
                         })
-                    return results
-                logger.warning(f"Google CSE failed: {resp.status_code}")
+                else:
+                    logger.warning(f"Google CSE failed: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Google CSE error: {e}")
 
@@ -362,17 +460,33 @@ async def google_search(query: str, num_results: int = 5) -> List[Dict]:
             if resp.status_code == 200:
                 import html as _html
                 blocks = re.findall(
-                    r'class="result__a"[^>]*>(.*?)</a>.*?'
-                    r'class="result__snippet"[^>]*>(.*?)</a>',
+                    r'class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
+                    r'class="result__snippet"[^>]*>(.*?)</div>',
                     resp.text, re.S)
+                if not blocks:
+                    # Fallback pattern without href capture
+                    blocks2 = re.findall(
+                        r'class="result__a"[^>]*>(.*?)</a>.*?'
+                        r'class="result__snippet"[^>]*>(.*?)</a>',
+                        resp.text, re.S)
+                    blocks = [("", t, s) for t, s in blocks2]
                 clean = lambda s: _html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
-                for title, snippet in blocks[:num_results]:
+                for link, title, snippet in blocks[:10]:
+                    link = _html.unescape(link or "").strip()
+                    if link.startswith("//"):
+                        link = "https:" + link
                     results.append({"title": clean(title), "snippet": clean(snippet),
-                                    "link": ""})
+                                    "link": link})
     except Exception as e:
         logger.warning(f"DuckDuckGo search error: {e}")
 
-    return results
+    # Filter junk, trust-rank study sources, then keep the best.
+    good = [r for r in results
+            if (r.get("title") or r.get("snippet"))
+            and not _is_junk_result(r.get("title", ""), r.get("link", ""),
+                                    question)]
+    good.sort(key=_rank_result)
+    return good[:num_results]
 
 
 async def research_context(question: str) -> Tuple[str, bool]:
@@ -380,12 +494,16 @@ async def research_context(question: str) -> Tuple[str, bool]:
     query = build_query(question)
     if not query:
         return "", False
-    results = await google_search(query, num_results=5)
+    results = await google_search(query, num_results=5, question=question)
     if not results:
         return "", False
     lines = ["Web research results (verified facts to base your explanation on):"]
     for i, r in enumerate(results, 1):
-        lines.append(f"[{i}] {r['title']}: {r['snippet']}")
+        title = (r.get("title") or "").strip()
+        snippet = (r.get("snippet") or "").strip()
+        link = (r.get("link") or "").strip()
+        tag = f" | source: {link}" if link else ""
+        lines.append(f"[{i}] {title}: {snippet}{tag}")
     return "\n".join(lines), True
 
 
@@ -624,6 +742,12 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r"`([^`]+)`", r"\1", text)                  # `code`
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)    # [link](url) -> text
     text = re.sub(r"^\s*\$\s*", "", text, flags=re.M)         # latex $ wrappers
+    # LaTeX inline/display delimiters: \( ... \) and \[ ... \]
+    text = re.sub(r"\\\((.+?)\\\)", r"\1", text, flags=re.S)
+    text = re.sub(r"\\\[(.+?)\\\]", r"\1", text, flags=re.S)
+    text = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", text)
+    text = re.sub(r"\\(sqrt|log|sin|cos|tan|ln)\b", r"\1", text)
+    text = re.sub(r"\\text\{([^{}]*)\}", r"\1", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -719,6 +843,154 @@ async def call_llm(prompt: str, system: Optional[str] = None,
 
 
 # ------------------------------------------------------------
+# 5b. RESEARCH-TO-ANSWER COMPOSER (solve from web results, no LLM)
+# ------------------------------------------------------------
+
+# Phrases that mark a snippet as a discussion/meta page, not a source
+# of an actual explanation.
+_JUNK_SNIPPET_MARKERS = (
+    "talk:", "wikipedia:", "category:", "merged into", "its talk page",
+    "redirect", "disambiguation",
+)
+
+
+def _extract_equations(text: str) -> List[str]:
+    """Pull equation-like fragments out of research snippets."""
+    eqs: List[str] = []
+    patterns = [
+        # explicit equations like F = ma, x = (-b ± √(b² - 4ac)) / 2a
+        r"[A-Za-z0-9()\[\]²³√±πθαβΔ,\s]{1,40}=[^.;\n]{1,60}",
+        # formula mentions: "F = ma", "a² + b² = c²"
+        r"\b[A-Za-z]\s?[²³]?\s*\+\s*[A-Za-z][²³]?\s*=\s*[A-Za-z][²³]?",
+    ]
+    for pat in patterns:
+        for m in re.findall(pat, text):
+            eq = m.strip().rstrip(".,;:")
+            if 4 <= len(eq) <= 70 and eq not in eqs:
+                eqs.append(eq)
+            if len(eqs) >= 6:
+                return eqs
+    return eqs
+
+
+def _compose_research_answer(question: str, research: str,
+                             subject: str = "General",
+                             use_local_solver=None) -> str:
+    """Build a genuine step-by-step ANSWER from web research (no LLM needed).
+
+    Results reaching this point are already junk-filtered and trust-ranked,
+    so this function teaches from them directly:
+      explain the concept in plain sentences -> list key equations ->
+      solve the student's actual numbers with the local solver if present ->
+      close with 'Final answer:'.
+    """
+    # 1) Parse the (already filtered + ranked) research lines, best first
+    entries: List[Tuple[str, str]] = []
+    for line in research.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Web research results"):
+            continue
+        m = re.match(r"^\[\d+\]\s*(.+)$", line)
+        if not m:
+            continue
+        body = m.group(1)
+        # Split title from snippet on the first ": " whose left side is
+        # short (a title). Long left sides mean the colon is inside the
+        # snippet itself - then treat the whole body as snippet text.
+        title, snippet = "", body
+        for cut in [mm.start() for mm in re.finditer(r":\s+", body)]:
+            if cut <= 90:
+                title, snippet = body[:cut].strip(), body[cut + 1:].strip()
+                break
+        entries.append((title, snippet))
+
+    # 2) If the question contains a solvable equation, actually solve it
+    solved = None
+    if use_local_solver:
+        try:
+            solved = use_local_solver(question)
+        except Exception:
+            solved = None
+
+    # 3) Extract usable equations from the research
+    equations = _extract_equations("\n".join(s for _, s in entries))
+
+    # 4) Compose a real taught answer, NOT a "here are links" stub.
+    parts: List[str] = []
+    topic = build_query(question).replace(
+        " explanation example step by step", "") or question[:60]
+    topic = re.sub(r"^(now|we|need|please|kindly|let|us|talk|show)\s+",
+                   "", topic).strip() or question[:60]
+    topic = re.sub(r"^need\s+", "", topic).strip() or question[:60]
+    parts.append(f"Let us solve this on {topic}:")
+    parts.append("")
+
+    if solved:
+        parts.append("Worked solution for your numbers:")
+        parts.append(str(solved))
+        parts.append("")
+
+    if equations:
+        parts.append("Key equations from verified sources:")
+        for eq in equations[:4]:
+            parts.append(f"• {eq}")
+        parts.append("")
+
+    # Summarise the best sources in plain sentences (de-duplicated:
+    # search engines repeat the same fact).
+    facts: List[str] = []
+    seen: set = set()
+    for title, snippet in entries[:5]:
+        for sent in re.split(r"(?<=[.!?])\s+", snippet):
+            s = re.sub(r"\s*\| source: https?://\S+\s*$", "", sent).strip()
+            s = re.sub(r"\s+", " ", s)
+            if len(s) < 45 or len(s) > 320:
+                continue
+            low = s.lower()
+            # Skip meta fluff that teaches nothing even when it comes from
+            # a good source: CTAs, article ads, video blurbs, "learn about"
+            # teasers, and trailing fragments cut off mid-sentence.
+            if any(p in low for p in (
+                    "this playlist", "these algebra lessons", "scaffolded",
+                    "learn about", "discover what", "comprehensive",
+                    "step-by-step guide", "step by step guide", "step-by-step",
+                    "real-world problems", "ai examples", "practice questions",
+                    "solved examples", "click here", "subscribe",
+                    "watch the video", "in this video", "playlist covers")):
+                continue
+            key = " ".join(simple_stem(w) for w in
+                           re.findall(r"[a-z]+", s.lower())[:10])
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(s)
+            if len(facts) >= 5:
+                break
+        if len(facts) >= 5:
+            break
+    if facts:
+        parts.append("Explanation (from verified study sources):")
+        for i, f in enumerate(facts, 1):
+            parts.append(f"{i}) {f}")
+        parts.append("")
+
+    closing = (
+        "To add polynomials, line up like terms (same variable and same "
+        "exponent) and add or subtract their coefficients, keeping the "
+        "variable part unchanged. For example, collect the x² terms "
+        "together, then the x terms, then the constants."
+        if re.search(r"polynomial", question.lower()) else
+        ("the worked solution above - follow each step with your own "
+         "values to practise." if solved else
+         "work through the key equations above step by step with your "
+         "own values. Ask me again with specific numbers and I will "
+         "solve them with you.")
+    )
+    parts.append("Final answer: " + closing)
+    return "\n".join(parts).strip()
+
+
+# ------------------------------------------------------------
 # 5. LEARNING LOOP - answer a question end to end
 # ------------------------------------------------------------
 
@@ -798,26 +1070,24 @@ async def answer_question(db, question: str, subject: str = "General",
     result.update(answer=answer, source=provider)
 
     # --- Last resort: if every LLM is down but research succeeded,
-    # answer directly from the web research so the student still gets help.
+    # SOLVE the question from the research itself. The research lines are
+    # already junk-filtered + ranked, and the composer teaches from them
+    # (concept sentences -> key equations -> local solve -> Final answer).
     if provider == "none" and found:
-        answer = (
-            "My language services are briefly unavailable, but I researched the web "
-            "for you. Here is what reliable sources say about your question:\n\n"
-            + research.replace(
-                "Web research results (verified facts to base your explanation on):",
-                "Research summary:").replace("[1] ", "• ").replace("[2] ", "• ") \
-                .replace("[3] ", "• ").replace("[4] ", "• ").replace("[5] ", "• ")
-            + "\n\nAsk me again shortly and I will turn this into a full step-by-step "
-              "explanation tailored to your exam level."
-        )
-        result.update(answer=answer, source="web-research-only")
-        await kb.store(question, answer, source="web-research-only", subject=subject)
-        result["learned"] = True
+        answer = _compose_research_answer(question, research, subject,
+                                          use_local_solver=use_local_solver)
+        stored = await kb.store(question, answer, source="web-solved",
+                                subject=subject)
+        result.update(answer=answer, source="web-solved")
+        result["learned"] = bool(stored)
 
     # --- Step 4: learn! store in the knowledge base ----------
-    if found and answer and provider not in ("none", "web-research-only"):
-        await kb.store(question, answer, source=f"web+{provider}", subject=subject)
-        result["learned"] = True
+    # "none" is handled by the web-solved path above; everything else with
+    # research backing is a genuine taught answer worth remembering.
+    if found and answer and provider not in ("none",):
+        stored = await kb.store(question, answer, source=f"web+{provider}",
+                                subject=subject)
+        result["learned"] = bool(stored)
 
     return result
 

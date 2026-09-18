@@ -28,6 +28,7 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api, API_BASE, readToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { humanize } from "@/src/format";
+import { useGcVoice } from "@/src/hooks/useGcVoice";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.75, 300);
@@ -114,6 +115,10 @@ export default function AITutor() {
   const [feedbackModalIndex, setFeedbackModalIndex] = useState<number | null>(null);
   const [feedbackReason, setFeedbackReason] = useState("");
   const [thinkingStage, setThinkingStage] = useState(0);
+  // ---- GC AI Voice: talk to the tutor & hear human replies ----
+  const voice = useGcVoice();
+  const [autoSpeak, setAutoSpeak] = useState(false);
+  const lastSpokenRef = useRef<string>("");
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const seededRef = useRef(false);
@@ -367,6 +372,31 @@ export default function AITutor() {
                 if (receivedSessionId && !currentSessionId) {
                   setCurrentSessionId(receivedSessionId);
                 }
+                // Tag the reply with where the knowledge came from
+                if (data.source && fullReply) {
+                  const tags: Record<string, string> = {
+                    knowledge_base: "📚 Answered from GC AI's learned knowledge",
+                    web: "🌐 Verified with web research",
+                    local_solver: "🧮 Solved locally (instant)",
+                    "google-gemini": "✨ Powered by GC AI",
+                    pollinations: "✨ Powered by GC AI",
+                  };
+                  const tag = tags[data.source] ??
+                    (data.source?.startsWith("openrouter") ? "✨ Powered by GC AI"
+                      : data.learned ? "🌐 Learned from web research" : null);
+                  if (tag) {
+                    fullReply += `\n\n${tag}`;
+                    setMsgs((m) => {
+                      const last = m[m.length - 1];
+                      if (last && last.role === "assistant") {
+                        const updated = [...m];
+                        updated[updated.length - 1] = { ...last, content: fullReply };
+                        return updated;
+                      }
+                      return m;
+                    });
+                  }
+                }
               }
             } catch { }
           }
@@ -375,7 +405,7 @@ export default function AITutor() {
 
       // If no streaming data, fallback to /ai/explain
       if (!fullReply) {
-        setAiStatus("Trying another explanation service");
+        setAiStatus("Thinking with my own knowledge base");
         const fallbackRes = await fetch(`${API_BASE}/ai/explain`, {
           method: "POST",
           headers: {
@@ -434,11 +464,10 @@ export default function AITutor() {
       }
     } catch (e: any) {
       console.error("Chat error:", e);
-      let errorMsg = "AI unavailable. Please try again.";
+      // GC AI should never present a hard failure - offer graceful guidance.
+      let errorMsg = "I could not complete that answer just now. Please try again in a moment, or rephrase your question.";
       if (e.message?.includes("401") || e.message?.includes("Authentication")) {
         errorMsg = "Your session has expired. Please log in again.";
-      } else if (e.message) {
-        errorMsg = e.message;
       }
       setMsgs((m) => {
         const last = m[m.length - 1];
@@ -490,6 +519,41 @@ export default function AITutor() {
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 200);
     }
   }, [msgs]);
+
+  // ----- Voice mode: auto-speak each finished AI reply -----
+  useEffect(() => {
+    if (!autoSpeak || busy) return;
+    const last = msgs[msgs.length - 1];
+    if (
+      last &&
+      last.role === "assistant" &&
+      last.content &&
+      last.content !== lastSpokenRef.current &&
+      !last.content.startsWith("⚠️")
+    ) {
+      lastSpokenRef.current = last.content;
+      voice.speak(last.content);
+    }
+  }, [msgs, busy, autoSpeak]);
+
+  // ----- Voice mode: push mic transcript into the input -----
+  useEffect(() => {
+    if (voice.transcript) setText(voice.transcript);
+  }, [voice.transcript]);
+
+  /** Press the mic: start listening; when a sentence is final, send it. */
+  const handleVoicePress = () => {
+    if (voice.listening) {
+      voice.stopListening();
+      return;
+    }
+    if (voice.speaking) voice.stopSpeaking();
+    voice.startListening((finalText) => {
+      setText(finalText);
+      // slight delay lets state settle before sending
+      setTimeout(() => send(finalText), 250);
+    });
+  };
 
   // ----- Render message with humanize -----
   const renderMessage = (content: string, role: "user" | "assistant") => {
@@ -664,6 +728,21 @@ export default function AITutor() {
                         <Ionicons name="copy-outline" size={14} color={theme.onSurfaceMuted} />
                         <Text style={styles.copyInlineText}>Copy</Text>
                       </Pressable>
+                      <Pressable
+                        onPress={() =>
+                          voice.speaking ? voice.stopSpeaking() : voice.speak(m.content)
+                        }
+                        style={styles.copyInlineBtn}
+                      >
+                        <Ionicons
+                          name={voice.speaking ? "stop-circle-outline" : "volume-high-outline"}
+                          size={14}
+                          color={theme.brandPrimary}
+                        />
+                        <Text style={[styles.copyInlineText, { color: theme.brandPrimary }]}>
+                          {voice.speaking ? "Stop" : "Listen"}
+                        </Text>
+                      </Pressable>
                       <View style={styles.feedbackRow}>
                         <Pressable
                           onPress={() => handleFeedback(i, "good", m.content)}
@@ -705,15 +784,30 @@ export default function AITutor() {
 
         {/* Input area */}
         <View style={styles.inputWrap}>
+          <Pressable
+            onPress={handleVoicePress}
+            style={[
+              styles.micBtn,
+              voice.listening && styles.micBtnActive,
+            ]}
+            testID="voice-btn"
+          >
+            <Ionicons
+              name={voice.listening ? "stop" : "mic"}
+              size={20}
+              color={voice.listening ? "#fff" : theme.brandPrimary}
+            />
+          </Pressable>
           <TextInput
             ref={inputRef}
             testID="chat-input"
             value={text}
             onChangeText={setText}
-            placeholder="Ask GC AI..."
+            placeholder={voice.listening ? "Listening... speak now" : "Ask GC AI..."}
             placeholderTextColor={theme.onSurfaceMuted}
             style={styles.input}
             multiline
+            editable={!voice.listening}
           />
           <Pressable
             style={[styles.sendBtn, busy && { opacity: 0.5 }]}
@@ -724,6 +818,35 @@ export default function AITutor() {
             <Ionicons name="send" size={18} color="#fff" />
           </Pressable>
         </View>
+
+        {/* Voice status bar */}
+        {(voice.listening || voice.speaking || voice.error || autoSpeak) && (
+          <View style={styles.voiceStatusBar}>
+            {voice.listening && (
+              <Text style={styles.voiceStatusText}>
+                🎙️ Listening — speak your question
+                {voice.transcript ? `: "${voice.transcript}"` : "…"}
+              </Text>
+            )}
+            {voice.speaking && (
+              <Pressable onPress={voice.stopSpeaking} hitSlop={8}>
+                <Text style={styles.voiceStatusText}>🔊 Speaking — tap to stop</Text>
+              </Pressable>
+            )}
+            {voice.error && (
+              <Text style={[styles.voiceStatusText, { color: theme.error }]}>
+                {voice.error}
+              </Text>
+            )}
+            {!voice.listening && !voice.speaking && !voice.error && (
+              <Pressable onPress={() => setAutoSpeak(false)} hitSlop={8}>
+                <Text style={styles.voiceStatusText}>
+                  🔊 Voice replies ON — tap to turn off
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        )}
       </KeyboardAvoidingView>
 
       <Modal visible={feedbackModalIndex !== null} transparent animationType="fade" onRequestClose={() => setFeedbackModalIndex(null)}>
@@ -1047,6 +1170,34 @@ const createStyles = (t: Palette) => StyleSheet.create({
   drawerItemSubject: { color: t.brandPrimary, fontWeight: "500" },
   drawerItemActions: { flexDirection: "row", gap: 8, marginLeft: 8 },
   drawerActionBtn: { padding: 4 },
+  // ---- GC AI Voice ----
+  micBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: t.surface,
+    borderWidth: 1,
+    borderColor: t.border,
+    marginRight: 8,
+  },
+  micBtnActive: {
+    backgroundColor: t.error,
+    borderColor: t.error,
+  },
+  voiceStatusBar: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    backgroundColor: t.surfaceSecondary,
+    borderTopWidth: 1,
+    borderTopColor: t.divider,
+  },
+  voiceStatusText: {
+    fontSize: 12,
+    color: t.onSurfaceMuted,
+    textAlign: "center",
+  },
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.4)",

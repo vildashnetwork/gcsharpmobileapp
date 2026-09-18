@@ -52,6 +52,8 @@ const DISPLAY_LEVELS = [
   { label: "GCE A", backend: "GCE A Level" },
   { label: "HND", backend: "HND" },
   { label: "Concours", backend: "Concours" },
+  { label: "ATVEE", backend: "ATVEE" },
+  { label: "ITVEE", backend: "ITVEE" },
 ];
 
 // ---------- Utility: highlight matching text ----------
