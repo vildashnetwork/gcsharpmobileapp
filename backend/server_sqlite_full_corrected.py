@@ -31,6 +31,9 @@ import bcrypt
 import jwt as pyjwt
 import httpx
 
+# GC AI self-learning engine (NLP, knowledge base, web search, multi-provider LLM)
+import gc_ai_engine as gc_ai
+
 # Optional integrations (SMS OTP + scheduled jobs). Guarded so the app still
 # boots if these packages aren't installed yet — install with:
 #   pip install twilio apscheduler
@@ -2677,20 +2680,36 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         "If the question is multiple-choice, end the answer with a final line exactly in this format: 'Final answer: X' where X is the option letter or final result. "
         "If the question is not multiple-choice, still finish with a final line starting with 'Final answer:' followed by the final result."
     )
-    chat = _new_chat(session_id, system)
 
     async def event_gen():
         nonlocal history
         full = ""
+        source = "ai"
+        learned = False
         try:
-            prompt = history_context + "Current question:\n" + req.message
-            response = await chat.send_message(prompt)
-            full = response.strip()
+            # GC AI brain: local solver -> knowledge base -> web research +
+            # multi-provider LLM (Gemini / OpenRouter) -> learn & store.
+            outcome = await gc_ai.answer_question(
+                db,
+                req.message,
+                subject=req.subject or "General",
+                history_context=history_context,
+                profile_snapshot=profile_snapshot,
+                allow_web_learning=True,
+                use_local_solver=solve_math_local,
+            )
+            full = (outcome.get("answer") or "").strip()
+            source = outcome.get("source") or "ai"
+            learned = bool(outcome.get("learned"))
+            if not full:
+                full = ("I could not generate a complete answer just now. Please try "
+                        "rephrasing the question or ask again in a moment.")
             for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
         except Exception as e:
             logger.error(f"AI stream error: {e}")
-            full = "I'm having trouble connecting to my AI service. Please try again in a moment."
+            full = ("I could not complete that answer right now. Please try again in "
+                    "a moment - or try rephrasing your question.")
             for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
                 yield f"data: {json.dumps({'delta': chunk})}\n\n"
 
@@ -2707,7 +2726,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             {"user_id": user["user_id"], "session_id": session_id, "role": "user", "content": req.message, "created_at": new_user_msg["ts"]},
             {"user_id": user["user_id"], "session_id": session_id, "role": "assistant", "content": full, "created_at": new_assistant_msg["ts"]},
         ])
-        yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'session_id': session_id, 'source': source, 'learned': learned})}\n\n"
 
         await create_notification(
             user["user_id"],
@@ -2729,13 +2748,25 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
 @api_router.get("/ai/health")
 async def ai_health():
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    search_key = os.environ.get("GOOGLE_SEARCH_API_KEY", "")
+    kb = gc_ai.KnowledgeBase(db)
     result = {
         "api_key_configured": bool(api_key),
-        "api_key_prefix": (api_key[:12] + "...") if api_key else None,
+        "gemini_configured": bool(gemini_key),
+        "google_search_configured": bool(search_key and os.environ.get("GOOGLE_SEARCH_CX", "")),
+        "keyless_web_search": True,  # DuckDuckGo fallback always available
+        "knowledge_base": await kb.stats(),
+        "providers": {
+            "google_gemini": "primary" if gemini_key else "not_configured",
+            "openrouter": "fallback" if api_key else "not_configured",
+        },
         "models_tested": [],
     }
-    if not api_key:
-        result["diagnosis"] = "OPENROUTER_API_KEY is not set."
+    if not api_key and not gemini_key:
+        result["diagnosis"] = ("No LLM provider configured. GC AI will answer from its "
+                               "knowledge base, local math solver, and web research only. "
+                               "Set GEMINI_API_KEY or OPENROUTER_API_KEY.")
         return result
 
     models = _get_model_chain()
@@ -2783,17 +2814,58 @@ async def ai_health():
 
 @api_router.post("/ai/explain")
 async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
-    local_result = solve_math_local(req.message)
-    if local_result:
-        return {"answer": local_result, "source": "local_solver"}
-    system = "You are GC AI, an expert exam tutor. Give a concise, clear step-by-step explanation."
-    chat = _new_chat(f"explain_{uuid.uuid4().hex}", system)
-    try:
-        resp = await chat.send_message(req.message)
-        return {"answer": resp, "source": "ai_solver"}
-    except Exception as e:
-        logger.error(f"AI explain error: {e}")
-        return {"answer": "I'm having trouble connecting to my AI service. Please try again later.", "source": "error"}
+    # Full GC AI brain: local solver -> knowledge base -> web research +
+    # multi-provider LLM. Always returns a usable answer, never a hard error.
+    outcome = await gc_ai.answer_question(
+        db,
+        req.message,
+        subject=req.subject or "General",
+        allow_web_learning=True,
+        use_local_solver=solve_math_local,
+    )
+    return {
+        "answer": outcome["answer"],
+        "source": outcome["source"],
+        "learned": outcome.get("learned", False),
+    }
+
+
+# ============================================================
+# GC AI KNOWLEDGE BASE - learning memory endpoints
+# ============================================================
+
+@api_router.get("/ai/knowledge/stats")
+async def ai_knowledge_stats(user: dict = Depends(get_current_user)):
+    """How much GC AI has learned so far."""
+    kb = gc_ai.KnowledgeBase(db)
+    return await kb.stats()
+
+
+@api_router.get("/ai/knowledge/search")
+async def ai_knowledge_search(q: str, user: dict = Depends(get_current_user)):
+    """Search what GC AI has already learned (TF-IDF cosine matching)."""
+    kb = gc_ai.KnowledgeBase(db)
+    match = await kb.find_match(q)
+    if not match:
+        return {"found": False}
+    return {
+        "found": True,
+        "question": match.get("question"),
+        "answer": match.get("answer"),
+        "source": match.get("source"),
+        "similarity": match.get("_similarity"),
+    }
+
+
+@api_router.delete("/ai/knowledge/{entry_id}")
+async def ai_knowledge_delete(entry_id: str, user: dict = Depends(get_current_user)):
+    """Remove a learned entry (admin/teacher housekeeping)."""
+    if user.get("role") not in {"teacher", "admin"}:
+        raise HTTPException(403, "Teachers and admins only")
+    kb = gc_ai.KnowledgeBase(db)
+    await db.ai_knowledge.delete_one({"entry_id": entry_id})
+    kb.invalidate_cache()
+    return {"ok": True}
 
 # ============================================================
 # AI SESSIONS MANAGEMENT (new routes for frontend)
