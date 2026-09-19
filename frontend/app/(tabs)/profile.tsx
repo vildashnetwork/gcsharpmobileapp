@@ -263,7 +263,7 @@ export default function Profile() {
           <Text style={styles.name}>{user?.full_name}</Text>
           <Text style={styles.email}>{user?.email}</Text>
           <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{user?.exam_level ?? "GCE A Level"}</Text>
+            <Text style={styles.pillTxt}>{user?.exam_level || "Teacher"}</Text>
           </View>
         </View>
 

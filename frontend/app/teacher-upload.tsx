@@ -24,6 +24,7 @@ export default function TeacherUpload() {
   const [subjectName, setSubjectName] = useState("");
   const [level, setLevel] = useState("GCE A");
   const [videoUrl, setVideoUrl] = useState("");
+  const [thumbnail, setThumbnail] = useState("");
   const [duration, setDuration] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -61,6 +62,7 @@ export default function TeacherUpload() {
     setSubjectName("");
     setLevel("GCE A");
     setVideoUrl("");
+    setThumbnail("");
     setDuration("");
     setFileName(null);
     setEditingId(null);
@@ -75,6 +77,7 @@ export default function TeacherUpload() {
     setSubjectName(lesson.subject_name || "");
     setLevel(lesson.exam_level || "GCE A");
     setVideoUrl(lesson.video_url || "");
+    setThumbnail(lesson.thumbnail || "");
     setDuration(lesson.duration || "");
     setFileName(null);
     setErr(null);
@@ -109,6 +112,26 @@ export default function TeacherUpload() {
     );
   };
 
+  // Cloudinary reports the real video duration in seconds — format as h:mm:ss / m:ss.
+  const formatDuration = (totalSeconds: number) => {
+    if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "";
+    const s = Math.round(totalSeconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return h > 0
+      ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+      : `${m}:${String(sec).padStart(2, "0")}`;
+  };
+
+  // Auto-poster: Cloudinary serves any frame of the uploaded video as a JPG.
+  const cloudinaryThumbUrl = (publicId: string, durationSeconds: number) => {
+    if (!publicId) return "";
+    // Frame 0 is often black — grab ~2s in (or a third in for very short clips).
+    const offset = durationSeconds > 6 ? 2 : Math.max(0, Math.floor(durationSeconds / 3));
+    return `https://res.cloudinary.com/${CLOUDINARY_CLOUD_NAME}/video/upload/so_${offset},w_640,h_360,c_fill/${publicId}.jpg`;
+  };
+
   const pickVideoFile = async () => {
     setErr(null);
     try {
@@ -122,8 +145,14 @@ export default function TeacherUpload() {
       setFileName(asset.name ?? "Selected video");
       setUploadingFile(true);
       setUploadPct(null);
-      const url = await uploadToCloudinary(asset.uri, asset.name ?? "lesson.mp4", asset.mimeType ?? "video/mp4");
-      setVideoUrl(url);
+      const up = await uploadToCloudinary(asset.uri, asset.name ?? "lesson.mp4", asset.mimeType ?? "video/mp4");
+      setVideoUrl(up.url);
+      // Auto-fill duration (m:ss) from the real length Cloudinary measured.
+      const autoDur = formatDuration(up.durationSeconds);
+      if (autoDur) setDuration(autoDur);
+      // Auto-generate a poster frame straight from the uploaded video.
+      const autoThumb = cloudinaryThumbUrl(up.publicId, up.durationSeconds);
+      if (autoThumb) setThumbnail(autoThumb);
       setFileName(asset.name ?? "Video uploaded");
     } catch (e: any) {
       setErr(e.message || "Could not upload that video to ");
@@ -133,18 +162,30 @@ export default function TeacherUpload() {
     }
   };
 
-  const uploadToCloudinary = async (uri: string, name: string, mimeType: string): Promise<string> => {
+  // Returns the hosted URL plus metadata Cloudinary computes during upload:
+  // duration (seconds, from real video analysis) and public_id (for the poster frame).
+  const uploadToCloudinary = async (
+    uri: string,
+    name: string,
+    mimeType: string
+  ): Promise<{ url: string; durationSeconds: number; publicId: string }> => {
     const data = new FormData();
     // React Native FormData file shape
     data.append("file", { uri, name, type: mimeType } as any);
     data.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-    const xhr = await new Promise<string>((resolve, reject) => {
+    const xhr = await new Promise<{ url: string; durationSeconds: number; publicId: string }>((resolve, reject) => {
       const req = new XMLHttpRequest();
       req.open("POST", `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/video/upload`);
       req.onload = () => {
         try {
           const json = JSON.parse(req.responseText || "{}");
-          if (req.status >= 200 && req.status < 300 && json.secure_url) resolve(json.secure_url);
+          if (req.status >= 200 && req.status < 300 && json.secure_url) {
+            resolve({
+              url: json.secure_url,
+              durationSeconds: typeof json.duration === "number" ? json.duration : 0,
+              publicId: typeof json.public_id === "string" ? json.public_id : "",
+            });
+          }
           else reject(new Error(json?.error?.message || ` upload failed (${req.status})`));
         } catch (err: any) {
           reject(new Error(err?.message || " upload failed"));
@@ -174,6 +215,8 @@ export default function TeacherUpload() {
       const payload = {
         title, description, subject_name: subjectName,
         exam_level: level, video_url: videoUrl, duration,
+        // Cloudinary-generated poster frame (backend falls back to its default if empty)
+        thumbnail: thumbnail || undefined,
       };
       if (editingId) {
         await api(`/lessons/${editingId}`, { method: "PUT", body: payload });
@@ -310,7 +353,16 @@ export default function TeacherUpload() {
         )}
       </Pressable>
       <Text style={styles.pickHint} />
-      <Field label="Duration (optional)" testID="in-duration" value={duration} onChange={setDuration} placeholder="10:00" />
+      {thumbnail && videoUrl ? (
+        <View style={styles.previewWrap} testID="auto-thumb-preview">
+          <Image source={{ uri: thumbnail }} style={styles.previewThumb} resizeMode="cover" />
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text style={styles.previewTxt}>✓ Thumbnail auto-generated from your video</Text>
+            {duration ? <Text style={styles.previewTxt}>✓ Duration auto-detected: {duration}</Text> : null}
+          </View>
+        </View>
+      ) : null}
+      <Field label="Duration (auto-detected — edit if needed)" testID="in-duration" value={duration} onChange={setDuration} placeholder="10:00" />
 
       {err ? <Text style={styles.err}>{err}</Text> : null}
       {ok ? <Text style={styles.ok}>✓ Uploaded! Redirecting…</Text> : null}
@@ -394,13 +446,19 @@ const createStyles = (t: Palette) => StyleSheet.create({
     backgroundColor: t.brand, paddingVertical: 14, borderRadius: radii.md,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, ...shadow1,
   },
-  submitTxt: { color: t.onBrandPrimary, fontWeight: "800" },
+  submitTxt: { color: t.onBrandPrimary, fontWeight: "800", padding: 8 },
   pickBtn: {
     backgroundColor: t.brandPrimary, paddingVertical: 13, borderRadius: radii.md,
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8,
   },
   pickBtnTxt: { color: "#fff", fontWeight: "800" },
   pickHint: { color: t.onSurfaceMuted, fontSize: 12, lineHeight: 17 },
+  previewWrap: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    backgroundColor: t.brandTertiary, padding: 10, borderRadius: radii.md,
+  },
+  previewThumb: { width: 96, height: 54, borderRadius: 8, backgroundColor: t.border },
+  previewTxt: { color: t.brand, fontSize: 12, fontWeight: "600" },
   tabbar: { flexDirection: "row", gap: 8, paddingHorizontal: spacing.lg, paddingBottom: 4 },
   tabBtn: { flex: 1, paddingVertical: 10, borderRadius: radii.pill, borderWidth: 1, borderColor: t.border, backgroundColor: t.surfaceSecondary, alignItems: "center" },
   tabBtnActive: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
