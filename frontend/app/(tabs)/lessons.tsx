@@ -469,6 +469,7 @@ export default function Library() {
         <View>
           <Text style={styles.title}>Lessons</Text>
           <Text style={styles.sub}>Video lessons and study materials</Text>
+
         </View>
       </View>
 
