@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Image, ActivityIndicator, Alert } from "react-native";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { View, Text, StyleSheet, Pressable, ScrollView, Image, ActivityIndicator, Alert, Modal, Share, Animated } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
+import { GestureHandlerRootView, PinchGestureHandler, PanGestureHandler, TapGestureHandler } from "react-native-gesture-handler";
 import { useTheme } from "@/src/theme-context";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
@@ -41,6 +42,98 @@ type ProfileResponse = {
   is_self?: boolean;
 };
 
+// Full-screen photo viewer: pinch to zoom, drag when zoomed, double-tap
+// toggles 2.5x. Built with react-native-gesture-handler (already in the
+// app via expo-router) — no extra dependency needed.
+function PhotoViewer({ uri, visible, onClose }: { uri: string | null; visible: boolean; onClose: () => void }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+  const lastScale = useRef(1);
+  const lastTranslate = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    if (visible) {
+      lastScale.current = 1;
+      lastTranslate.current = { x: 0, y: 0 };
+      scale.setValue(1);
+      translateX.setValue(0);
+      translateY.setValue(0);
+    }
+  }, [visible, scale, translateX, translateY]);
+
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+  const onPinchEvent = (e: any) => {
+    scale.setValue(clamp(lastScale.current * e.nativeEvent.scale, 1, 6));
+  };
+  const onPinchEnd = (e: any) => {
+    lastScale.current = clamp(lastScale.current * e.nativeEvent.scale, 1, 6);
+    if (lastScale.current <= 1.02) {
+      // Pinched back down to normal — reset everything.
+      lastScale.current = 1;
+      lastTranslate.current = { x: 0, y: 0 };
+      scale.setValue(1);
+      translateX.setValue(0);
+      translateY.setValue(0);
+    }
+  };
+  const onPanEvent = (e: any) => {
+    if (lastScale.current <= 1) return; // panning only makes sense zoomed in
+    translateX.setValue(lastTranslate.current.x + e.nativeEvent.translationX);
+    translateY.setValue(lastTranslate.current.y + e.nativeEvent.translationY);
+  };
+  const onPanEnd = (e: any) => {
+    if (lastScale.current <= 1) return;
+    lastTranslate.current = {
+      x: lastTranslate.current.x + e.nativeEvent.translationX,
+      y: lastTranslate.current.y + e.nativeEvent.translationY,
+    };
+  };
+  const onDoubleTap = () => {
+    if (lastScale.current > 1) {
+      lastScale.current = 1;
+      lastTranslate.current = { x: 0, y: 0 };
+      Animated.parallel([
+        Animated.spring(scale, { toValue: 1, useNativeDriver: true }),
+        Animated.spring(translateX, { toValue: 0, useNativeDriver: true }),
+        Animated.spring(translateY, { toValue: 0, useNativeDriver: true }),
+      ]).start();
+    } else {
+      lastScale.current = 2.5;
+      Animated.spring(scale, { toValue: 2.5, useNativeDriver: true }).start();
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <GestureHandlerRootView style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.96)" }}>
+        <PinchGestureHandler onGestureEvent={onPinchEvent} onHandlerStateChange={onPinchEnd}>
+          <PanGestureHandler onGestureEvent={onPanEvent} onHandlerStateChange={onPanEnd}>
+            <TapGestureHandler numberOfTaps={2} onActivated={onDoubleTap}>
+              <Animated.View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+                <Animated.Image
+                  source={{ uri: uri ?? undefined }}
+                  style={{
+                    width: "100%",
+                    height: "70%",
+                    transform: [{ translateX }, { translateY }, { scale }],
+                  }}
+                  resizeMode="contain"
+                />
+              </Animated.View>
+            </TapGestureHandler>
+          </PanGestureHandler>
+        </PinchGestureHandler>
+        <Pressable onPress={onClose} style={styles.viewerClose} testID="photo-viewer-close">
+          <Ionicons name="close" size={26} color="#fff" />
+        </Pressable>
+        <Text style={styles.viewerHint}>Pinch to zoom · Double-tap · Drag when zoomed</Text>
+      </GestureHandlerRootView>
+    </Modal>
+  );
+}
+
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -57,6 +150,7 @@ export default function TeacherProfile() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [followBusy, setFollowBusy] = useState(false);
+  const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -139,23 +233,49 @@ export default function TeacherProfile() {
   const isSelf = !!data.is_self || (!!user && user.user_id === t.user_id);
   const displayName = (t.full_name || user?.full_name || "Teacher").trim();
 
+  const shareProfile = async () => {
+    try {
+      const link = `https://gcsharp.com/teacher-profile/${t.user_id}`;
+      await Share.share({
+        title: `${displayName} on GC SHARP`,
+        message: `Check out ${displayName}'s profile and lessons on GC SHARP: ${link}`,
+        url: link,
+      });
+    } catch {
+      // User dismissed the share sheet — nothing to do.
+    }
+  };
+
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="teacher-profile-screen">
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} testID="back-btn"><Ionicons name="arrow-back" size={22} color={theme.brand} /></Pressable>
         <Text style={styles.brand}>GCSHARP</Text>
-        <View style={{ width: 22 }} />
+        <Pressable onPress={shareProfile} testID="share-profile-btn">
+          <Ionicons name="share-social-outline" size={22} color={theme.brand} />
+        </Pressable>
       </View>
 
       <ScrollView contentContainerStyle={{ paddingBottom: 40 }}>
         {/* ---- Identity ---- */}
         <View style={styles.profileHead}>
-          {t.profile_photo ? (
-            <Image source={{ uri: t.profile_photo }} style={styles.avatar} />
-          ) : (
-            <View style={[styles.avatar, styles.avatarFallback]}>
-              <Text style={styles.avatarInitial}>{(t.full_name || "T").charAt(0).toUpperCase()}</Text>
-            </View>
+          <Pressable
+            onPress={() => t.profile_photo && setViewerUri(t.profile_photo)}
+            disabled={!t.profile_photo}
+            testID="profile-photo-open"
+          >
+            {t.profile_photo ? (
+              <Image source={{ uri: t.profile_photo }} style={styles.avatar} />
+            ) : (
+              <View style={[styles.avatar, styles.avatarFallback]}>
+                <Text style={styles.avatarInitial}>{displayName.charAt(0).toUpperCase()}</Text>
+              </View>
+            )}
+          </Pressable>
+          {!!t.profile_photo && (
+            <Pressable onPress={() => setViewerUri(t.profile_photo as string)} testID="zoom-photo-btn">
+              <Text style={styles.zoomHint}>Tap photo to zoom</Text>
+            </Pressable>
           )}
           <Text style={styles.name}>{displayName}</Text>
           {(t.specialization || t.institution) ? (
@@ -268,6 +388,8 @@ export default function TeacherProfile() {
           ))
         )}
       </ScrollView>
+
+      <PhotoViewer uri={viewerUri} visible={!!viewerUri} onClose={() => setViewerUri(null)} />
     </SafeAreaView>
   );
 }
@@ -309,6 +431,11 @@ const createStyles = (t: Palette) => StyleSheet.create({
   earnCard: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingHorizontal: 16, paddingVertical: 8, borderRadius: radii.md, backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border },
   earnAmt: { color: t.success, fontWeight: "800", fontSize: 14 },
   earnLbl: { color: t.onSurfaceMuted, fontSize: 12.5, fontWeight: "600" },
+
+  zoomHint: { color: t.brandPrimary, fontSize: 11.5, fontWeight: "700", marginTop: 2 },
+
+  viewerClose: { position: "absolute", top: 50, right: 22, width: 42, height: 42, borderRadius: 21, backgroundColor: "rgba(255,255,255,0.15)", alignItems: "center", justifyContent: "center" },
+  viewerHint: { position: "absolute", bottom: 44, alignSelf: "center", color: "rgba(255,255,255,0.75)", fontSize: 12, fontWeight: "600" },
 
   divider: { height: 8, backgroundColor: t.surfaceTertiary, marginTop: spacing.lg, marginBottom: spacing.md },
 

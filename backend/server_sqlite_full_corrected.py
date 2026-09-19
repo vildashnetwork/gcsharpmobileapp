@@ -2466,6 +2466,25 @@ async def list_library_courses(user: dict = Depends(get_current_user_optional)):
         liked_docs = await db.video_likes.find(
             {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1}
         ).to_list(500)
+
+    # Resolve each teacher's CURRENT profile photo so video cards always
+    # show the live avatar (stored teacher_avatar/teacher_picture snapshots
+    # go stale the moment the teacher updates their photo).
+    teacher_ids = list({it.get("teacher_id") for it in items if it.get("teacher_id")})
+    if teacher_ids:
+        tdocs = await db.users.find(
+            {"user_id": {"$in": teacher_ids}},
+            {"_id": 0, "user_id": 1, "profile_photo": 1, "picture": 1},
+        ).to_list(500)
+        tmap = {t["user_id"]: (t.get("profile_photo") or t.get("picture") or "") for t in tdocs}
+        for it in items:
+            live = tmap.get(it.get("teacher_id"))
+            if live:
+                it["teacher_avatar"] = live
+            elif not it.get("teacher_avatar"):
+                it["teacher_avatar"] = it.get("teacher_picture") or ""
+
+    if user:
         saved_docs = await db.video_saves.find(
             {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1}
         ).to_list(500)
@@ -2553,6 +2572,19 @@ async def get_library_course(course_id: str, user: dict = Depends(get_current_us
             )
 
     c = dict(c)
+
+    # Live avatar: resolve the teacher's CURRENT profile photo so the
+    # player screens show the real picture, not a stale upload-time copy.
+    _tid = c.get("teacher_id")
+    if _tid:
+        _tdoc = await db.users.find_one(
+            {"user_id": _tid}, {"_id": 0, "profile_photo": 1, "picture": 1}
+        )
+        _live = (_tdoc.get("profile_photo") or _tdoc.get("picture") or "") if _tdoc else ""
+        if _live:
+            c["teacher_avatar"] = _live
+        elif not c.get("teacher_avatar"):
+            c["teacher_avatar"] = c.get("teacher_picture") or ""
     if counted:
         c["views"] = c.get("views", 0) + 1
     c["liked"] = False

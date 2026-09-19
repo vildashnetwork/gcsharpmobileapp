@@ -376,6 +376,7 @@ type Course = {
   id?: string;
   course_id?: string;
   title: string;
+  profile_photo?: string | null;
   description: string;
   subject_name: string;
   exam_level: string;
@@ -812,8 +813,11 @@ export default function CourseDetail() {
             onPress={() => course.teacher_id && router.push(`/teacher-profile/${course.teacher_id}` as any)}
             testID="teacher-row"
           >
-            {course.teacher_avatar ? (
-              <Image source={{ uri: course.teacher_avatar }} style={styles.avatar} />
+            {course.teacher_avatar || course.profile_photo ? (
+              <Image
+                source={{ uri: (course.teacher_avatar || course.profile_photo) as string }}
+                style={styles.avatar}
+              />
             ) : (
               <View style={[styles.avatar, styles.avatarFallback]}>
                 <Text style={styles.avatarInitial}>
