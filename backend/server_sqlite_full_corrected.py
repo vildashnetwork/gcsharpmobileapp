@@ -2061,11 +2061,18 @@ async def get_paper(paper_id: str):
     return {"paper": paper, "questions": questions}
 
 @api_router.get("/papers")
-async def list_papers(level: Optional[str] = None, subject: Optional[str] = None,
+async def list_papers(level: Optional[str] = None, levels: Optional[str] = None,
+                      subject: Optional[str] = None,
                       year: Optional[int] = None, paper: Optional[int] = None,
                       q: Optional[str] = None, user: dict = Depends(get_current_user_optional)):
     query = {}
     if level: query["level"] = level
+    # Teachers browse several exam categories at once - `levels` is a
+    # comma-separated list and takes precedence over the single `level`.
+    if levels:
+        wanted = [item.strip() for item in levels.split(",") if item.strip()]
+        if wanted:
+            query["level"] = {"$in": wanted}
     if subject: query["subject"] = subject
     if year: query["year"] = year
     if paper: query["paper_number"] = paper
@@ -2086,7 +2093,20 @@ async def paper_filters():
     levels = sorted({p.get("level") for p in papers if p.get("level")})
     subjects = sorted({p.get("subject") for p in papers if p.get("subject")})
     years = sorted({p.get("year") for p in papers if p.get("year")}, reverse=True)
-    return {"levels": levels, "subjects": subjects, "years": years, "papers": [1, 2, 3]}
+    # level -> subjects actually present in the library. Teachers use this to
+    # filter accurately even for levels missing from EXAM_STRUCTURE.
+    level_subjects: Dict[str, list] = {}
+    for p in papers:
+        lvl = p.get("level")
+        subj = p.get("subject")
+        if lvl and subj:
+            level_subjects.setdefault(lvl, [])
+            if subj not in level_subjects[lvl]:
+                level_subjects[lvl].append(subj)
+    for lvl in level_subjects:
+        level_subjects[lvl].sort()
+    return {"levels": levels, "subjects": subjects, "years": years,
+            "papers": [1, 2, 3], "level_subjects": level_subjects}
 
 @api_router.get("/papers/{paper_id}")
 async def get_paper_detail(paper_id: str):
