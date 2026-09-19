@@ -127,6 +127,7 @@ const en = {
         library: "Library",
         ai: "AI Tutor",
         profile: "Profile",
+        upload: "Upload",
     },
     home: {
         greeting: "Hello",
@@ -450,6 +451,7 @@ const fr: Dict = {
         library: "Bibliothèque",
         ai: "Tuteur IA",
         profile: "Profil",
+        upload: "Publier",
     },
     home: {
         greeting: "Bonjour",

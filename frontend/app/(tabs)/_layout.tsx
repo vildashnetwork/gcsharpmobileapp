@@ -7,6 +7,7 @@ import { theme, radii, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useLanguage } from "@/src/i18n";
+import { useAuth } from "@/src/auth";
 
 // Metadata for each tab — labels resolve from the active language dictionary
 // at render time; the actual rendering order comes from the Tabs.Screen order.
@@ -16,21 +17,32 @@ function useTabItems() {
     { name: "index", label: t.tabs.home, icon: "home-outline", iconActive: "home" },
     { name: "lessons", label: t.tabs.lessons, icon: "videocam-outline", iconActive: "videocam" },
     { name: "ai", label: t.tabs.ai, icon: "sparkles-outline", iconActive: "sparkles", center: true },
-    { name: "library", label: t.tabs.library, icon: "book-outline", iconActive: "book" },
+    { name: "library", label: t.tabs.library, icon: "book-outline", iconActive: "book", hideForTeacher: true },
     { name: "profile", label: t.tabs.profile, icon: "person-outline", iconActive: "person" },
+    { name: "teacher-upload", label: (t.tabs as any).upload ?? "Upload", icon: "cloud-upload-outline", iconActive: "cloud-upload", teacherOnly: true },
   ];
 }
 
 function CustomTabBar({ state, descriptors, navigation }: any) {
   const insets = useSafeAreaInsets();
   const TAB_ITEMS = useTabItems();
+  const { user } = useAuth();
+  const isTeacher = user?.role === "teacher" || user?.role === "admin";
 
   return (
     <View style={[styles.barWrapper, { paddingBottom: Math.max(insets.bottom, 8) }]}>
       <View style={styles.bar}>
-        {state.routes.map((route: any, index: number) => {
-          const meta = TAB_ITEMS.find((t) => t.name === route.name) ?? TAB_ITEMS[index];
-          const focused = state.index === index;
+        {state.routes
+          .filter((route: any) => {
+            const meta = TAB_ITEMS.find((t) => t.name === route.name);
+            if ((meta as any)?.teacherOnly && !isTeacher) return false;
+            if ((meta as any)?.hideForTeacher && isTeacher) return false;
+            return true;
+          })
+          .map((route: any) => {
+          const meta = TAB_ITEMS.find((t) => t.name === route.name);
+          if (!meta) return null;
+          const focused = state.routes[state.index]?.key === route.key;
 
           const onPress = () => {
             const event = navigation.emit({
@@ -94,6 +106,8 @@ export default function TabsLayout() {
       <Tabs.Screen name="ai" />
       <Tabs.Screen name="library" />
       <Tabs.Screen name="profile" />
+      {/* Teachers-only: visible in the bar only for teachers/admins */}
+      <Tabs.Screen name="teacher-upload" />
     </Tabs>
   );
 }

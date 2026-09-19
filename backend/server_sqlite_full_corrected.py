@@ -2021,7 +2021,7 @@ async def analytics_student(user: dict = Depends(get_current_user)):
 # ============================================================
 
 EXAM_STRUCTURE = {
-    "GCE O Level": ["MATHEMATICS", "BIOLOGY", "FRENCH", "ADDITIONAL MATHS","CHEMISTRY", "History", "ENGLISH LANGUAGE","GEOGRAPHY", "Literature in English", "CITIZENSHIP", "COMMERCE", "ECONOMICS", "FOOD AND NUTRITION",
+    "GCE O Level": ["MATHEMATICS", "BIOLOGY", "FRENCH", "COMPUTER SCIENCE", "ADDITIONAL MATHS","CHEMISTRY", "History", "ENGLISH LANGUAGE","GEOGRAPHY", "Literature in English", "CITIZENSHIP", "COMMERCE", "ECONOMICS", "FOOD AND NUTRITION",
                     "HUMAN BIOLOGY", "History", "LOGIC"],
     "GCE A Level": ["Pure Mathematics with stat", "Pure Mathematics with mech", "Further Mathematics", "Physics", "Chemistry", "Biology",
                     "Economics", "Accounting", "Business Studies", "French", "English Literature"],
@@ -3419,7 +3419,7 @@ async def get_lesson(lesson_id: str):
 
 @api_router.post("/lessons")
 async def create_lesson(req: LessonIn, user: dict = Depends(get_current_user)):
-    if user.get("role") != "teacher":
+    if user.get("role") not in ("teacher", "admin"):
         raise HTTPException(403, "Teachers only")
     lesson_id = f"lesson_{uuid.uuid4().hex[:10]}"
     doc = {
@@ -3444,10 +3444,57 @@ async def create_lesson(req: LessonIn, user: dict = Depends(get_current_user)):
 
 @api_router.get("/teacher/lessons")
 async def teacher_lessons(user: dict = Depends(get_current_user)):
-    if user.get("role") != "teacher":
+    if user.get("role") not in ("teacher", "admin"):
         raise HTTPException(403, "Teachers only")
-    items = await db.lesson_videos.find({"teacher_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    q = {} if user.get("role") == "admin" else {"teacher_id": user["user_id"]}
+    items = await db.lesson_videos.find(q, {"_id": 0}).sort("created_at", -1).to_list(200)
     return {"items": [serialize(x) for x in items]}
+
+
+class LessonUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    subject_id: Optional[str] = None
+    subject_name: Optional[str] = None
+    exam_level: Optional[str] = None
+    video_url: Optional[str] = None
+    thumbnail: Optional[str] = None
+    duration: Optional[str] = None
+
+
+def _lesson_owner_or_403(lesson: dict, user: dict):
+    if user.get("role") == "admin":
+        return
+    if lesson.get("teacher_id") != user.get("user_id"):
+        raise HTTPException(403, "Not your lesson")
+
+
+@api_router.put("/lessons/{lesson_id}")
+async def update_lesson(lesson_id: str, req: LessonUpdate, user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("teacher", "admin"):
+        raise HTTPException(403, "Teachers only")
+    lesson = await db.lesson_videos.find_one({"lesson_id": lesson_id}, {"_id": 0})
+    if not lesson:
+        raise HTTPException(404, "Not found")
+    _lesson_owner_or_403(lesson, user)
+    patch = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not patch:
+        return {"lesson": serialize(lesson)}
+    await db.lesson_videos.update_one({"lesson_id": lesson_id}, {"$set": patch})
+    updated = await db.lesson_videos.find_one({"lesson_id": lesson_id}, {"_id": 0})
+    return {"lesson": serialize(updated)}
+
+
+@api_router.delete("/lessons/{lesson_id}")
+async def delete_lesson(lesson_id: str, user: dict = Depends(get_current_user)):
+    if user.get("role") not in ("teacher", "admin"):
+        raise HTTPException(403, "Teachers only")
+    lesson = await db.lesson_videos.find_one({"lesson_id": lesson_id}, {"_id": 0})
+    if not lesson:
+        raise HTTPException(404, "Not found")
+    _lesson_owner_or_403(lesson, user)
+    await db.lesson_videos.delete_one({"lesson_id": lesson_id})
+    return {"deleted": True, "lesson_id": lesson_id}
 
 
 # ============================================================
