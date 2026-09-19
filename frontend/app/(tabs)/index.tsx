@@ -317,8 +317,10 @@ export default function Home() {
         return res;
       });
 
-      const coursesPromise = api<Course[]>("/courses").then((res) => {
-        setCourses(res.slice(0, 4));
+      const coursesPromise = api<{ items: Course[] }>("/library/courses").then((res) => {
+        // Unified feed: legacy courses + teacher lesson uploads — the old
+        // /courses endpoint missed teacher uploads (home showed 1 of 2).
+        setCourses((res.items || []).slice(0, 4));
         setLoadingProgress((p) => Math.min(p + 20, 85));
         return res;
       });

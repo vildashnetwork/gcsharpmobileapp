@@ -205,6 +205,7 @@ type Course = {
   exam_level?: string;
   teacher_name: string;
   teacher_avatar?: string;
+  teacher_id?: string;
   thumbnail: string;
   duration: string;
   views: number;
@@ -241,6 +242,7 @@ const CourseCard = memo(function CourseCard({
   course: Course;
   onPress: (course: Course) => void;
 }) {
+  const router = useRouter();
   return (
     <Pressable testID={`course-${course.course_id}`} style={styles.card} onPress={() => onPress(course)}>
       <View style={styles.thumbWrap}>
@@ -270,11 +272,27 @@ const CourseCard = memo(function CourseCard({
         </View>
         <Text style={styles.cardTitle} numberOfLines={2}>{course.title}</Text>
         <Text style={styles.cardDesc} numberOfLines={2}>{course.description}</Text>
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
-          <View style={styles.row}>
-            <Ionicons name="person-outline" size={13} color={theme.onSurfaceMuted} />
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 4, alignItems: "center" }}>
+          <Pressable
+            style={styles.row}
+            disabled={!course.teacher_id}
+            onPress={() => course.teacher_id && router.push(`/teacher-profile/${course.teacher_id}` as any)}
+            testID={`teacher-link-${course.course_id}`}
+          >
+            {course.teacher_avatar ? (
+              <Image source={{ uri: course.teacher_avatar }} style={styles.teacherAvatar} cachePolicy="memory-disk" />
+            ) : (
+              <View style={styles.teacherAvatarFallback}>
+                <Text style={styles.teacherAvatarInitial}>
+                  {(course.teacher_name || "T").charAt(0).toUpperCase()}
+                </Text>
+              </View>
+            )}
             <Text style={styles.meta}>{course.teacher_name || "GC Teacher"}</Text>
-          </View>
+            {course.teacher_id ? (
+              <Ionicons name="chevron-forward" size={12} color={theme.onSurfaceMuted} />
+            ) : null}
+          </Pressable>
           <View style={styles.row}>
             <Ionicons name="eye-outline" size={13} color={theme.onSurfaceMuted} />
             <Text style={styles.meta}>{course.views || 0}</Text>
@@ -597,6 +615,9 @@ const createStyles = (t: Palette) => StyleSheet.create({
   pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill, backgroundColor: t.brandTertiary },
   pillTxt: { color: t.onBrandTertiary, fontSize: 11, fontWeight: "700" },
   row: { flexDirection: "row", alignItems: "center", gap: 4 },
+  teacherAvatar: { width: 22, height: 22, borderRadius: 11, marginRight: 2, backgroundColor: t.surfaceTertiary },
+  teacherAvatarFallback: { width: 22, height: 22, borderRadius: 11, marginRight: 2, backgroundColor: t.brandTertiary, alignItems: "center", justifyContent: "center" },
+  teacherAvatarInitial: { color: t.onBrandTertiary, fontSize: 11, fontWeight: "800" },
   meta: { color: t.onSurfaceMuted, fontSize: 12 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl, gap: 8 },
   emptyTxt: { color: t.onSurface, fontSize: 16, fontWeight: "600" },

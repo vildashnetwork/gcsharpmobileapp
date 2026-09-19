@@ -36,21 +36,38 @@ function extFromUrl(url: string) {
   return match ? match[1].toLowerCase() : "jpg";
 }
 
-const KNOWN_EXTS = ["jpg", "jpeg", "png", "webp"];
+/** Stable hash of the remote URL — the cache filename changes when the user
+ * uploads a NEW photo. Without this, `dest.exists` kept returning the stale
+ * avatar forever (the "profile only updates after clearing cache" bug). */
+function hashUrl(url: string): string {
+  let h = 5381;
+  for (let i = 0; i < url.length; i++) {
+    h = ((h << 5) + h + url.charCodeAt(i)) >>> 0;
+  }
+  return h.toString(36);
+}
 
 /** Returns the on-device file:// uri for a cached photo, or null if none exists yet. */
 export function getLocalPhotoUri(userId: string): string | null {
-  for (const ext of KNOWN_EXTS) {
-    const file = new File(PHOTOS_DIR, `${userId}.${ext}`);
-    if (file.exists) return file.uri;
+  try {
+    const files = PHOTOS_DIR.list().filter(
+      (f): f is File => f instanceof File && f.name.startsWith(`${userId}.`)
+    );
+    if (files.length === 0) return null;
+    // cacheProfilePhoto cleans old variants, so normally only one file
+    // matches — pick the newest just in case a legacy file lingers.
+    files.sort((a, b) => (b.modificationTime ?? 0) - (a.modificationTime ?? 0));
+    return files[0].uri;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /**
  * Downloads the actual image bytes to disk (not just the link) and returns
- * the local file:// uri. Safe to call whenever you're online; it no-ops if
- * a cached copy already exists so it doesn't re-download on every refresh.
+ * the local file:// uri. The filename embeds a hash of the remote URL, so
+ * uploading a NEW photo produces a fresh download instead of re-serving
+ * the stale cached avatar; older variants for the same user are removed.
  */
 export async function cacheProfilePhoto(
   userId: string,
@@ -60,8 +77,16 @@ export async function cacheProfilePhoto(
   ensureStorageReady();
   try {
     const ext = extFromUrl(remoteUrl);
-    const dest = new File(PHOTOS_DIR, `${userId}.${ext}`);
+    const dest = new File(PHOTOS_DIR, `${userId}.${hashUrl(remoteUrl)}.${ext}`);
     if (dest.exists) return dest.uri;
+    // URL changed — drop the previous avatar variants for this user.
+    try {
+      for (const f of PHOTOS_DIR.list()) {
+        if (f instanceof File && f.name.startsWith(`${userId}.`)) {
+          try { f.delete(); } catch { /* best effort */ }
+        }
+      }
+    } catch { /* best effort */ }
     const downloaded = await File.downloadFileAsync(remoteUrl, dest);
     return downloaded.uri;
   } catch (err) {
