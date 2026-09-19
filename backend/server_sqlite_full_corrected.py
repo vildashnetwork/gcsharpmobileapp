@@ -2482,11 +2482,13 @@ async def list_library_courses(user: dict = Depends(get_current_user_optional)):
 @api_router.get("/library/courses/{course_id}")
 async def get_library_course(course_id: str, user: dict = Depends(get_current_user_optional)):
     c = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    is_lesson_video = False
     if not c:
         # Teacher lesson uploads live in lesson_videos — expose them as courses
         # so tapping a teacher upload from the Lessons feed opens its detail page.
         l = await db.lesson_videos.find_one({"lesson_id": course_id}, {"_id": 0})
         if l:
+            is_lesson_video = True
             try:
                 created = l.get("created_at")
                 created_str = created.isoformat() if hasattr(created, "isoformat") else (created or "")
@@ -2513,7 +2515,45 @@ async def get_library_course(course_id: str, user: dict = Depends(get_current_us
             }
     if not c:
         raise HTTPException(404, "Not found")
+
+    # --- View counting ---------------------------------------------------
+    # The player screens fetch this endpoint when a student opens a video,
+    # so count the view here. One view per user per video (deduped via the
+    # same course_views collection POST /courses/{id}/view uses) so re-opens
+    # and refreshes don't inflate the count. Anonymous requests still count
+    # a raw view since there's no identity to dedupe against.
+    counted = False
+    if user:
+        already = await db.course_views.find_one(
+            {"course_id": course_id, "student_id": user["user_id"]}, {"_id": 0}
+        )
+        if not already:
+            await db.course_views.insert_one({
+                "view_id": f"vw_{uuid.uuid4().hex[:10]}",
+                "course_id": course_id,
+                "student_id": user["user_id"],
+                "teacher_id": c.get("teacher_id"),
+                "earning": 0 if is_lesson_video else VIEW_RATE_FCFA,
+                "created_at": datetime.utcnow().isoformat(),
+            })
+            counted = True
+    else:
+        counted = True
+
+    if counted:
+        if is_lesson_video:
+            await db.lesson_videos.update_one(
+                {"lesson_id": course_id}, {"$inc": {"views": 1}}
+            )
+        else:
+            await db.courses.update_one(
+                {"course_id": course_id},
+                {"$inc": {"views": 1, "students": 1, "earnings": VIEW_RATE_FCFA}},
+            )
+
     c = dict(c)
+    if counted:
+        c["views"] = c.get("views", 0) + 1
     c["liked"] = False
     c["saved"] = False
     if user:
