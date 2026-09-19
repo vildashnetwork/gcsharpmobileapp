@@ -232,6 +232,10 @@ const en = {
         listView: "List view",
         gridView: "Grid view",
         clearFilters: "Clear all",
+        allLevels: "All levels",
+        teacherAccess: "Teacher",
+        teacherCategoriesHint: "Tap more than one category to compare papers",
+        teacherProgramme: "All exams unlocked",
     },
     pdf: {
         paper: "PDF Paper",
@@ -550,6 +554,10 @@ const fr: Dict = {
         listView: "Vue liste",
         gridView: "Vue grille",
         clearFilters: "Tout effacer",
+        allLevels: "Tous les niveaux",
+        teacherAccess: "Enseignant",
+        teacherCategoriesHint: "Touchez plusieurs catÃ©gories pour comparer les Ã©preuves",
+        teacherProgramme: "Tous les examens dÃ©bloquÃ©s",
     },
     pdf: {
         paper: "Épreuve PDF",

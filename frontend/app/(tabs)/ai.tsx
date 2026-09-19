@@ -68,6 +68,46 @@ function TypingIndicator({ status }: { status: string }) {
   );
 }
 
+// ----- Live microphone level meter -----
+// Shows that the mic is actually hearing you. Devices that report no metering
+// data still get a gentle pulse, so the control never looks dead.
+function MicLevelMeter({ level, active }: { level: number; active: boolean }) {
+  const pulse = useRef(new Animated.Value(0.3)).current;
+  useEffect(() => {
+    if (!active) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 420, useNativeDriver: false }),
+        Animated.timing(pulse, { toValue: 0.25, duration: 420, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active, pulse]);
+
+  const strength = Math.max(0, Math.min(1, level));
+  const hasSignal = strength > 0.03;
+  const lit = Math.round(strength * BARS.length);
+  return (
+    <Animated.View style={[styles.micMeter, { opacity: hasSignal ? 1 : pulse }]}>
+      {BARS.map((h, i) => (
+        <View
+          key={i}
+          style={[
+            styles.micMeterBar,
+            {
+              height: 4 + h * 16,
+              backgroundColor: hasSignal && i < lit ? theme.brandPrimary : theme.border,
+            },
+          ]}
+        />
+      ))}
+    </Animated.View>
+  );
+}
+
+const BARS = [0.35, 0.6, 0.85, 1, 0.85, 0.6, 0.35];
+
 // ----- Format date helper -----
 function formatDate(dateStr: string) {
   const date = new Date(dateStr);
@@ -119,6 +159,15 @@ export default function AITutor() {
   const voice = useGcVoice();
   const [autoSpeak, setAutoSpeak] = useState(false);
   const lastSpokenRef = useRef<string>("");
+  // Voice conversation refs: `autoSpeakRef` mirrors the toggle so a message
+  // sent straight from the mic is answered out loud, and `streamVoiceRef`
+  // marks a reply that is being spoken while it is still streaming.
+  const autoSpeakRef = useRef(false);
+  const streamVoiceRef = useRef(false);
+  const skipAutoSpeakRef = useRef(false);
+  // The exact text already read out loud for the reply in flight, so the
+  // auto-speak effect never reads the same answer a second time.
+  const spokeThisReplyRef = useRef("");
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const seededRef = useRef(false);
@@ -307,8 +356,18 @@ export default function AITutor() {
     setThinkingStage(0);
     setAiStatus("Preparing your question");
 
+    // Voice conversation: start speaking as soon as the first words arrive.
+    const wantVoice = autoSpeakRef.current || autoSpeak;
+    streamVoiceRef.current = wantVoice;
+    skipAutoSpeakRef.current = wantVoice;
+    spokeThisReplyRef.current = "";
+    if (wantVoice) voice.speakStreamStart();
+
     // Add placeholder for assistant message
     setMsgs((m) => [...m, { role: "assistant", content: "" }]);
+
+    // Hoisted so the finally block can flush any speech still in flight.
+    let fullReply = "";
 
     try {
       const token = await readToken();
@@ -334,7 +393,6 @@ export default function AITutor() {
 
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
-      let fullReply = "";
       let receivedSessionId: string | null = null;
       let receivedContent = false;
 
@@ -355,6 +413,8 @@ export default function AITutor() {
                 receivedContent = true;
                 setAiStatus("Writing your answer");
                 fullReply += data.delta;
+                // Speak each finished sentence as it arrives (very fast reply).
+                if (streamVoiceRef.current) voice.speakStreamChunk(data.delta);
                 // Update assistant message in real-time
                 setMsgs((m) => {
                   const last = m[m.length - 1];
@@ -365,6 +425,14 @@ export default function AITutor() {
                   }
                   return m;
                 });
+              }
+              if (data.done && streamVoiceRef.current) {
+                // Flush the final partial sentence so the answer is read out fully.
+                // If nothing was voiced yet (reply arrived in one piece) the
+                // full text is spoken instead.
+                voice.speakStreamEnd(fullReply);
+                spokeThisReplyRef.current = fullReply;
+                streamVoiceRef.current = false;
               }
               if (data.done && data.session_id) {
                 receivedSessionId = data.session_id;
@@ -479,6 +547,18 @@ export default function AITutor() {
         return [...m, { role: "assistant", content: `⚠️ ${errorMsg}` }];
       });
     } finally {
+      // If the stream ended before the terminal event, still flush the
+      // sentence being spoken so the answer is never cut off mid-way.
+      if (streamVoiceRef.current) {
+        voice.speakStreamEnd(fullReply);
+        streamVoiceRef.current = false;
+      }
+      if (spokeThisReplyRef.current) {
+        // A source badge may have been appended after the audio started, so
+        // keep the "already spoken" text in step with the final message.
+        spokeThisReplyRef.current = fullReply || spokeThisReplyRef.current;
+        lastSpokenRef.current = spokeThisReplyRef.current;
+      }
       setBusy(false);
       setAiStatus("Preparing your question");
       setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
@@ -543,15 +623,23 @@ export default function AITutor() {
 
   /** Press the mic: start listening; when a sentence is final, send it. */
   const handleVoicePress = () => {
+    if (voice.transcribing) return;          // busy writing down the last question
     if (voice.listening) {
       voice.stopListening();
       return;
     }
     if (voice.speaking) voice.stopSpeaking();
+
+    // Talking to GC AI is a two-way conversation: using the mic turns voice
+    // replies on, so the answer starts talking back the moment the first
+    // words are generated.
+    autoSpeakRef.current = true;
+    setAutoSpeak(true);
+
     voice.startListening((finalText) => {
       setText(finalText);
-      // slight delay lets state settle before sending
-      setTimeout(() => send(finalText), 250);
+      // A short pause lets the keyboard/input state settle before sending.
+      setTimeout(() => send(finalText), 120);
     });
   };
 
@@ -789,25 +877,36 @@ export default function AITutor() {
             style={[
               styles.micBtn,
               voice.listening && styles.micBtnActive,
+              voice.transcribing && styles.micBtnBusy,
             ]}
             testID="voice-btn"
           >
-            <Ionicons
-              name={voice.listening ? "stop" : "mic"}
-              size={20}
-              color={voice.listening ? "#fff" : theme.brandPrimary}
-            />
+            {voice.transcribing ? (
+              <ActivityIndicator size="small" color={theme.brandPrimary} />
+            ) : (
+              <Ionicons
+                name={voice.listening ? "stop" : "mic"}
+                size={20}
+                color={voice.listening ? "#fff" : theme.brandPrimary}
+              />
+            )}
           </Pressable>
           <TextInput
             ref={inputRef}
             testID="chat-input"
             value={text}
             onChangeText={setText}
-            placeholder={voice.listening ? "Listening... speak now" : "Ask GC AI..."}
+            placeholder={
+              voice.listening
+                ? "Listening... speak now"
+                : voice.transcribing
+                  ? "Writing down what you said..."
+                  : "Ask GC AI..."
+            }
             placeholderTextColor={theme.onSurfaceMuted}
             style={styles.input}
             multiline
-            editable={!voice.listening}
+            editable={!voice.listening && !voice.transcribing}
           />
           <Pressable
             style={[styles.sendBtn, busy && { opacity: 0.5 }]}
@@ -819,14 +918,26 @@ export default function AITutor() {
           </Pressable>
         </View>
 
-        {/* Voice status bar */}
-        {(voice.listening || voice.speaking || voice.error || autoSpeak) && (
+        {/* Voice status bar - always shows the mic is alive and working */}
+        {(voice.listening || voice.transcribing || voice.speaking || voice.error || autoSpeak) && (
           <View style={styles.voiceStatusBar}>
             {voice.listening && (
-              <Text style={styles.voiceStatusText}>
-                🎙️ Listening — speak your question
-                {voice.transcript ? `: "${voice.transcript}"` : "…"}
-              </Text>
+              <>
+                <View style={styles.voiceMeterRow}>
+                  <MicLevelMeter level={voice.micLevel} active={voice.listening} />
+                  <Text style={styles.voiceMeterTime}>
+                    {Math.max(1, Math.round(voice.recordMs / 1000))}s
+                  </Text>
+                </View>
+                <Text style={styles.voiceStatusText} numberOfLines={2}>
+                  {voice.transcript
+                    ? `🎙️ "${voice.transcript}"`
+                    : "🎙️ Listening — speak your question, I send it as soon as you pause"}
+                </Text>
+              </>
+            )}
+            {voice.transcribing && (
+              <Text style={styles.voiceStatusText}>✍️ Writing down what you said…</Text>
             )}
             {voice.speaking && (
               <Pressable onPress={voice.stopSpeaking} hitSlop={8}>
@@ -838,7 +949,7 @@ export default function AITutor() {
                 {voice.error}
               </Text>
             )}
-            {!voice.listening && !voice.speaking && !voice.error && (
+            {!voice.listening && !voice.transcribing && !voice.speaking && !voice.error && autoSpeak && (
               <Pressable onPress={() => setAutoSpeak(false)} hitSlop={8}>
                 <Text style={styles.voiceStatusText}>
                   🔊 Voice replies ON — tap to turn off
@@ -1185,6 +1296,33 @@ const createStyles = (t: Palette) => StyleSheet.create({
   micBtnActive: {
     backgroundColor: t.error,
     borderColor: t.error,
+  },
+  micBtnBusy: {
+    backgroundColor: t.surface,
+    borderColor: t.brandPrimary,
+  },
+  micMeter: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: 3,
+    height: 22,
+  },
+  micMeterBar: {
+    width: 3.5,
+    borderRadius: 2,
+  },
+  voiceMeterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    marginBottom: 2,
+  },
+  voiceMeterTime: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: t.onSurfaceMuted,
+    minWidth: 26,
   },
   voiceStatusBar: {
     paddingHorizontal: spacing.md,

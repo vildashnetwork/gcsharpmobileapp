@@ -44,6 +44,8 @@ type FilterOptions = {
   subjects: string[];
   years: number[];
   papers: number[];
+  /** level -> the subjects that actually exist for it in the library. */
+  level_subjects?: Record<string, string[]>;
 };
 
 // ---------- Constants ----------
@@ -103,14 +105,20 @@ export default function PastQuestions() {
     return matchingLevel || null;
   }, [user?.exam_level]);
 
+  // Teachers and admins are not tied to one programme: they get every exam
+  // category in the library and can toggle several of them at once. Students
+  // keep seeing only the programme they chose at onboarding.
+  const isTeacher = user?.role === "teacher" || user?.role === "admin";
+
   // ---------- State ----------
   const [structure, setStructure] = useState<ExamStructure | null>(null);
   const [selectedDisplayLevel, setSelectedDisplayLevel] = useState<string>(
     ""
   );
-  const [selectedBackendLevel, setSelectedBackendLevel] = useState<string>(
-    ""
-  );
+
+  // Teacher-only: the exam categories currently toggled on. An empty list
+  // means "every category", which is what a teacher starts with.
+  const [teacherLevels, setTeacherLevels] = useState<string[]>([]);
 
   // `subjects` is the subject list for the CURRENT selected level.
   const [subjects, setSubjects] = useState<string[]>([]);
@@ -144,6 +152,14 @@ export default function PastQuestions() {
   const [drafts, setDrafts] = useState<Paper[]>([]);
   const [togglingDraft, setTogglingDraft] = useState<string | null>(null);
 
+  // The exam categories a request should cover.
+  //  - student: exactly their own programme (never empty once loaded)
+  //  - teacher: the toggled categories, or every category when none is toggled
+  const levelsForQuery = useMemo(
+    () => (isTeacher ? teacherLevels : userLevel ? [userLevel.backend] : []),
+    [isTeacher, teacherLevels, userLevel]
+  );
+
   // ---------- Load exam structure ----------
   useEffect(() => {
     const fetchStructure = async () => {
@@ -154,8 +170,12 @@ export default function PastQuestions() {
 
         setStructure(data);
 
-        const profileBackendLevel = userLevel?.backend || "";
-        setSubjects(data.levels[profileBackendLevel] || []);
+        // Students prime the list with their own programme; teachers get the
+        // union across every category from the effect below.
+        if (!isTeacher) {
+          const profileBackendLevel = userLevel?.backend || "";
+          setSubjects(data.levels[profileBackendLevel] || []);
+        }
       } catch (err) {
         console.error("Failed to load subjects:", err);
         Alert.alert("Error", "Could not load subjects. Please try again.");
@@ -165,7 +185,7 @@ export default function PastQuestions() {
     };
 
     fetchStructure();
-  }, [userLevel]);
+  }, [userLevel, isTeacher]);
 
   // ---------- Load database-backed filter metadata ----------
   useEffect(() => {
@@ -183,17 +203,48 @@ export default function PastQuestions() {
     fetchFilters();
   }, []);
 
-  // ---------- Update subjects when level changes ----------
+  // ---------- Update subjects when level(s) change ----------
+  // Students: only their own programme's subjects.
+  // Teachers: the union of every toggled category (all categories when none is
+  // toggled), merged with the subjects the library actually holds for those
+  // levels so categories missing from EXAM_STRUCTURE still list properly.
   useEffect(() => {
-    if (!structure || !userLevel) return;
+    if (!structure) return;
 
-    const levelSubjects = structure.levels[userLevel.backend] || [];
+    if (isTeacher) {
+      // Every category known to the exam structure PLUS any category the
+      // library holds that the structure does not list (e.g. ATVEE/ITVEE).
+      const known = new Set<string>(Object.keys(structure.levels));
+      for (const lvl of Object.keys(filterOptions.level_subjects || {})) {
+        known.add(lvl);
+      }
 
-    setSubjects(levelSubjects);
+      const wanted =
+        teacherLevels.length > 0 ? teacherLevels : Array.from(known);
+
+      const merged: string[] = [];
+      for (const lvl of wanted) {
+        for (const subj of structure.levels[lvl] || []) {
+          if (!merged.includes(subj)) merged.push(subj);
+        }
+        for (const subj of filterOptions.level_subjects?.[lvl] || []) {
+          if (!merged.includes(subj)) merged.push(subj);
+        }
+      }
+      merged.sort((a, b) => a.localeCompare(b));
+
+      setSubjects(merged);
+      setSelectedSubject(null);
+      setSelectedDisplayLevel(t.pastQuestions.allLevels);
+      return;
+    }
+
+    if (!userLevel) return;
+
+    setSubjects(structure.levels[userLevel.backend] || []);
     setSelectedSubject(null);
     setSelectedDisplayLevel(userLevel.label);
-    setSelectedBackendLevel(userLevel.backend);
-  }, [structure, userLevel]);
+  }, [structure, userLevel, isTeacher, teacherLevels, filterOptions.level_subjects]);
 
   // ---------- Fetch papers ----------
   const loadPapers = useCallback(
@@ -201,7 +252,16 @@ export default function PastQuestions() {
       if (!opts?.silent) setLoading(true);
       setSearchError(null);
 
-      if (authLoading || !userLevel) {
+      if (authLoading) {
+        setPapers([]);
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
+
+      // A student must have a programme before anything can be listed, but a
+      // teacher is allowed to browse the whole library with no programme set.
+      if (!isTeacher && !userLevel) {
         setPapers([]);
         setLoading(false);
         setRefreshing(false);
@@ -211,8 +271,13 @@ export default function PastQuestions() {
       try {
         const params = new URLSearchParams();
 
-        if (selectedBackendLevel) {
-          params.append("level", selectedBackendLevel);
+        // One category -> the original single `level` param.
+        // Several categories -> comma-separated `levels` handled server-side.
+        // None selected (teacher default) -> no level filter at all.
+        if (levelsForQuery.length === 1) {
+          params.append("level", levelsForQuery[0]);
+        } else if (levelsForQuery.length > 1) {
+          params.append("levels", levelsForQuery.join(","));
         }
 
         if (selectedSubject) {
@@ -255,11 +320,12 @@ export default function PastQuestions() {
     },
     [
       selectedSubject,
-      selectedBackendLevel,
       selectedYear,
       selectedPaper,
       authLoading,
       userLevel,
+      isTeacher,
+      levelsForQuery,
     ]
   );
 
@@ -354,17 +420,19 @@ export default function PastQuestions() {
     return [...merged].sort((a, b) => a - b);
   }, [filterOptions.papers, papers]);
 
-  // Active filter count (subject + year + paper) for the results header.
+  // Active filter count (category + subject + year + paper) for the header.
   const activeFilterCount =
+    (isTeacher && teacherLevels.length > 0 ? 1 : 0) +
     (selectedSubject ? 1 : 0) +
     (selectedYear !== null ? 1 : 0) +
     (selectedPaper !== null ? 1 : 0);
 
   const clearAllFilters = useCallback(() => {
+    if (isTeacher) setTeacherLevels([]);
     setSelectedSubject(null);
     setSelectedYear(null);
     setSelectedPaper(null);
-  }, []);
+  }, [isTeacher]);
 
   // ---------- Navigation ----------
   const openPaper = (paper: Paper) => {
@@ -382,12 +450,36 @@ export default function PastQuestions() {
     }
   };
 
-  // ---------- Handle level change ----------
+  // ---------- Handle level (category) change ----------
+  // Students: locked to the programme they chose. Teachers: toggle as many
+  // exam categories as they need, and clear them all with the "All" chip.
   const handleLevelChange = (displayLabel: string) => {
+    const target = DISPLAY_LEVELS.find((dl) => dl.label === displayLabel);
+    if (!target) return;
+
+    if (isTeacher) {
+      setTeacherLevels((prev) =>
+        prev.includes(target.backend)
+          ? prev.filter((lvl) => lvl !== target.backend)
+          : [...prev, target.backend]
+      );
+      setSelectedDisplayLevel(target.label);
+      return;
+    }
+
     if (!userLevel || displayLabel !== userLevel.label) return;
     setSelectedDisplayLevel(userLevel.label);
-    setSelectedBackendLevel(userLevel.backend);
   };
+
+  // Teacher shortcut: show every category at once.
+  const showAllLevels = () => {
+    setTeacherLevels([]);
+    setSelectedDisplayLevel(t.pastQuestions.allLevels);
+  };
+
+  // Whether a category chip reads as "on".
+  const isLevelActive = (label: string, backend: string) =>
+    isTeacher ? teacherLevels.includes(backend) : selectedDisplayLevel === label;
 
   // ---------- Skeleton loader ----------
   const SkeletonPaper = ({ index }: { index: number }) => (
@@ -472,12 +564,41 @@ export default function PastQuestions() {
         </View>
       </View>
 
-      {/* Level selector */}
+      {/* Exam category selector.
+          Students see only their own programme. Teachers see every category
+          and can toggle several on at once to compare papers across exams. */}
       <View style={styles.levelSection}>
         <View style={styles.sectionTopLine}>
-          <Text style={styles.sectionEyebrow}>{t.pastQuestions.examLevel}</Text>
-          <Text style={styles.sectionContext}>{selectedDisplayLevel}</Text>
+          <View style={styles.sectionTopLeft}>
+            <Text style={styles.sectionEyebrow}>{t.pastQuestions.examLevel}</Text>
+            {isTeacher && (
+              <View style={styles.teacherBadge}>
+                <Ionicons name="school-outline" size={11} color={theme.brand} />
+                <Text style={styles.teacherBadgeTxt}>
+                  {t.pastQuestions.teacherAccess}
+                </Text>
+              </View>
+            )}
+          </View>
+          <Text style={styles.sectionContext} numberOfLines={1}>
+            {isTeacher
+              ? teacherLevels.length > 0
+                ? teacherLevels
+                    .map(
+                      (lvl) =>
+                        DISPLAY_LEVELS.find((dl) => dl.backend === lvl)?.label || lvl
+                    )
+                    .join(" Â· ")
+                : t.pastQuestions.teacherProgramme
+              : selectedDisplayLevel}
+          </Text>
         </View>
+
+        {isTeacher && (
+          <Text style={styles.teacherHint}>
+            {t.pastQuestions.teacherCategoriesHint}
+          </Text>
+        )}
 
         <ScrollView
           horizontal
@@ -485,30 +606,54 @@ export default function PastQuestions() {
           contentContainerStyle={styles.chipRow}
           keyboardShouldPersistTaps="handled"
         >
-          {DISPLAY_LEVELS.filter((dl) => dl.label === userLevel?.label).map((dl) => (
+          {isTeacher && (
             <Pressable
-              key={dl.label}
-              testID={`level-${dl.label}`}
-              onPress={() => handleLevelChange(dl.label)}
+              testID="level-all"
+              onPress={showAllLevels}
               style={[
                 styles.chip,
-                selectedDisplayLevel === dl.label && styles.chipActive,
+                teacherLevels.length === 0 && styles.chipActive,
               ]}
             >
-              {selectedDisplayLevel === dl.label && (
-                <View style={styles.chipDot} />
-              )}
-
+              {teacherLevels.length === 0 && <View style={styles.chipDot} />}
+              <Ionicons
+                name="apps-outline"
+                size={14}
+                color={
+                  teacherLevels.length === 0 ? theme.brand : theme.onSurfaceMuted
+                }
+              />
               <Text
                 style={[
                   styles.chipTxt,
-                  selectedDisplayLevel === dl.label && styles.chipTxtActive,
+                  teacherLevels.length === 0 && styles.chipTxtActive,
                 ]}
               >
-                {dl.label}
+                {t.pastQuestions.allLevels}
               </Text>
             </Pressable>
-          ))}
+          )}
+
+          {(isTeacher
+            ? DISPLAY_LEVELS
+            : DISPLAY_LEVELS.filter((dl) => dl.label === userLevel?.label)
+          ).map((dl) => {
+            const active = isLevelActive(dl.label, dl.backend);
+            return (
+              <Pressable
+                key={dl.label}
+                testID={`level-${dl.label}`}
+                onPress={() => handleLevelChange(dl.label)}
+                style={[styles.chip, active && styles.chipActive]}
+              >
+                {active && <View style={styles.chipDot} />}
+
+                <Text style={[styles.chipTxt, active && styles.chipTxtActive]}>
+                  {dl.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </ScrollView>
       </View>
 
@@ -762,6 +907,23 @@ export default function PastQuestions() {
             contentContainerStyle={styles.activeRowContent}
             keyboardShouldPersistTaps="handled"
           >
+            {/* Teacher category pills - one per toggled exam category */}
+            {isTeacher &&
+              teacherLevels.map((lvl) => (
+                <Pressable
+                  key={lvl}
+                  style={styles.activePill}
+                  onPress={() =>
+                    setTeacherLevels((prev) => prev.filter((x) => x !== lvl))
+                  }
+                >
+                  <Ionicons name="school-outline" size={13} color={theme.brand} />
+                  <Text style={styles.activePillTxt} numberOfLines={1}>
+                    {DISPLAY_LEVELS.find((dl) => dl.backend === lvl)?.label || lvl}
+                  </Text>
+                  <Ionicons name="close" size={13} color={theme.brand} />
+                </Pressable>
+              ))}
             {selectedSubject && (
               <Pressable
                 style={styles.activePill}
@@ -821,16 +983,25 @@ export default function PastQuestions() {
             <Text style={styles.sec} numberOfLines={1}>
               {selectedSubject || t.pastQuestions.allPapers}
             </Text>
-            {(selectedYear !== null || selectedPaper !== null) && (
+            {(selectedYear !== null ||
+              selectedPaper !== null ||
+              (isTeacher && teacherLevels.length > 0)) && (
               <Text style={styles.resultsSub}>
                 {[
+                  isTeacher && teacherLevels.length > 0
+                    ? teacherLevels.length === 1
+                      ? DISPLAY_LEVELS.find(
+                          (dl) => dl.backend === teacherLevels[0]
+                        )?.label || teacherLevels[0]
+                      : `${teacherLevels.length} levels`
+                    : null,
                   selectedPaper !== null
                     ? `${t.pastQuestions.paper} ${selectedPaper}`
                     : null,
                   selectedYear !== null ? `${selectedYear}` : null,
                 ]
                   .filter(Boolean)
-                  .join(" · ")}
+                  .join("  |  ")}
               </Text>
             )}
           </View>
@@ -1201,6 +1372,41 @@ const createStyles = (t: Palette) => StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     color: t.brand,
+    flexShrink: 1,
+    textAlign: "right",
+    marginLeft: 8,
+  },
+
+  // --- Teacher-only category controls ---
+  sectionTopLeft: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexShrink: 0,
+  },
+
+  teacherBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+    backgroundColor: t.brandTertiary,
+  },
+
+  teacherBadgeTxt: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: t.brand,
+    letterSpacing: 0.3,
+  },
+
+  teacherHint: {
+    fontSize: 11,
+    color: t.onSurfaceMuted,
+    paddingHorizontal: spacing.lg,
+    marginBottom: 2,
   },
 
   chipRow: {
