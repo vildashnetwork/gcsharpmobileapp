@@ -381,6 +381,7 @@ type Course = {
   exam_level: string;
   teacher_name: string;
   teacher_avatar?: string;
+  teacher_id?: string;
   thumbnail?: string;
   duration: string;
   views: number;
@@ -805,7 +806,12 @@ export default function CourseDetail() {
             <Text style={styles.meta}>{course.duration}</Text>
           </View>
 
-          <View style={styles.channelRow}>
+          <Pressable
+            style={styles.channelRow}
+            disabled={!course.teacher_id}
+            onPress={() => course.teacher_id && router.push(`/teacher-profile/${course.teacher_id}` as any)}
+            testID="teacher-row"
+          >
             {course.teacher_avatar ? (
               <Image source={{ uri: course.teacher_avatar }} style={styles.avatar} />
             ) : (
@@ -823,7 +829,10 @@ export default function CourseDetail() {
                 {course.subject_name} teacher
               </Text>
             </View>
-          </View>
+            {course.teacher_id ? (
+              <Ionicons name="chevron-forward" size={18} color={theme.onSurfaceMuted} />
+            ) : null}
+          </Pressable>
 
           {!!course.description && (
             <Pressable onPress={() => setDescExpanded((v) => !v)} style={styles.descBox}>

@@ -187,6 +187,7 @@ async def lifespan(app: FastAPI):
         await db.watch_history.create_index([("user_id", 1), ("course_id", 1)], unique=True)
         await db.video_likes.create_index([("user_id", 1), ("course_id", 1)], unique=True)
         await db.video_saves.create_index([("user_id", 1), ("course_id", 1)], unique=True)
+        await db.teacher_follows.create_index([("teacher_id", 1), ("follower_id", 1)], unique=True)
         await db.reminder_log.create_index([("user_id", 1), ("date", 1)])
         await db.ai_sessions.create_index([("user_id", 1), ("updated_at", -1)])
         
@@ -3537,6 +3538,26 @@ async def create_lesson(req: LessonIn, user: dict = Depends(get_current_user)):
         "created_at": datetime.utcnow(),
     }
     await db.lesson_videos.insert_one(doc)
+
+    # Notify followers (email + push) in the background so the upload
+    # response returns immediately and email-provider latency/slowness
+    # can never fail the publish.
+    try:
+        followers = await db.teacher_follows.find(
+            {"teacher_id": user["user_id"]}
+        ).to_list(1000)
+        if followers:
+            follower_ids = [f["follower_id"] for f in followers]
+            follower_docs = await db.users.find(
+                {"user_id": {"$in": follower_ids}},
+                {"_id": 0, "email": 1, "full_name": 1, "expo_push_token": 1},
+            ).to_list(1000)
+            asyncio.create_task(
+                _notify_followers_new_lesson(user["full_name"], doc, follower_docs)
+            )
+    except Exception as e:
+        logger.error(f"New-lesson notification dispatch failed: {e}")
+
     return {"lesson": serialize(doc)}
 
 @api_router.get("/teacher/lessons")
@@ -3592,6 +3613,164 @@ async def delete_lesson(lesson_id: str, user: dict = Depends(get_current_user)):
     _lesson_owner_or_403(lesson, user)
     await db.lesson_videos.delete_one({"lesson_id": lesson_id})
     return {"deleted": True, "lesson_id": lesson_id}
+
+
+# ============================================================
+# Teacher Profiles & Follows (Facebook-style)
+# ============================================================
+
+# Safe subset of the user doc exposed on a public teacher profile —
+# never leaks email, password/pin hashes, or auth bookkeeping.
+TEACHER_PROFILE_FIELDS = {
+    "_id": 0, "user_id": 1, "full_name": 1, "profile_photo": 1,
+    "bio": 1, "institution": 1, "specialization": 1,
+    "exam_level": 1, "role": 1, "subjects": 1, "created_at": 1,
+}
+
+
+def _normalize_teacher_video(doc: dict) -> dict:
+    """Shape both legacy `courses` and teacher `lesson_videos` uploads into
+    one card format for the teacher profile grid."""
+    return {
+        "course_id": doc.get("course_id") or doc.get("lesson_id"),
+        "title": doc.get("title", ""),
+        "description": doc.get("description", ""),
+        "subject_name": doc.get("subject_name") or doc.get("subject", ""),
+        "exam_level": doc.get("exam_level") or doc.get("level", ""),
+        "thumbnail": doc.get("thumbnail", ""),
+        "duration": doc.get("duration", ""),
+        "views": doc.get("views", 0),
+        "video_url": doc.get("video_url", ""),
+        "teacher_id": doc.get("teacher_id"),
+        "teacher_name": doc.get("teacher_name", ""),
+        "created_at": doc.get("created_at").isoformat() if hasattr(doc.get("created_at"), "isoformat") else (doc.get("created_at") or ""),
+    }
+
+
+@api_router.get("/teachers/{teacher_id}")
+async def get_teacher_profile(teacher_id: str, user: dict = Depends(get_current_user_optional)):
+    t = await db.users.find_one(
+        {"user_id": teacher_id, "role": {"$in": ("teacher", "admin")}},
+        TEACHER_PROFILE_FIELDS,
+    )
+    if not t:
+        raise HTTPException(404, "Teacher not found")
+
+    followers = await db.teacher_follows.count_documents({"teacher_id": teacher_id})
+    is_following = False
+    if user:
+        is_following = bool(await db.teacher_follows.find_one(
+            {"teacher_id": teacher_id, "follower_id": user["user_id"]}
+        ))
+
+    # Their published videos: teacher uploads + any legacy courses they own.
+    lessons = await db.lesson_videos.find(
+        {"teacher_id": teacher_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    courses = await db.courses.find(
+        {"teacher_id": teacher_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(100)
+    videos = [_normalize_teacher_video(x) for x in lessons] + [_normalize_teacher_video(x) for x in courses]
+    videos.sort(key=lambda v: str(v.get("created_at") or ""), reverse=True)
+
+    t["created_at"] = t["created_at"].isoformat() if hasattr(t.get("created_at"), "isoformat") else (t.get("created_at") or "")
+    return {
+        "teacher": t,
+        "followers": followers,
+        "is_following": is_following,
+        "videos": videos,
+        "total_views": sum(v.get("views", 0) for v in videos),
+    }
+
+
+@api_router.post("/teachers/{teacher_id}/follow")
+async def toggle_follow_teacher(teacher_id: str, user: dict = Depends(get_current_user)):
+    if teacher_id == user["user_id"]:
+        raise HTTPException(400, "You cannot follow yourself")
+    t = await db.users.find_one({"user_id": teacher_id, "role": {"$in": ("teacher", "admin")}})
+    if not t:
+        raise HTTPException(404, "Teacher not found")
+
+    existing = await db.teacher_follows.find_one(
+        {"teacher_id": teacher_id, "follower_id": user["user_id"]}
+    )
+    if existing:
+        await db.teacher_follows.delete_one({"_id": existing["_id"]})
+    else:
+        await db.teacher_follows.insert_one({
+            "follow_id": f"flw_{uuid.uuid4().hex[:10]}",
+            "teacher_id": teacher_id,
+            "follower_id": user["user_id"],
+            "created_at": datetime.utcnow(),
+        })
+    followers = await db.teacher_follows.count_documents({"teacher_id": teacher_id})
+    return {"following": not existing, "followers": followers}
+
+
+@api_router.get("/me/following")
+async def my_following(user: dict = Depends(get_current_user)):
+    follows = await db.teacher_follows.find(
+        {"follower_id": user["user_id"]}, {"_id": 0, "teacher_id": 1}
+    ).to_list(500)
+    ids = [f["teacher_id"] for f in follows]
+    if not ids:
+        return {"items": []}
+    teachers = await db.users.find({"user_id": {"$in": ids}}, TEACHER_PROFILE_FIELDS).to_list(500)
+    items = []
+    for t in teachers:
+        t["created_at"] = t["created_at"].isoformat() if hasattr(t.get("created_at"), "isoformat") else (t.get("created_at") or "")
+        items.append({
+            "user_id": t.get("user_id"),
+            "full_name": t.get("full_name", ""),
+            "profile_photo": t.get("profile_photo"),
+            "institution": t.get("institution", ""),
+            "specialization": t.get("specialization", ""),
+            "followers": await db.teacher_follows.count_documents({"teacher_id": t["user_id"]}),
+        })
+    return {"items": items}
+
+
+async def _notify_followers_new_lesson(teacher_name: str, lesson: dict, followers: list):
+    """Background task: email (Brevo) + push (Expo) every follower about a
+    newly published lesson. Runs outside the request so publishing stays fast
+    and a slow email provider never fails the upload."""
+    title = lesson.get("title", "a new lesson")
+    thumb = lesson.get("thumbnail") or ""
+    subject_line = lesson.get("subject_name") or ""
+    level = lesson.get("exam_level") or ""
+
+    html = f"""
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;background:#ffffff;border:1px solid #eee;border-radius:12px;overflow:hidden">
+      <div style="background:#4f46e5;padding:18px 24px;color:#fff;font-size:18px;font-weight:800">GC SHARP</div>
+      <div style="padding:24px">
+        <p style="margin:0 0 12px;font-size:15px;color:#333">
+          <strong>{teacher_name}</strong> just published a new lesson:
+        </p>
+        <h2 style="margin:0 0 8px;font-size:20px;color:#111">{title}</h2>
+        <p style="margin:0 0 16px;font-size:13px;color:#666">{subject_line}{' &middot; ' if subject_line and level else ''}{level}</p>
+        {f'<img src="{thumb}" alt="" style="width:100%;border-radius:8px;margin-bottom:16px" />' if thumb else ''}
+        <a href="https://gcsharpmobileapp.onrender.com" style="display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:700;font-size:14px">Watch it now in the app</a>
+        <p style="margin:16px 0 0;font-size:12px;color:#999">You're receiving this because you follow {teacher_name} on GC SHARP.</p>
+      </div>
+    </div>"""
+
+    email_sent = 0
+    for f in followers:
+        email = (f.get("email") or "").strip()
+        if email:
+            try:
+                await send_brevo_email(email, f"{teacher_name} posted a new lesson: {title}", html)
+                email_sent += 1
+            except Exception as e:
+                logger.error(f"Follower email to {email} failed: {e}")
+        token = f.get("expo_push_token")
+        if token:
+            try:
+                await send_expo_push(token, f"New lesson from {teacher_name}", title,
+                                     {"lesson_id": lesson.get("lesson_id")})
+            except Exception as e:
+                logger.error(f"Follower push failed: {e}")
+    logger.info(f"New-lesson notifications: {email_sent} emails sent for '{title}'")
 
 
 # ============================================================
