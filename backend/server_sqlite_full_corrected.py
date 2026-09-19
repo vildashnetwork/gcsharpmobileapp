@@ -2432,7 +2432,35 @@ async def get_student_profile(student_id: str, user: dict = Depends(get_current_
 
 @api_router.get("/library/courses")
 async def list_library_courses(user: dict = Depends(get_current_user_optional)):
-    items = await db.courses.find({}, {"_id": 0}).to_list(200)
+    # Lessons tab shows one unified feed: legacy courses + teacher lesson uploads.
+    courses = await db.courses.find({}, {"_id": 0}).to_list(200)
+    lessons = await db.lesson_videos.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    items = list(courses)
+    for l in lessons:
+        try:
+            created = l.get("created_at")
+            created_str = created.isoformat() if hasattr(created, "isoformat") else (created or "")
+        except Exception:
+            created_str = ""
+        items.append({
+            "course_id": l.get("lesson_id"),
+            "lesson_id": l.get("lesson_id"),
+            "teacher_id": l.get("teacher_id"),
+            "teacher_name": l.get("teacher_name", ""),
+            "teacher_avatar": l.get("teacher_avatar"),
+            "title": l.get("title", ""),
+            "description": l.get("description", ""),
+            "subject": l.get("subject_name", ""),
+            "subject_name": l.get("subject_name", ""),
+            "level": l.get("exam_level", ""),
+            "exam_level": l.get("exam_level", ""),
+            "video_url": l.get("video_url", ""),
+            "thumbnail": l.get("thumbnail", ""),
+            "duration": l.get("duration", "10:00"),
+            "views": l.get("views", 0),
+            "rating": l.get("rating", 5.0),
+            "created_at": created_str,
+        })
     if user:
         liked_docs = await db.video_likes.find(
             {"user_id": user["user_id"]}, {"_id": 0, "course_id": 1}
@@ -2454,6 +2482,35 @@ async def list_library_courses(user: dict = Depends(get_current_user_optional)):
 @api_router.get("/library/courses/{course_id}")
 async def get_library_course(course_id: str, user: dict = Depends(get_current_user_optional)):
     c = await db.courses.find_one({"course_id": course_id}, {"_id": 0})
+    if not c:
+        # Teacher lesson uploads live in lesson_videos — expose them as courses
+        # so tapping a teacher upload from the Lessons feed opens its detail page.
+        l = await db.lesson_videos.find_one({"lesson_id": course_id}, {"_id": 0})
+        if l:
+            try:
+                created = l.get("created_at")
+                created_str = created.isoformat() if hasattr(created, "isoformat") else (created or "")
+            except Exception:
+                created_str = ""
+            c = {
+                "course_id": l.get("lesson_id"),
+                "lesson_id": l.get("lesson_id"),
+                "teacher_id": l.get("teacher_id"),
+                "teacher_name": l.get("teacher_name", ""),
+                "teacher_avatar": l.get("teacher_avatar"),
+                "title": l.get("title", ""),
+                "description": l.get("description", ""),
+                "subject": l.get("subject_name", ""),
+                "subject_name": l.get("subject_name", ""),
+                "level": l.get("exam_level", ""),
+                "exam_level": l.get("exam_level", ""),
+                "video_url": l.get("video_url", ""),
+                "thumbnail": l.get("thumbnail", ""),
+                "duration": l.get("duration", "10:00"),
+                "views": l.get("views", 0),
+                "rating": l.get("rating", 5.0),
+                "created_at": created_str,
+            }
     if not c:
         raise HTTPException(404, "Not found")
     c = dict(c)
