@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Image, ActivityIndicator, Alert, Modal, Share, Animated } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, Image, ActivityIndicator, Alert, Modal, Share, Animated, Easing } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
@@ -134,6 +134,72 @@ function PhotoViewer({ uri, visible, onClose }: { uri: string | null; visible: b
   );
 }
 
+// Shared shimmer animation — one Animated.Value pulsing every skeleton
+// block in sync (same pattern as the lesson detail screen).
+function useShimmer() {
+  const anim = useRef(new Animated.Value(0.35)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 1, duration: 750, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(anim, { toValue: 0.35, duration: 750, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [anim]);
+  return anim;
+}
+
+// Skeleton that mirrors the real profile layout — avatar, name, sub line,
+// stats, follow pill, then lesson rows — so the page "settles" into place
+// instead of popping in.
+function ProfileSkeleton() {
+  const opacity = useShimmer();
+  return (
+    <View testID="profile-skeleton">
+      {/* Identity head */}
+      <View style={{ alignItems: "center", paddingHorizontal: spacing.lg, paddingTop: spacing.lg, gap: 10 }}>
+        <Animated.View style={[styles.skel, { opacity, width: 88, height: 88, borderRadius: 44 }]} />
+        <Animated.View style={[styles.skel, { opacity, width: "55%", height: 20, borderRadius: 6 }]} />
+        <Animated.View style={[styles.skel, { opacity, width: "38%", height: 13, borderRadius: 5 }]} />
+
+        {/* Stats row */}
+        <View style={{ flexDirection: "row", gap: 26, marginTop: 6 }}>
+          {[0, 1, 2].map((i) => (
+            <View key={i} style={{ alignItems: "center", gap: 6 }}>
+              <Animated.View style={[styles.skel, { opacity, width: 44, height: 17, borderRadius: 5 }]} />
+              <Animated.View style={[styles.skel, { opacity, width: 54, height: 11, borderRadius: 4 }]} />
+            </View>
+          ))}
+        </View>
+
+        {/* Follow pill */}
+        <Animated.View style={[styles.skel, { opacity, width: 150, height: 40, borderRadius: radii.pill, marginTop: 8 }]} />
+      </View>
+
+      <View style={[styles.divider, { marginTop: spacing.lg }]} />
+
+      {/* "Lessons by …" title */}
+      <View style={{ paddingHorizontal: spacing.lg, marginBottom: 10 }}>
+        <Animated.View style={[styles.skel, { opacity, width: "45%", height: 15, borderRadius: 5 }]} />
+      </View>
+
+      {/* Lesson rows */}
+      {[0, 1, 2].map((i) => (
+        <View key={i} style={[styles.videoRow, { paddingVertical: 10 }]}>
+          <Animated.View style={[styles.skel, { opacity, width: 150, height: 84, borderRadius: 8 }]} />
+          <View style={{ flex: 1, gap: 7 }}>
+            <Animated.View style={[styles.skel, { opacity, width: "92%", height: 13, borderRadius: 4 }]} />
+            <Animated.View style={[styles.skel, { opacity, width: "62%", height: 12, borderRadius: 4 }]} />
+            <Animated.View style={[styles.skel, { opacity, width: "35%", height: 12, borderRadius: 4 }]} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -193,23 +259,24 @@ export default function TeacherProfile() {
     }
   };
 
-  if (loading) {
+  // Skeleton only on first load; refocus refreshes (e.g. returning from
+  // Edit Profile) keep the current content visible while updating.
+  if (loading && !data) {
     return (
-      <SafeAreaView edges={["top"]} style={styles.root}>
+      <SafeAreaView edges={["top"]} style={styles.root} testID="teacher-profile-loading">
         <View style={styles.header}>
           <Pressable onPress={() => router.back()} testID="back-btn"><Ionicons name="arrow-back" size={22} color={theme.brand} /></Pressable>
           <Text style={styles.brand}>GCSHARP</Text>
           <View style={{ width: 22 }} />
         </View>
-        <View style={styles.centerBox}>
-          <ActivityIndicator size="large" color={theme.brandPrimary} />
-          <Text style={styles.muted}>Loading profile…</Text>
-        </View>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
+          <ProfileSkeleton />
+        </ScrollView>
       </SafeAreaView>
     );
   }
 
-  if (err || !data) {
+  if (!data) {
     return (
       <SafeAreaView edges={["top"]} style={styles.root}>
         <View style={styles.header}>
@@ -416,6 +483,8 @@ const createStyles = (t: Palette) => StyleSheet.create({
   statNum: { fontSize: 17, fontWeight: "800", color: t.onSurface },
   statLbl: { fontSize: 11.5, color: t.onSurfaceMuted, fontWeight: "600" },
   statDivider: { width: 1, height: 26, backgroundColor: t.border },
+
+  skel: { backgroundColor: t.surfaceTertiary },
 
   followBtn: {
     flexDirection: "row", alignItems: "center", gap: 6, marginTop: 12,
