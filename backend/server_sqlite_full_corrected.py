@@ -3649,12 +3649,27 @@ def _normalize_teacher_video(doc: dict) -> dict:
 
 @api_router.get("/teachers/{teacher_id}")
 async def get_teacher_profile(teacher_id: str, user: dict = Depends(get_current_user_optional)):
+    q = {"user_id": teacher_id, "role": {"$in": ("teacher", "admin")}}
+    # Self-view fallback: a teacher must always be able to open their own
+    # profile, even on a legacy account whose `role` was never set.
+    if user and user.get("user_id") == teacher_id:
+        q = {"user_id": teacher_id}
     t = await db.users.find_one(
-        {"user_id": teacher_id, "role": {"$in": ("teacher", "admin")}},
+        q,
         TEACHER_PROFILE_FIELDS,
     )
     if not t:
         raise HTTPException(404, "Teacher not found")
+
+    # Hard guarantees so the profile page can never crash on a legacy
+    # account that's missing fields (this crashed the screen before).
+    t.setdefault("full_name", "")
+    t.setdefault("profile_photo", None)
+    t.setdefault("bio", "")
+    t.setdefault("institution", "")
+    t.setdefault("specialization", "")
+    t.setdefault("exam_level", "")
+    t.setdefault("subjects", [])
 
     followers = await db.teacher_follows.count_documents({"teacher_id": teacher_id})
     is_following = False
@@ -3673,6 +3688,15 @@ async def get_teacher_profile(teacher_id: str, user: dict = Depends(get_current_
     videos = [_normalize_teacher_video(x) for x in lessons] + [_normalize_teacher_video(x) for x in courses]
     videos.sort(key=lambda v: str(v.get("created_at") or ""), reverse=True)
 
+    # Earnings shown only on self-view (never leak to public visitors).
+    total_earnings = 0
+    if user and user.get("user_id") == teacher_id:
+        total_earnings = sum(
+            (c.get("earnings", 0) or 0) for c in await db.courses.find(
+                {"teacher_id": teacher_id}, {"_id": 0, "earnings": 1}
+            ).to_list(200)
+        )
+
     t["created_at"] = t["created_at"].isoformat() if hasattr(t.get("created_at"), "isoformat") else (t.get("created_at") or "")
     return {
         "teacher": t,
@@ -3680,6 +3704,8 @@ async def get_teacher_profile(teacher_id: str, user: dict = Depends(get_current_
         "is_following": is_following,
         "videos": videos,
         "total_views": sum(v.get("views", 0) for v in videos),
+        "total_earnings": total_earnings,
+        "is_self": bool(user and user.get("user_id") == teacher_id),
     }
 
 

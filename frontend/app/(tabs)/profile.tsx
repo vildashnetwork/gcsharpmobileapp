@@ -395,6 +395,14 @@ export default function Profile() {
         <Row icon="chatbubble-ellipses-outline" label={t.tabs.ai} onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
         <Row icon="videocam-outline" label={t.tabs.lessons} onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
         <Row icon="book-outline" label={t.tabs.library} onPress={() => router.push("/(tabs)/library")} testID="row-library" />
+        {user?.role === "teacher" && (
+          <Row
+            icon="person-circle-outline"
+            label="My Teacher Profile"
+            onPress={() => user.user_id && router.push(`/teacher-profile/${user.user_id}` as any)}
+            testID="row-teacher-profile"
+          />
+        )}
         <Row icon="help-circle-outline" label="Help Center" onPress={() => Linking.openURL(HELP_CENTER_URL)} testID="row-help-center" />
 
 

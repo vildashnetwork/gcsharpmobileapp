@@ -50,6 +50,7 @@ export default function EditProfile() {
         name: "", // This maps to full_name on the backend
         bio: "",
         institution: "",
+        specialization: "",
         exam_level: "",
         daily_commitment: "1 hour",
         picture: "",
@@ -67,6 +68,7 @@ export default function EditProfile() {
                 name: user.full_name || "",
                 bio: (user as any).bio || "",
                 institution: (user as any).institution || "",
+                specialization: (user as any).specialization || "",
                 exam_level: user.exam_level || "",
                 daily_commitment: (user as any).daily_commitment || "1 hour",
                 picture: user.profile_photo || (user as any).picture || "",
@@ -263,6 +265,7 @@ export default function EditProfile() {
                 full_name: form.name, // ✅ Backend expects full_name
                 bio: form.bio,
                 institution: form.institution,
+                specialization: form.specialization,
                 exam_level: form.exam_level,
                 daily_commitment: form.daily_commitment,
                 picture: form.picture,
@@ -353,6 +356,20 @@ export default function EditProfile() {
                             placeholderTextColor={theme.onSurfaceMuted}
                         />
                     </View>
+
+                    {/* Specialization (teachers — shown on their public profile) */}
+                    {user?.role === "teacher" && (
+                    <View style={styles.field}>
+                        <Text style={styles.label}>Specialization</Text>
+                        <TextInput
+                            style={styles.input}
+                            value={form.specialization}
+                            onChangeText={(v) => updateField("specialization", v)}
+                            placeholder="e.g. Pure Mathematics, Physics"
+                            placeholderTextColor={theme.onSurfaceMuted}
+                        />
+                    </View>
+                    )}
 
                     {/* Exam Level */}
                     {user?.role !== "teacher" && (

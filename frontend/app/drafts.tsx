@@ -723,7 +723,7 @@ export default function DraftsScreen() {
       if (error.message?.includes("401")) {
         // Token expired – redirect to login
         await storage.removeItem("token");
-        router.replace("/login");
+        router.replace("/login" as any);
         return;
       }
       // Still try to load highlights

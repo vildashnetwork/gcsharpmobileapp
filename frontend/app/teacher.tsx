@@ -38,6 +38,13 @@ export default function TeacherDashboard() {
         <Pressable style={styles.logout} onPress={doLogout} testID="logout-btn">
           <Ionicons name="log-out-outline" size={20} color={theme.error} />
         </Pressable>
+        <Pressable
+          style={styles.logout}
+          onPress={() => user?.user_id && router.push(`/teacher-profile/${user.user_id}` as any)}
+          testID="my-profile-btn"
+        >
+          <Ionicons name="person-outline" size={20} color={theme.brandPrimary} />
+        </Pressable>
       </View>
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 40 }}>

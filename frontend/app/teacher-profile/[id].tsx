@@ -2,11 +2,12 @@ import { useEffect, useState, useCallback } from "react";
 import { View, Text, StyleSheet, Pressable, ScrollView, Image, ActivityIndicator, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter, useFocusEffect } from "expo-router";
 import { useTheme } from "@/src/theme-context";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { useAuth } from "@/src/auth";
 
 type TeacherProfile = {
   user_id: string;
@@ -36,6 +37,8 @@ type ProfileResponse = {
   is_following: boolean;
   videos: TeacherVideo[];
   total_views: number;
+  total_earnings?: number;
+  is_self?: boolean;
 };
 
 function formatCount(n: number): string {
@@ -48,6 +51,7 @@ export default function TeacherProfile() {
   useTheme(); // re-render on light/dark change
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { user } = useAuth();
 
   const [data, setData] = useState<ProfileResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -68,7 +72,9 @@ export default function TeacherProfile() {
     }
   }, [id]);
 
-  useEffect(() => { load(); }, [load]);
+  // Reload every time the screen regains focus — e.g. returning from
+  // Edit Profile so photo/bio changes show immediately.
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const toggleFollow = async () => {
     if (!data || followBusy) return;
@@ -129,6 +135,9 @@ export default function TeacherProfile() {
   }
 
   const t = data.teacher;
+  // Viewing your own profile → setup mode instead of follow mode.
+  const isSelf = !!data.is_self || (!!user && user.user_id === t.user_id);
+  const displayName = (t.full_name || user?.full_name || "Teacher").trim();
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="teacher-profile-screen">
@@ -148,7 +157,7 @@ export default function TeacherProfile() {
               <Text style={styles.avatarInitial}>{(t.full_name || "T").charAt(0).toUpperCase()}</Text>
             </View>
           )}
-          <Text style={styles.name}>{t.full_name}</Text>
+          <Text style={styles.name}>{displayName}</Text>
           {(t.specialization || t.institution) ? (
             <Text style={styles.sub} numberOfLines={1}>
               {[t.specialization, t.institution].filter(Boolean).join(" · ")}
@@ -174,30 +183,65 @@ export default function TeacherProfile() {
             </View>
           </View>
 
-          {/* ---- Follow button ---- */}
-          <Pressable
-            style={[styles.followBtn, data.is_following && styles.followingBtn, followBusy && { opacity: 0.7 }]}
-            onPress={toggleFollow}
-            disabled={followBusy}
-            testID="follow-btn"
-          >
-            {followBusy ? (
-              <ActivityIndicator size="small" color={data.is_following ? theme.brand : "#fff"} />
-            ) : (
-              <>
-                <Ionicons name={data.is_following ? "person-remove" : "person-add"} size={16} color={data.is_following ? theme.brand : "#fff"} />
-                <Text style={[styles.followTxt, data.is_following && styles.followingTxt]} testID="follow-label">
-                  {data.is_following ? "Following" : "Follow"}
-                </Text>
-              </>
-            )}
-          </Pressable>
+          {/* ---- Follow (visitors) / Edit profile (self) ---- */}
+          {isSelf ? (
+            <>
+              <View style={styles.selfBadge}>
+                <Ionicons name="person-circle" size={14} color={theme.brand} />
+                <Text style={styles.selfBadgeTxt}>This is your public profile</Text>
+              </View>
+              <Pressable
+                style={[styles.followBtn, followBusy && { opacity: 0.7 }]}
+                onPress={() => router.push("/edit-profile")}
+                testID="edit-profile-btn"
+              >
+                <Ionicons name="create-outline" size={16} color="#fff" />
+                <Text style={styles.followTxt}>Set up my profile</Text>
+              </Pressable>
+              {(data.total_earnings ?? 0) > 0 ? (
+                <View style={styles.earnCard}>
+                  <Ionicons name="cash-outline" size={18} color={theme.success} />
+                  <Text style={styles.earnAmt}>{Math.round(data.total_earnings ?? 0).toLocaleString()} FCFA</Text>
+                  <Text style={styles.earnLbl}>earned so far</Text>
+                </View>
+              ) : null}
+            </>
+          ) : (
+            <Pressable
+              style={[styles.followBtn, data.is_following && styles.followingBtn, followBusy && { opacity: 0.7 }]}
+              onPress={toggleFollow}
+              disabled={followBusy}
+              testID="follow-btn"
+            >
+              {followBusy ? (
+                <ActivityIndicator size="small" color={data.is_following ? theme.brand : "#fff"} />
+              ) : (
+                <>
+                  <Ionicons name={data.is_following ? "person-remove" : "person-add"} size={16} color={data.is_following ? theme.brand : "#fff"} />
+                  <Text style={[styles.followTxt, data.is_following && styles.followingTxt]} testID="follow-label">
+                    {data.is_following ? "Following" : "Follow"}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+          )}
         </View>
 
         <View style={styles.divider} />
 
-        {/* ---- Lessons ---- */}
-        <Text style={styles.sectionTitle}>Lessons by {t.full_name.split(" ")[0]}</Text>
+        {/* ---- Lessons (teacher avatar + name here too) ---- */}
+        <View style={styles.bylineRow}>
+          {t.profile_photo ? (
+            <Image source={{ uri: t.profile_photo }} style={styles.bylineAvatar} />
+          ) : (
+            <View style={[styles.bylineAvatar, styles.bylineFallback]}>
+              <Text style={styles.bylineInitial}>{(t.full_name || "T").charAt(0).toUpperCase()}</Text>
+            </View>
+          )}
+          <Text style={styles.sectionTitle} testID="lessons-by">
+            Lessons by {isSelf ? "you" : (displayName.split(" ")[0] || "this teacher")}
+          </Text>
+        </View>
         {data.videos.length === 0 ? (
           <Text style={styles.empty}>No lessons published yet.</Text>
         ) : (
@@ -260,9 +304,19 @@ const createStyles = (t: Palette) => StyleSheet.create({
   followTxt: { color: "#fff", fontWeight: "800", fontSize: 14 },
   followingTxt: { color: t.brand },
 
+  selfBadge: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 8, paddingHorizontal: 12, paddingVertical: 5, borderRadius: radii.pill, backgroundColor: t.brandTertiary },
+  selfBadgeTxt: { color: t.brand, fontSize: 12, fontWeight: "700" },
+  earnCard: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10, paddingHorizontal: 16, paddingVertical: 8, borderRadius: radii.md, backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border },
+  earnAmt: { color: t.success, fontWeight: "800", fontSize: 14 },
+  earnLbl: { color: t.onSurfaceMuted, fontSize: 12.5, fontWeight: "600" },
+
   divider: { height: 8, backgroundColor: t.surfaceTertiary, marginTop: spacing.lg, marginBottom: spacing.md },
 
-  sectionTitle: { fontSize: 15, fontWeight: "800", color: t.onSurface, paddingHorizontal: spacing.lg, marginBottom: 6 },
+  sectionTitle: { fontSize: 15, fontWeight: "800", color: t.onSurface, flex: 1, flexShrink: 1 },
+  bylineRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.lg, marginBottom: 6 },
+  bylineAvatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: t.surfaceTertiary },
+  bylineFallback: { alignItems: "center", justifyContent: "center", backgroundColor: t.brandTertiary },
+  bylineInitial: { color: t.onBrandTertiary, fontWeight: "800", fontSize: 14 },
   empty: { color: t.onSurfaceMuted, fontSize: 13, paddingHorizontal: spacing.lg, paddingVertical: 16 },
 
   videoRow: { flexDirection: "row", gap: 10, paddingHorizontal: spacing.lg, paddingVertical: 8, alignItems: "center" },
