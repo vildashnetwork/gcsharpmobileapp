@@ -19,6 +19,9 @@ from pydantic import field_validator
 from fastapi import (
     FastAPI, APIRouter, HTTPException, Header, Depends, Request, Response,
     WebSocket, WebSocketDisconnect,
+    # Needed by the voice-input endpoint (`POST /ai/transcribe`): the recorded
+    # clip arrives as multipart form data.
+    File, UploadFile, Form,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, Response as FastResponse
