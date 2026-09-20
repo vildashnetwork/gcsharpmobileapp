@@ -415,6 +415,8 @@ export default function Profile() {
 
 
 
+        <Row icon="book-outline" label="User guide" onPress={() => router.push("/user-guide" as any)} testID="row-guide" />
+
         <Row icon="log-out-outline" label={t.profile.logout} danger onPress={doLogout} testID="row-logout" />
       </ScrollView>
     </SafeAreaView>
