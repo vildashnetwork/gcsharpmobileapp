@@ -47,19 +47,29 @@ function wsBase(): string {
 export function useStudyGroupSocket(groupId: string | undefined,
                                     onEvent: (e: GroupEvent) => void) {
   const [connected, setConnected] = useState(false);
+  const [sockError, setSockError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const handlerRef = useRef(onEvent);
   handlerRef.current = onEvent;
   const retryRef = useRef(0);
   const closedRef = useRef(false);
+  const attemptRef = useRef(0);
 
   const send = useCallback((payload: Record<string, any>) => {
+    const ws = wsRef.current;
     try {
-      wsRef.current?.send(JSON.stringify(payload));
+      // @ts-ignore - RN WebSocket exposes readyState like the web spec.
+      if (!ws || ws.readyState !== 1) return false;
+      ws.send(JSON.stringify(payload));
       return true;
     } catch {
       return false;
     }
+  }, []);
+
+  const reconnect = useCallback(() => {
+    retryRef.current = 0;
+    try { wsRef.current?.close(); } catch {}
   }, []);
 
   useEffect(() => {
@@ -69,10 +79,19 @@ export function useStudyGroupSocket(groupId: string | undefined,
     let pingTimer: any = null;
 
     const connect = async () => {
+      const attempt = ++attemptRef.current;
       try {
         const token = await readToken();
+        if (attempt !== attemptRef.current || closedRef.current) return;
+        if (!token) {
+          setSockError("Sign-in expired - reconnecting…");
+          retryRef.current += 1;
+          timer = setTimeout(connect, Math.min(2000 * retryRef.current, 8000));
+          return;
+        }
+        setSockError(null);
         const url = `${wsBase()}/api/ws/study-groups/${groupId}`
-          + (token ? `?token=${encodeURIComponent(token)}` : "");
+          + `?token=${encodeURIComponent(token)}`;
         const ws = new WebSocket(url);
         wsRef.current = ws;
         ws.onopen = () => {
@@ -89,15 +108,22 @@ export function useStudyGroupSocket(groupId: string | undefined,
           } catch {}
         };
         ws.onerror = () => { try { ws.close(); } catch {} };
-        ws.onclose = () => {
+        ws.onclose = (ev: any) => {
           setConnected(false);
           if (pingTimer) clearInterval(pingTimer);
-          wsRef.current = null;
-          if (!closedRef.current) {
-            retryRef.current += 1;
-            const wait = Math.min(1000 * retryRef.current, 8000);
-            timer = setTimeout(connect, wait);
+          if (wsRef.current === ws) wsRef.current = null;
+          if (closedRef.current) return;
+          // 1008 = policy violation: bad/expired token, not a member, or
+          // group gone. Retrying forever just burns battery and leaves the
+          // header stuck on "reconnecting" - surface it instead.
+          const code = typeof ev?.code === "number" ? ev.code : 0;
+          if (code === 1008) {
+            setSockError("Live chat unavailable (signed out or not a member). Messages still send.");
+            return;
           }
+          retryRef.current += 1;
+          const wait = Math.min(1000 * retryRef.current, 8000);
+          timer = setTimeout(connect, wait);
         };
       } catch {
         retryRef.current += 1;
@@ -114,5 +140,5 @@ export function useStudyGroupSocket(groupId: string | undefined,
     };
   }, [groupId]);
 
-  return { connected, send };
+  return { connected, send, sockError, reconnect };
 }

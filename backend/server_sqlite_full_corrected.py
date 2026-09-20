@@ -5146,10 +5146,12 @@ async def websocket_study_group(websocket: WebSocket, group_id: str,
         "type": "ready",
         "group": _study_group_public(group, user["user_id"]),
         "online_count": len(room),
+        "online_ids": sorted(room.keys()),
     })
     await _broadcast_group(group_id, {
         "type": "presence", "user_id": user["user_id"],
         "online_count": len(room),
+        "online_ids": sorted(room.keys()),
     }, exclude=user["user_id"])
     try:
         while True:
@@ -5207,6 +5209,15 @@ async def websocket_study_group(websocket: WebSocket, group_id: str,
         room.pop(user["user_id"], None)
         if not room:
             _group_sockets.pop(group_id, None)
+        else:
+            try:
+                await _broadcast_group(group_id, {
+                    "type": "presence", "user_id": user["user_id"],
+                    "online_count": len(room),
+                    "online_ids": sorted(room.keys()),
+                })
+            except Exception:
+                pass
 
 
 @api_router.get("/users/peers")

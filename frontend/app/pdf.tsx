@@ -1013,6 +1013,8 @@ export default function PdfViewer() {
   const [askOpen, setAskOpen] = useState<{ text: string } | null>(null);
   const [videoOpen, setVideoOpen] = useState<{ text: string } | null>(null);
   const [saveOpen, setSaveOpen] = useState<{ text: string; page: number } | null>(null);
+  const [groupShare, setGroupShare] = useState<{ text: string; page: number } | null>(null);
+  const [myGroups, setMyGroups] = useState<{ group_id: string; name: string }[]>([]);
   const [solution, setSolution] = useState<any>(null);
   const [solLoading, setSolLoading] = useState(false);
     const [speaking, setSpeaking] = useState(false);
@@ -1354,6 +1356,39 @@ export default function PdfViewer() {
     router.push({ pathname: "/(tabs)/ai", params: { seed: t } });
   };
 
+  const openGroupShare = () => {
+    const src = askOpen || (saveOpen ? { text: saveOpen.text } : null);
+    if (!src) return;
+    setGroupShare({ text: src.text, page: saveOpen?.page ?? 1 });
+    api<{ mine: { group_id: string; name: string }[] }>("/study-groups")
+      .then((r) => setMyGroups(r.mine || []))
+      .catch(() => setMyGroups([]));
+  };
+
+  const sendHighlightToGroup = async (groupId: string) => {
+    if (!groupShare) return;
+    try {
+      await api(`/study-groups/${groupId}/messages`, {
+        method: "POST",
+        body: {
+          kind: "highlight",
+          text: groupShare.text,
+          page: groupShare.page,
+          ...(paper_id ? { paper_id } : {}),
+        },
+      });
+      setSavedMsg("Highlight sent to your study group.");
+      setGroupShare(null);
+      setAskOpen(null);
+      setSaveOpen(null);
+      setTimeout(() => setSavedMsg(null), 3000);
+      router.push(`/study-groups/${groupId}` as any);
+    } catch (e: any) {
+      setSavedMsg(`Could not send: ${e.message}`);
+      setTimeout(() => setSavedMsg(null), 3000);
+    }
+  };
+
   const generateHighlightSolution = async () => {
     if (!videoOpen || !paper_id) return;
     setSolution(null);
@@ -1671,6 +1706,10 @@ export default function PdfViewer() {
               <Ionicons name="sparkles" size={18} color="#fff" />
               <Text style={styles.primaryBtnTxt}>{t.pdf.openInChat}</Text>
             </Pressable>
+            <Pressable style={styles.primaryBtn} onPress={openGroupShare} testID="share-group">
+              <Ionicons name="people-outline" size={18} color="#fff" />
+              <Text style={styles.primaryBtnTxt}>Send to study group</Text>
+            </Pressable>
             <Pressable style={styles.ghostBtn} onPress={() => setAskOpen(null)} testID="cancel-ask">
               <Text style={styles.ghostBtnTxt}>Cancel</Text>
             </Pressable>
@@ -1689,7 +1728,48 @@ export default function PdfViewer() {
               <Ionicons name="bookmark" size={18} color="#fff" />
               <Text style={styles.primaryBtnTxt}>{t.pdf.saveToDrafts}</Text>
             </Pressable>
+            <Pressable
+              style={styles.primaryBtn}
+              onPress={() => { setGroupShare(saveOpen); setSaveOpen(null); openGroupShare(); }}
+              testID="save-share-group"
+            >
+              <Ionicons name="people-outline" size={18} color="#fff" />
+              <Text style={styles.primaryBtnTxt}>Send to study group</Text>
+            </Pressable>
             <Pressable style={styles.ghostBtn} onPress={() => setSaveOpen(null)} testID="cancel-save">
+              <Text style={styles.ghostBtnTxt}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Send highlight to a study group */}
+      <Modal visible={!!groupShare} transparent animationType="slide" onRequestClose={() => setGroupShare(null)}>
+        <View style={styles.sheetBackdrop}>
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, spacing.lg) }]} testID="group-share-sheet">
+            <View style={styles.grabber} />
+            <Text style={styles.sheetTitle}>Send to study group</Text>
+            <Text style={styles.sheetSel} numberOfLines={5}>
+              “{groupShare?.text}”{groupShare ? ` (p.${groupShare.page})` : ""}
+            </Text>
+            {myGroups.length === 0 ? (
+              <Text style={styles.sheetSel}>You are not in any study group yet. Create or join one from the Groups tab.</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 260 }}>
+                {myGroups.map((g) => (
+                  <Pressable
+                    key={g.group_id}
+                    style={styles.primaryBtn}
+                    onPress={() => sendHighlightToGroup(g.group_id)}
+                    testID={`share-to-${g.group_id}`}
+                  >
+                    <Ionicons name="people-outline" size={18} color="#fff" />
+                    <Text style={styles.primaryBtnTxt} numberOfLines={1}>{g.name}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+            <Pressable style={styles.ghostBtn} onPress={() => setGroupShare(null)} testID="cancel-share">
               <Text style={styles.ghostBtnTxt}>Cancel</Text>
             </Pressable>
           </View>

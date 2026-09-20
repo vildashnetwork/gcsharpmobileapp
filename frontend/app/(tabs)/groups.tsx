@@ -4,6 +4,7 @@ import {
   ActivityIndicator, RefreshControl, Alert, Modal, Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
@@ -193,6 +194,11 @@ export default function StudyGroups() {
         </ScrollView>
       )}
       <Modal visible={createOpen} transparent animationType="slide" onRequestClose={() => setCreateOpen(false)}>
+        <KeyboardAwareScrollView
+          contentContainerStyle={{ flexGrow: 1, justifyContent: "flex-end" }}
+          bottomOffset={24}
+          extraKeyboardSpace={12}
+        >
         <View style={styles.backdrop}>
           <View style={styles.sheet} testID="create-group-sheet">
             <View style={styles.grabber} />
@@ -229,6 +235,7 @@ export default function StudyGroups() {
             </Pressable>
           </View>
         </View>
+        </KeyboardAwareScrollView>
       </Modal>
     </SafeAreaView>
   );
