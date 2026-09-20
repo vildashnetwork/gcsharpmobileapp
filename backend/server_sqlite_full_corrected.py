@@ -188,6 +188,14 @@ async def lifespan(app: FastAPI):
         await db.video_likes.create_index([("user_id", 1), ("course_id", 1)], unique=True)
         await db.video_saves.create_index([("user_id", 1), ("course_id", 1)], unique=True)
         await db.teacher_follows.create_index([("teacher_id", 1), ("follower_id", 1)], unique=True)
+        # Study groups: group lookup, membership checks, request dedupe, chat history.
+        await db.study_groups.create_index("group_id", unique=True)
+        await db.study_groups.create_index([("exam_level", 1), ("updated_at", -1)])
+        await db.study_groups.create_index("members.user_id")
+        await db.study_group_requests.create_index(
+            [("group_id", 1), ("user_id", 1)], unique=True)
+        await db.study_group_requests.create_index([("group_id", 1), ("status", 1)])
+        await db.study_group_messages.create_index([("group_id", 1), ("created_at", -1)])
         await db.reminder_log.create_index([("user_id", 1), ("date", 1)])
         await db.ai_sessions.create_index([("user_id", 1), ("updated_at", -1)])
         
@@ -4481,6 +4489,744 @@ async def websocket_notifications(websocket: WebSocket, user_id: str = None):
     except WebSocketDisconnect:
         manager.disconnect(user_id)
 
+# Study groups: models + helpers
+# ============================================================
+
+class StudyGroupIn(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    # Optional explicit level; students default to their own exam_level.
+    exam_level: Optional[str] = None
+    avatar: Optional[str] = None
+
+
+class StudyGroupPatch(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    avatar: Optional[str] = None
+
+
+def _study_group_public(g: dict, viewer_id: Optional[str] = None) -> dict:
+    members = g.get("members") or []
+    member_ids = [m.get("user_id") for m in members if isinstance(m, dict)]
+    return {
+        "group_id": g.get("group_id"),
+        "name": g.get("name", "Study group"),
+        "description": g.get("description", ""),
+        "exam_level": g.get("exam_level", ""),
+        "avatar": g.get("avatar"),
+        "created_by": g.get("created_by"),
+        "member_count": len(members),
+        "is_member": (viewer_id in member_ids) if viewer_id else False,
+        "is_admin": any(
+            isinstance(m, dict) and m.get("user_id") == viewer_id
+            and m.get("role") == "admin" for m in members
+        ) if viewer_id else False,
+        "my_status": next(
+            (m.get("status", "member") for m in members
+             if isinstance(m, dict) and m.get("user_id") == viewer_id),
+            None,
+        ),
+        "members": [
+            {
+                "user_id": m.get("user_id"),
+                "full_name": m.get("full_name", "Student"),
+                "profile_photo": m.get("profile_photo"),
+                "role": m.get("role", "member"),
+                "status": m.get("status", "member"),
+                "joined_at": m.get("joined_at"),
+            }
+            for m in members if isinstance(m, dict)
+        ],
+        "last_message": g.get("last_message"),
+        "created_at": g.get("created_at"),
+        "updated_at": g.get("updated_at"),
+    }
+
+
+def _require_group_member(group: dict, user_id: str) -> dict:
+    for m in group.get("members") or []:
+        if isinstance(m, dict) and m.get("user_id") == user_id:
+            if m.get("status") in (None, "member"):
+                return m
+            raise HTTPException(403, "You are not an active member of this group")
+    raise HTTPException(403, "You are not a member of this group")
+
+
+def _require_group_admin(group: dict, user_id: str, user_role: str = ""):
+    if user_role == "admin":
+        return
+    for m in group.get("members") or []:
+        if (isinstance(m, dict) and m.get("user_id") == user_id
+                and m.get("role") == "admin"):
+            return
+    raise HTTPException(403, "Group admins only")
+
+
+async def _serialize_group_message(m: dict) -> dict:
+    d = serialize(m)
+    d.pop("sender_profile_photo", None)
+    return d
+
+
+# Per-group live sockets. Keyed by group_id -> {user_id -> WebSocket}.
+# Runs over TCP (like every WebSocket) and carries text, voice-note
+# references, paper attachments, highlights, typing and @GC-AI answers
+# in real time.
+_group_sockets: Dict[str, Dict[str, WebSocket]] = {}
+
+
+async def _broadcast_group(group_id: str, payload: dict, exclude: Optional[str] = None):
+    targets = list((_group_sockets.get(group_id) or {}).items())
+    dead: List[str] = []
+    for uid, ws in targets:
+        if exclude is not None and uid == exclude:
+            continue
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(uid)
+    if dead:
+        room = _group_sockets.get(group_id) or {}
+        for uid in dead:
+            room.pop(uid, None)
+        if not room:
+            _group_sockets.pop(group_id, None)
+
+
+async def _notify_group_event(member_ids: List[str], message: str,
+                              ntype: str, link: str):
+    for uid in member_ids:
+        try:
+            await create_notification(uid, message, ntype, link)
+        except Exception:
+            continue
+
+
+def _group_ai_history(messages: List[dict], limit: int = 12) -> str:
+    recent = [m for m in messages if (m.get("kind") in ("text", "ai_answer"))][-limit:]
+    lines = []
+    for m in recent:
+        who = "GC AI" if m.get("kind") == "ai_answer" else m.get("sender_name", "Student")
+        body = (m.get("text") or "").strip()
+        if body:
+            lines.append(f"{who}: {body[:600]}")
+    return "\n".join(lines)
+
+
+async def _answer_group_ai(db, group: dict, question: str, asker: dict) -> Dict:
+    """Answer a group question with the shared GC AI brain (non-streaming)."""
+    history_docs = await db.study_group_messages.find(
+        {"group_id": group["group_id"]}, {"_id": 0}
+    ).sort("created_at", -1).to_list(12)
+    history_docs.reverse()
+    outcome = await gc_ai.answer_question(
+        db,
+        question,
+        subject="General",
+        history_context=(
+            f"Study group '{group.get('name')}' ({group.get('exam_level')}) "
+            f"chat so far:\n{_group_ai_history(history_docs)}\n\n" if history_docs else ""
+        ),
+        profile_snapshot={
+            "full_name": asker.get("full_name", "Student"),
+            "exam_level": group.get("exam_level") or asker.get("exam_level") or "Not set",
+            "subjects": asker.get("subjects", []),
+            "group": group.get("name"),
+        },
+        use_local_solver=solve_math_local,
+    )
+    return outcome
+
+
+
+
+async def _store_group_message(group: dict, sender: dict, payload: dict) -> dict:
+    kind = str(payload.get("kind") or "text").strip().lower()
+    if kind not in ("text", "voice", "paper", "highlight", "question", "ai_answer"):
+        raise HTTPException(400, "Unsupported message kind")
+    text = str(payload.get("text") or "").strip()
+    if kind == "text" and not text:
+        raise HTTPException(400, "Message text is required")
+    if kind == "text" and len(text) > 4000:
+        text = text[:4000]
+    meta: dict = {}
+    if kind == "voice":
+        url = str(payload.get("audio_url") or "").strip()
+        if not url:
+            raise HTTPException(400, "audio_url is required for voice notes")
+        try:
+            meta["duration_sec"] = max(1, int(float(payload.get("duration_sec") or 0)))
+        except Exception:
+            meta["duration_sec"] = 0
+        meta["audio_url"] = url
+        meta["transcript"] = str(payload.get("transcript") or "")[:2000]
+    elif kind == "paper":
+        paper_id = str(payload.get("paper_id") or "").strip()
+        if not paper_id:
+            raise HTTPException(400, "paper_id is required")
+        paper = await db.papers.find_one({"paper_id": paper_id}, {"_id": 0})
+        if not paper:
+            raise HTTPException(404, "Paper not found")
+        meta.update({
+            "paper_id": paper.get("paper_id"),
+            "paper_title": paper.get("title", "Past paper"),
+            "subject": paper.get("subject", ""),
+            "year": paper.get("year"),
+            "paper_number": paper.get("paper_number"),
+            "level": paper.get("level", ""),
+            "pdf_url": paper.get("pdf_url", ""),
+        })
+    elif kind in ("highlight", "question"):
+        qtext = text or str(payload.get("question") or "").strip()
+        if not qtext:
+            raise HTTPException(400, "Question text is required")
+        text = qtext[:2000]
+        if payload.get("paper_id"):
+            paper = await db.papers.find_one(
+                {"paper_id": str(payload["paper_id"])}, {"_id": 0})
+            if paper:
+                meta.update({
+                    "paper_id": paper.get("paper_id"),
+                    "paper_title": paper.get("title", "Past paper"),
+                    "subject": paper.get("subject", ""),
+                    "year": paper.get("year"),
+                    "paper_number": paper.get("paper_number"),
+                })
+        if payload.get("page") is not None:
+            try:
+                meta["page"] = int(payload["page"])
+            except Exception:
+                pass
+    now = datetime.utcnow().isoformat()
+    doc = {
+        "message_id": f"sgm_{uuid.uuid4().hex[:12]}",
+        "group_id": group["group_id"],
+        "kind": kind,
+        "sender_id": sender.get("user_id", "gc_ai") if kind != "ai_answer" else "gc_ai",
+        "sender_name": sender.get("full_name", "Student") if kind != "ai_answer" else "GC AI",
+        "sender_photo": sender.get("profile_photo") if kind != "ai_answer" else None,
+        "text": text,
+        "meta": meta,
+        "created_at": now,
+    }
+    await db.study_group_messages.insert_one(dict(doc))
+    preview = text[:80] if text else {
+        "voice": "Voice note", "paper": "Shared a past paper",
+        "highlight": "Shared a highlighted question",
+        "question": "Asked a question",
+        "ai_answer": "GC AI answered",
+    }.get(kind, "New message")
+    await db.study_groups.update_one(
+        {"group_id": group["group_id"]},
+        {"$set": {"updated_at": now,
+                  "last_message": {"kind": kind, "text": preview,
+                                   "sender_name": doc["sender_name"],
+                                   "created_at": now}}})
+    return serialize(doc)
+
+
+
+
+async def _reply_group_ai(group: dict, trigger_msg: dict, asker: dict) -> dict:
+    question = (trigger_msg.get("text") or "").strip()
+    if question.lower().startswith("@ai"):
+        question = question[3:].strip()
+    if not question:
+        return {}
+    await _broadcast_group(group["group_id"], {"type": "ai_typing", "typing": True,
+                                               "question": question[:160]})
+    try:
+        outcome = await _answer_group_ai(db, group, question, asker)
+    except Exception as e:
+        logger.warning(f"Group AI failed: {e}")
+        outcome = {"answer": "I could not answer that just now - please try again.",
+                   "source": "error", "learned": False}
+    finally:
+        await _broadcast_group(group["group_id"], {"type": "ai_typing", "typing": False})
+    ai_msg = await _store_group_message(
+        group,
+        {"user_id": "gc_ai", "full_name": "GC AI", "profile_photo": None},
+        {"kind": "ai_answer",
+         "text": str(outcome.get("answer") or "I could not answer that just now.")[:4000]})
+    ai_msg["ai_source"] = outcome.get("source", "")
+    ai_msg["ai_learned"] = bool(outcome.get("learned"))
+    await _broadcast_group(group["group_id"], {"type": "message", "message": ai_msg})
+    return ai_msg
+
+
+async def _maybe_answer_group_ai(group_id: str, msg: dict, sender: dict):
+    try:
+        text = (msg.get("text") or "")
+        if msg.get("kind") not in ("text", "highlight", "question"):
+            return
+        if not text.lower().lstrip().startswith("@ai"):
+            return
+        group = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+        if not group:
+            return
+        await _reply_group_ai(group, msg, sender)
+    except Exception as e:
+        logger.warning(f"Group AI auto-answer failed: {e}")
+
+
+
+@api_router.get("/study-groups")
+async def list_study_groups(user: dict = Depends(get_current_user)):
+    mine = await db.study_groups.find(
+        {"members.user_id": user["user_id"]}, {"_id": 0}
+    ).sort("updated_at", -1).to_list(100)
+    level = (user.get("exam_level") or "").strip()
+    discover = []
+    if level:
+        discover = await db.study_groups.find(
+            {"exam_level": level, "members.user_id": {"$ne": user["user_id"]}},
+            {"_id": 0},
+        ).sort("updated_at", -1).to_list(50)
+    pending_out, pending_in = [], []
+    if user.get("role") != "teacher":
+        pending_out = await db.study_group_requests.find(
+            {"user_id": user["user_id"], "status": "pending"}, {"_id": 0}
+        ).to_list(100)
+    else:
+        pending_in = await db.study_group_requests.find(
+            {"status": "pending"}, {"_id": 0}
+        ).sort("created_at", -1).to_list(100)
+    return {
+        "mine": [_study_group_public(g, user["user_id"]) for g in mine],
+        "discover": [_study_group_public(g, user["user_id"]) for g in discover],
+        "my_level": level,
+        "pending_out": pending_out,
+        "pending_in": pending_in,
+    }
+
+
+@api_router.post("/study-groups")
+async def create_study_group(inp: StudyGroupIn, user: dict = Depends(get_current_user)):
+    if user.get("role") == "teacher":
+        raise HTTPException(403, "Study groups are for students")
+    name = (inp.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Group name is required")
+    level = (inp.exam_level or user.get("exam_level") or "").strip()
+    if not level:
+        raise HTTPException(400, "Set your exam level first (Profile > Edit)")
+    now = datetime.utcnow().isoformat()
+    doc = {
+        "group_id": f"sg_{uuid.uuid4().hex[:12]}",
+        "name": name[:80],
+        "description": (inp.description or "")[:500],
+        "exam_level": level,
+        "avatar": inp.avatar,
+        "created_by": user["user_id"],
+        "members": [{
+            "user_id": user["user_id"],
+            "full_name": user.get("full_name", "Student"),
+            "profile_photo": user.get("profile_photo"),
+            "role": "admin",
+            "status": "member",
+            "joined_at": now,
+        }],
+        "last_message": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.study_groups.insert_one(dict(doc))
+    return {"group": _study_group_public(doc, user["user_id"])}
+
+@api_router.get("/study-groups/{group_id}")
+async def get_study_group(group_id: str, user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    if not any(isinstance(m, dict) and m.get("user_id") == user["user_id"]
+               for m in g.get("members") or []):
+        if (g.get("exam_level") or "") != (user.get("exam_level") or ""):
+            raise HTTPException(403, "This group is for another exam level")
+    return {"group": _study_group_public(g, user["user_id"])}
+
+
+@api_router.get("/study-groups/{group_id}/messages")
+async def list_group_messages(group_id: str, limit: int = 60,
+                              before: Optional[str] = None,
+                              user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_member(g, user["user_id"])
+    q: dict = {"group_id": group_id}
+    if before:
+        q["created_at"] = {"$lt": before}
+    docs = await db.study_group_messages.find(q, {"_id": 0}).sort(
+        "created_at", -1).to_list(min(max(limit, 1), 100))
+    docs.reverse()
+    return {"items": [serialize(m) for m in docs]}
+
+
+@api_router.post("/study-groups/{group_id}/messages")
+async def post_group_message_http(group_id: str, payload: dict,
+                                  user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_member(g, user["user_id"])
+    msg = await _store_group_message(g, user, payload or {})
+    await _broadcast_group(group_id, {"type": "message", "message": msg})
+    asyncio.create_task(_maybe_answer_group_ai(group_id, msg, dict(user)))
+    return {"message": msg}
+
+
+@api_router.post("/study-groups/{group_id}/ask-ai")
+async def ask_group_ai_http(group_id: str, payload: dict,
+                            user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_member(g, user["user_id"])
+    question = str((payload or {}).get("question") or (payload or {}).get("text") or "").strip()
+    if not question:
+        raise HTTPException(400, "Question is required")
+    qmsg = await _store_group_message(g, user, {"kind": "text", "text": question})
+    await _broadcast_group(group_id, {"type": "message", "message": qmsg})
+    fresh = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    answer = await _reply_group_ai(fresh or g, qmsg, dict(user))
+    return {"question": qmsg, "answer": answer}
+
+@api_router.get("/study-groups/{group_id}/requests")
+async def list_group_requests(group_id: str, user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_admin(g, user["user_id"], user.get("role", ""))
+    items = await db.study_group_requests.find(
+        {"group_id": group_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return {"items": items}
+
+
+@api_router.post("/study-groups/{group_id}/requests")
+async def request_join_group(group_id: str, user: dict = Depends(get_current_user)):
+    if user.get("role") == "teacher":
+        raise HTTPException(403, "Study groups are for students")
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    if any(isinstance(m, dict) and m.get("user_id") == user["user_id"]
+           for m in g.get("members") or []):
+        return {"ok": True, "status": "member"}
+    if (g.get("exam_level") or "") != (user.get("exam_level") or ""):
+        raise HTTPException(403, "This group is for another exam level")
+    existing = await db.study_group_requests.find_one(
+        {"group_id": group_id, "user_id": user["user_id"]}, {"_id": 0})
+    if existing and existing.get("status") == "pending":
+        return {"ok": True, "status": "pending"}
+    now = datetime.utcnow().isoformat()
+    req = {
+        "request_id": f"sgr_{uuid.uuid4().hex[:12]}",
+        "group_id": group_id,
+        "group_name": g.get("name", "Study group"),
+        "user_id": user["user_id"],
+        "full_name": user.get("full_name", "Student"),
+        "profile_photo": user.get("profile_photo"),
+        "exam_level": user.get("exam_level", ""),
+        "status": "pending",
+        "created_at": now,
+    }
+    await db.study_group_requests.update_one(
+        {"group_id": group_id, "user_id": user["user_id"]},
+        {"$set": req}, upsert=True)
+    admins = [m.get("user_id") for m in g.get("members") or []
+              if isinstance(m, dict) and m.get("role") == "admin"]
+    await _broadcast_group(group_id, {"type": "join_request", "request": req})
+    asyncio.create_task(_notify_group_event(
+        admins, f"{req['full_name']} wants to join '{g.get('name')}'",
+        "group_join_request", f"/study-groups/{group_id}"))
+    return {"ok": True, "status": "pending"}
+
+@api_router.post("/study-groups/{group_id}/requests/{request_id}")
+async def decide_join_request(group_id: str, request_id: str, payload: dict,
+                              user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_admin(g, user["user_id"], user.get("role", ""))
+    req = await db.study_group_requests.find_one(
+        {"request_id": request_id, "group_id": group_id}, {"_id": 0})
+    if not req or req.get("status") != "pending":
+        raise HTTPException(404, "Request not found")
+    action = str((payload or {}).get("action") or "").lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be approve or reject")
+    if action == "reject":
+        await db.study_group_requests.update_one(
+            {"request_id": request_id}, {"$set": {"status": "rejected"}})
+        await _broadcast_group(group_id, {"type": "request_decided",
+                                          "request_id": request_id, "action": "reject"})
+        return {"ok": True, "action": "reject"}
+    now = datetime.utcnow().isoformat()
+    await db.study_group_requests.update_one(
+        {"request_id": request_id}, {"$set": {"status": "approved"}})
+    if not any(isinstance(m, dict) and m.get("user_id") == req["user_id"]
+               for m in g.get("members") or []):
+        await db.study_groups.update_one(
+            {"group_id": group_id},
+            {"$push": {"members": {
+                "user_id": req["user_id"],
+                "full_name": req.get("full_name", "Student"),
+                "profile_photo": req.get("profile_photo"),
+                "role": "member", "status": "member", "joined_at": now}},
+             "$set": {"updated_at": now}})
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    await _broadcast_group(group_id, {
+        "type": "member_joined",
+        "member": {"user_id": req["user_id"],
+                   "full_name": req.get("full_name", "Student"),
+                   "profile_photo": req.get("profile_photo")},
+        "group": _study_group_public(g, None),
+    })
+    asyncio.create_task(_notify_group_event(
+        [req["user_id"]], f"You joined '{g.get('name')}'", "group_joined",
+        f"/study-groups/{group_id}"))
+    return {"ok": True, "action": "approve"}
+
+
+@api_router.post("/study-groups/{group_id}/invite")
+async def invite_group_member(group_id: str, payload: dict,
+                              user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_admin(g, user["user_id"], user.get("role", ""))
+    target_id = str((payload or {}).get("user_id") or "").strip()
+    if not target_id:
+        raise HTTPException(400, "user_id is required")
+    target = await db.users.find_one({"user_id": target_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "Student not found")
+    if target.get("role") == "teacher":
+        raise HTTPException(403, "Study groups are for students")
+    if (target.get("exam_level") or "") != (g.get("exam_level") or ""):
+        raise HTTPException(403, "That student is in a different exam level")
+    if any(isinstance(m, dict) and m.get("user_id") == target_id
+           for m in g.get("members") or []):
+        return {"ok": True, "status": "member"}
+    now = datetime.utcnow().isoformat()
+    await db.study_groups.update_one(
+        {"group_id": group_id},
+        {"$push": {"members": {
+            "user_id": target_id,
+            "full_name": target.get("full_name", "Student"),
+            "profile_photo": target.get("profile_photo"),
+            "role": "member", "status": "member", "joined_at": now}},
+         "$set": {"updated_at": now}})
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    await _broadcast_group(group_id, {
+        "type": "member_joined",
+        "member": {"user_id": target_id,
+                   "full_name": target.get("full_name", "Student"),
+                   "profile_photo": target.get("profile_photo")},
+        "group": _study_group_public(g, None),
+    })
+    asyncio.create_task(_notify_group_event(
+        [target_id], f"You were added to '{g.get('name')}'", "group_joined",
+        f"/study-groups/{group_id}"))
+    return {"ok": True, "status": "member"}
+
+@api_router.get("/study-groups/{group_id}/candidates")
+async def list_group_candidates(group_id: str, q: Optional[str] = None,
+                                user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_admin(g, user["user_id"], user.get("role", ""))
+    member_ids = {m.get("user_id") for m in g.get("members") or [] if isinstance(m, dict)}
+    query: dict = {"role": {"$ne": "teacher"}, "exam_level": g.get("exam_level")}
+    if q and q.strip():
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        query["$or"] = [{"full_name": rx}, {"email": rx}]
+    docs = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(50)
+    return {"items": [
+        {"user_id": d.get("user_id"), "full_name": d.get("full_name", "Student"),
+         "email": d.get("email", ""), "profile_photo": d.get("profile_photo"),
+         "exam_level": d.get("exam_level", "")}
+        for d in docs if d.get("user_id") not in member_ids][:30]}
+
+
+@api_router.post("/study-groups/{group_id}/leave")
+async def leave_study_group(group_id: str, user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    member = next((m for m in g.get("members") or []
+                   if isinstance(m, dict) and m.get("user_id") == user["user_id"]), None)
+    if not member:
+        return {"ok": True}
+    remaining = [m for m in g.get("members") or []
+                 if not (isinstance(m, dict) and m.get("user_id") == user["user_id"])]
+    if not remaining:
+        await db.study_groups.delete_one({"group_id": group_id})
+        await db.study_group_messages.delete_many({"group_id": group_id})
+        await db.study_group_requests.delete_many({"group_id": group_id})
+        await _broadcast_group(group_id, {"type": "group_deleted", "group_id": group_id})
+        return {"ok": True, "deleted": True}
+    if member.get("role") == "admin" and not any(
+            isinstance(m, dict) and m.get("role") == "admin" for m in remaining):
+        remaining[0]["role"] = "admin"
+        await db.study_groups.update_one(
+            {"group_id": group_id},
+            {"$set": {"members": remaining,
+                      "updated_at": datetime.utcnow().isoformat()}})
+    else:
+        await db.study_groups.update_one(
+            {"group_id": group_id},
+            {"$pull": {"members": {"user_id": user["user_id"]}},
+             "$set": {"updated_at": datetime.utcnow().isoformat()}})
+    await _broadcast_group(group_id, {"type": "member_left",
+                                      "user_id": user["user_id"]})
+    return {"ok": True}
+
+
+@api_router.patch("/study-groups/{group_id}")
+async def patch_study_group(group_id: str, inp: StudyGroupPatch,
+                            user: dict = Depends(get_current_user)):
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not g:
+        raise HTTPException(404, "Group not found")
+    _require_group_admin(g, user["user_id"], user.get("role", ""))
+    patch = {}
+    if inp.name is not None and inp.name.strip():
+        patch["name"] = inp.name.strip()[:80]
+    if inp.description is not None:
+        patch["description"] = inp.description[:500]
+    if inp.avatar is not None:
+        patch["avatar"] = inp.avatar
+    if not patch:
+        return {"group": _study_group_public(g, user["user_id"])}
+    patch["updated_at"] = datetime.utcnow().isoformat()
+    await db.study_groups.update_one({"group_id": group_id}, {"$set": patch})
+    g = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    await _broadcast_group(group_id, {"type": "group_updated",
+                                      "group": _study_group_public(g, None)})
+    return {"group": _study_group_public(g, user["user_id"])}
+
+@api_router.websocket("/ws/study-groups/{group_id}")
+async def websocket_study_group(websocket: WebSocket, group_id: str,
+                                token: Optional[str] = None,
+                                user_id: Optional[str] = None):
+    user: Optional[dict] = None
+    if token:
+        try:
+            user = await get_current_user(f"Bearer {token}")
+        except HTTPException:
+            user = None
+    if user is None and user_id:
+        doc = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+        if doc:
+            doc.pop("password_hash", None)
+            user = doc
+    if user is None:
+        await websocket.close(code=1008)
+        return
+    group = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
+    if not group:
+        await websocket.close(code=1008)
+        return
+    try:
+        _require_group_member(group, user["user_id"])
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+    room = _group_sockets.setdefault(group_id, {})
+    room[user["user_id"]] = websocket
+    try:
+        await websocket.accept()
+    except Exception:
+        room.pop(user["user_id"], None)
+        return
+    await websocket.send_json({
+        "type": "ready",
+        "group": _study_group_public(group, user["user_id"]),
+        "online_count": len(room),
+    })
+    await _broadcast_group(group_id, {
+        "type": "presence", "user_id": user["user_id"],
+        "online_count": len(room),
+    }, exclude=user["user_id"])
+    try:
+        while True:
+            data = await websocket.receive_json()
+            etype = str(data.get("type") or "").strip().lower()
+            if etype == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif etype == "typing":
+                await _broadcast_group(group_id, {
+                    "type": "typing", "user_id": user["user_id"],
+                    "full_name": user.get("full_name", "Student"),
+                    "typing": bool(data.get("typing", True)),
+                }, exclude=user["user_id"])
+            elif etype in ("send", "ask_ai"):
+                try:
+                    fresh = await db.study_groups.find_one(
+                        {"group_id": group_id}, {"_id": 0})
+                    if not fresh:
+                        await websocket.send_json({"type": "error",
+                                                   "message": "Group no longer exists"})
+                        continue
+                    _require_group_member(fresh, user["user_id"])
+                    if etype == "ask_ai":
+                        question = str(data.get("question") or data.get("text") or "").strip()
+                        if not question:
+                            await websocket.send_json({"type": "error",
+                                                       "message": "Question is required"})
+                            continue
+                        qmsg = await _store_group_message(
+                            fresh, user, {"kind": "text", "text": question})
+                        await _broadcast_group(group_id, {"type": "message",
+                                                          "message": qmsg})
+                        asyncio.create_task(_reply_group_ai(fresh, qmsg, dict(user)))
+                    else:
+                        msg = await _store_group_message(fresh, user, data)
+                        await _broadcast_group(group_id, {"type": "message",
+                                                          "message": msg})
+                        asyncio.create_task(
+                            _maybe_answer_group_ai(group_id, msg, dict(user)))
+                except HTTPException as e:
+                    await websocket.send_json({"type": "error",
+                                               "message": e.detail})
+                except Exception as e:
+                    logger.warning(f"Group WS event failed: {e}")
+                    await websocket.send_json({"type": "error",
+                                               "message": "Could not send message"})
+            else:
+                await websocket.send_json({"type": "error",
+                                           "message": "Unknown event"})
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Group WS error: {e}")
+    finally:
+        room.pop(user["user_id"], None)
+        if not room:
+            _group_sockets.pop(group_id, None)
+
+
+@api_router.get("/users/peers")
+async def list_peer_students(q: Optional[str] = None, limit: int = 30,
+                             user: dict = Depends(get_current_user)):
+    query: dict = {"role": {"$ne": "teacher"}}
+    if user.get("role") != "teacher" and user.get("exam_level"):
+        query["exam_level"] = user["exam_level"]
+    if q and q.strip():
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
+        query["$or"] = [{"full_name": rx}, {"email": rx}]
+    docs = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(
+        min(max(limit, 1), 50))
+    return {"items": [
+        {"user_id": d.get("user_id"), "full_name": d.get("full_name", "Student"),
+         "email": d.get("email", ""), "profile_photo": d.get("profile_photo"),
+         "exam_level": d.get("exam_level", "")}
+        for d in docs if d.get("user_id") != user["user_id"]][:30]}
+
+
 @api_router.get("/notifications")
 async def get_notifications(user: dict = Depends(get_current_user)):
     notifs = await db.notifications.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
@@ -4499,6 +5245,7 @@ async def mark_notification_read(notification_id: str, user: dict = Depends(get_
         raise HTTPException(404, "Notification not found")
     return {"ok": True}
 
+# ============================================================
 @api_router.put("/notifications/read-all")
 async def mark_all_notifications_read(user: dict = Depends(get_current_user)):
     await db.notifications.update_many(
