@@ -909,7 +909,16 @@ async def _call_openrouter(model: str, prompt: str, system: str,
             )
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"]
-                return content if content and content.strip() else None
+                if content and content.strip():
+                    low = content.strip().lower()
+                    # Never surface provider billing/quota pages as a "taught"
+                    # answer - treat them as a miss so the next provider (or
+                    # the web-solved composer) answers instead.
+                    if ("doesn" in low or "does not" in low) and "credit" in low:
+                        logger.warning(f"OpenRouter {model} returned a billing notice")
+                        return None
+                    return content
+                return None
             logger.warning(f"OpenRouter {model} -> {resp.status_code}")
     except Exception as e:
         logger.warning(f"OpenRouter {model} error: {e}")
@@ -965,6 +974,12 @@ async def _call_pollinations(prompt: str, system: str,
             if resp.status_code == 200:
                 text = resp.text.strip()
                 if text and not text.startswith("<"):
+                    low = text.lower()
+                    # Pollinations sometimes returns a billing/quota page as
+                    # HTTP 200 text - never treat that as a tutor answer.
+                    if ("doesn" in low or "does not" in low) and "credit" in low:
+                        logger.warning("Pollinations returned a billing notice")
+                        return None
                     return text
             logger.warning(f"Pollinations -> {resp.status_code}")
     except Exception as e:
@@ -1009,20 +1024,25 @@ async def call_llm(prompt: str, system: Optional[str] = None,
     """
     sys = system or FALLBACK_SYSTEM
 
-    # Provider 1: keyless Pollinations - always available, no API key needed
-    text = await _call_pollinations(prompt, sys, max_tokens, timeout)
-    if text:
-        return clean_markdown(text), "pollinations"
+    # Provider 1: your OpenRouter key first - every other AI feature uses it.
+    for model in OPENROUTER_CHAIN:
+        text = await _call_openrouter(model, prompt, sys, max_tokens, timeout)
+        if text:
+            return clean_markdown(text), f"openrouter:{model}"
 
     # Provider 2: Google Gemini (independent of OpenRouter)
     text = await _call_gemini(prompt, sys, max_tokens, timeout)
     if text:
         return clean_markdown(text), "google-gemini"
 
-    for model in OPENROUTER_CHAIN:
-        text = await _call_openrouter(model, prompt, sys, max_tokens, timeout)
-        if text:
-            return clean_markdown(text), f"openrouter:{model}"
+    # Provider 3: keyless Pollinations - last-resort safety net, no API key.
+    text = await _call_pollinations(prompt, sys, max_tokens, timeout)
+    if text:
+        low = text.strip().lower()
+        if ("doesn" in low or "does not" in low) and "credit" in low:
+            logger.warning("Pollinations returned a billing notice; ignoring")
+        else:
+            return clean_markdown(text), "pollinations"
 
     return (
         "I could not reach my learning services right now. Please try again in a "

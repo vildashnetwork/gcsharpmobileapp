@@ -144,6 +144,47 @@ export default function StudyGroupChat() {
     typingTimer.current = setTimeout(() => send({ type: "typing", typing: false }), 1500);
   };
 
+  // ---- @ mention popup: tag GC AI or a group member ----
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQ, setMentionQ] = useState("");
+  const [cursorPos, setCursorPos] = useState(0);
+
+  const mentionOptions = useMemo(() => {
+    const q = mentionQ.toLowerCase();
+    const ai = { kind: "ai" as const, user_id: "gc_ai", full_name: "GC AI",
+                 profile_photo: null as string | null };
+    const members = (group?.members || []).map((m) => ({
+      kind: "member" as const, user_id: m.user_id, full_name: m.full_name,
+      profile_photo: m.profile_photo || null,
+    }));
+    return [ai, ...members].filter((o) =>
+      !q || o.full_name.toLowerCase().includes(q)).slice(0, 8);
+  }, [mentionQ, group?.members]);
+
+  const onMentionChange = (v: string) => {
+    onChangeText(v);
+    const upto = v.slice(0, cursorPos || v.length);
+    const m = upto.match(/@([A-Za-z0-9_ ]{0,30})$/);
+    if (m) {
+      setMentionQ(m[1]);
+      setMentionOpen(true);
+    } else {
+      setMentionOpen(false);
+    }
+  };
+
+  const applyMention = (o: { kind: string; full_name: string }) => {
+    const before = text.slice(0, cursorPos || text.length);
+    const after = text.slice(cursorPos || text.length);
+    const stripped = before.replace(/@[A-Za-z0-9_ ]{0,30}$/, "");
+    const label = o.kind === "ai" ? "@ai " : `@${o.full_name} `;
+    const next = stripped + label + after;
+    setText(next);
+    setCursorPos((stripped + label).length);
+    setMentionOpen(false);
+    setMentionQ("");
+  };
+
   const sendText = useCallback(async () => {
     const v = text.trim();
     if (!v) return;
@@ -500,14 +541,42 @@ export default function StudyGroupChat() {
           </View>
         )}
 
+        {mentionOpen && mentionOptions.length > 0 && (
+          <View style={styles.mentionBox}>
+            {mentionOptions.map((o) => (
+              <Pressable
+                key={`${o.kind}-${o.user_id}`}
+                style={styles.mentionRow}
+                onPress={() => applyMention(o)}
+              >
+                <View style={styles.miniAvatar}>
+                  {o.kind === "ai" ? (
+                    <Ionicons name="sparkles" size={14} color={theme.brandPrimary} />
+                  ) : o.profile_photo ? (
+                    <Image source={{ uri: o.profile_photo }} style={styles.miniImg} />
+                  ) : (
+                    <Text style={styles.miniInitial}>
+                      {(o.full_name || "?").charAt(0).toUpperCase()}
+                    </Text>
+                  )}
+                </View>
+                <Text style={styles.mentionName} numberOfLines={1}>
+                  {o.kind === "ai" ? "GC AI — ask a question" : o.full_name}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
         <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
           <Pressable onPress={() => setAttachOpen((v) => !v)} style={styles.iconBtn} testID="attach-btn">
             <Ionicons name={attachOpen ? "close" : "add"} size={22} color={theme.brandPrimary} />
           </Pressable>
           <TextInput
             value={text}
-            onChangeText={onChangeText}
-            placeholder="Message... (type @ai to ask GC AI)"
+            onChangeText={onMentionChange}
+            onSelectionChange={(e) => setCursorPos(e.nativeEvent.selection.start)}
+            placeholder="Message... (type @ to mention)"
             placeholderTextColor={theme.onSurfaceMuted}
             style={styles.input}
             multiline
@@ -824,6 +893,17 @@ const createStyles = (t: Palette) => StyleSheet.create({
     borderRadius: radii.pill,
   },
   sectionTitle: { fontSize: 13, fontWeight: "800", color: t.onSurfaceMuted, marginTop: 8 },
+  mentionBox: {
+    backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border,
+    borderRadius: radii.md, marginHorizontal: spacing.sm, marginBottom: 6,
+    maxHeight: 220, ...shadow1,
+  },
+  mentionRow: {
+    flexDirection: "row", alignItems: "center", gap: 10,
+    paddingHorizontal: 12, paddingVertical: 9,
+    borderBottomWidth: 1, borderBottomColor: t.divider,
+  },
+  mentionName: { flex: 1, fontSize: 14, fontWeight: "600", color: t.onSurface },
   approveBtn: { backgroundColor: t.brandPrimary, paddingHorizontal: 12, paddingVertical: 6, borderRadius: radii.pill },
   approveTxt: { color: "#fff", fontWeight: "700", fontSize: 12 },
   rejectBtn: { paddingHorizontal: 10, paddingVertical: 6 },
