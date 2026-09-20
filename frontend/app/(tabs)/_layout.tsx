@@ -18,6 +18,7 @@ function useTabItems() {
     { name: "lessons", label: t.tabs.lessons, icon: "videocam-outline", iconActive: "videocam" },
     { name: "ai", label: t.tabs.ai, icon: "sparkles-outline", iconActive: "sparkles", center: true },
     { name: "library", label: t.tabs.library, icon: "book-outline", iconActive: "book", hideForTeacher: true },
+    { name: "groups", label: (t.tabs as any).groups ?? "Groups", icon: "people-outline", iconActive: "people", studentOnly: true },
     { name: "profile", label: t.tabs.profile, icon: "person-outline", iconActive: "person" },
     { name: "teacher-upload", label: (t.tabs as any).upload ?? "Upload", icon: "cloud-upload-outline", iconActive: "cloud-upload", teacherOnly: true },
   ];
@@ -36,6 +37,7 @@ function CustomTabBar({ state, descriptors, navigation }: any) {
           .filter((route: any) => {
             const meta = TAB_ITEMS.find((t) => t.name === route.name);
             if ((meta as any)?.teacherOnly && !isTeacher) return false;
+            if ((meta as any)?.studentOnly && isTeacher) return false;
             if ((meta as any)?.hideForTeacher && isTeacher) return false;
             return true;
           })
@@ -105,6 +107,7 @@ export default function TabsLayout() {
       <Tabs.Screen name="lessons" />
       <Tabs.Screen name="ai" />
       <Tabs.Screen name="library" />
+      <Tabs.Screen name="groups" />
       <Tabs.Screen name="profile" />
       {/* Teachers-only: visible in the bar only for teachers/admins */}
       <Tabs.Screen name="teacher-upload" />

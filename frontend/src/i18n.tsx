@@ -128,6 +128,7 @@ const en = {
         ai: "AI Tutor",
         profile: "Profile",
         upload: "Upload",
+        groups: "Groups",
     },
     home: {
         greeting: "Hello",
@@ -452,6 +453,7 @@ const fr: Dict = {
         ai: "Tuteur IA",
         profile: "Profil",
         upload: "Publier",
+        groups: "Groupes",
     },
     home: {
         greeting: "Bonjour",
