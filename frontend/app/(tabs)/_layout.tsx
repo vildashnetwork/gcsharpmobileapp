@@ -17,7 +17,6 @@ function useTabItems() {
     { name: "index", label: t.tabs.home, icon: "home-outline", iconActive: "home" },
     { name: "lessons", label: t.tabs.lessons, icon: "videocam-outline", iconActive: "videocam" },
     { name: "ai", label: t.tabs.ai, icon: "sparkles-outline", iconActive: "sparkles", center: true },
-    { name: "library", label: t.tabs.library, icon: "book-outline", iconActive: "book", hideForTeacher: true },
     { name: "groups", label: (t.tabs as any).groups ?? "Groups", icon: "people-outline", iconActive: "people", studentOnly: true },
     { name: "profile", label: t.tabs.profile, icon: "person-outline", iconActive: "person" },
     { name: "teacher-upload", label: (t.tabs as any).upload ?? "Upload", icon: "cloud-upload-outline", iconActive: "cloud-upload", teacherOnly: true },
@@ -42,54 +41,54 @@ function CustomTabBar({ state, descriptors, navigation }: any) {
             return true;
           })
           .map((route: any) => {
-          const meta = TAB_ITEMS.find((t) => t.name === route.name);
-          if (!meta) return null;
-          const focused = state.routes[state.index]?.key === route.key;
+            const meta = TAB_ITEMS.find((t) => t.name === route.name);
+            if (!meta) return null;
+            const focused = state.routes[state.index]?.key === route.key;
 
-          const onPress = () => {
-            const event = navigation.emit({
-              type: "tabPress",
-              target: route.key,
-              canPreventDefault: true,
-            });
-            if (!focused && !event.defaultPrevented) {
-              navigation.navigate(route.name);
+            const onPress = () => {
+              const event = navigation.emit({
+                type: "tabPress",
+                target: route.key,
+                canPreventDefault: true,
+              });
+              if (!focused && !event.defaultPrevented) {
+                navigation.navigate(route.name);
+              }
+            };
+
+            if (meta.center) {
+              // Raised circular button – pokes above the bar using negative margin
+              return (
+                <View key={route.key} style={styles.centerSlot}>
+                  <Pressable
+                    onPress={onPress}
+                    style={[styles.centerButton, focused && styles.centerButtonFocused]}
+                    hitSlop={8}
+                  >
+                    <Ionicons
+                      name={(focused ? meta.iconActive : meta.icon) as any}
+                      size={24}
+                      color="#fff"
+                    />
+                  </Pressable>
+                  <Text style={[styles.label, styles.centerLabel, focused && styles.labelActive]}>
+                    {meta.label}
+                  </Text>
+                </View>
+              );
             }
-          };
 
-          if (meta.center) {
-            // Raised circular button – pokes above the bar using negative margin
             return (
-              <View key={route.key} style={styles.centerSlot}>
-                <Pressable
-                  onPress={onPress}
-                  style={[styles.centerButton, focused && styles.centerButtonFocused]}
-                  hitSlop={8}
-                >
-                  <Ionicons
-                    name={(focused ? meta.iconActive : meta.icon) as any}
-                    size={24}
-                    color="#fff"
-                  />
-                </Pressable>
-                <Text style={[styles.label, styles.centerLabel, focused && styles.labelActive]}>
-                  {meta.label}
-                </Text>
-              </View>
+              <Pressable key={route.key} onPress={onPress} style={styles.item}>
+                <Ionicons
+                  name={(focused ? meta.iconActive : meta.icon) as any}
+                  size={22}
+                  color={focused ? theme.brandPrimary : theme.onSurfaceMuted}
+                />
+                <Text style={[styles.label, focused && styles.labelActive]}>{meta.label}</Text>
+              </Pressable>
             );
-          }
-
-          return (
-            <Pressable key={route.key} onPress={onPress} style={styles.item}>
-              <Ionicons
-                name={(focused ? meta.iconActive : meta.icon) as any}
-                size={22}
-                color={focused ? theme.brandPrimary : theme.onSurfaceMuted}
-              />
-              <Text style={[styles.label, focused && styles.labelActive]}>{meta.label}</Text>
-            </Pressable>
-          );
-        })}
+          })}
       </View>
     </View>
   );
@@ -106,7 +105,6 @@ export default function TabsLayout() {
       <Tabs.Screen name="index" />
       <Tabs.Screen name="lessons" />
       <Tabs.Screen name="ai" />
-      <Tabs.Screen name="library" />
       <Tabs.Screen name="groups" />
       <Tabs.Screen name="profile" />
       {/* Teachers-only: visible in the bar only for teachers/admins */}
