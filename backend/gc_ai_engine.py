@@ -48,11 +48,27 @@ FALLBACK_SYSTEM = (
 )
 
 OPENROUTER_CHAIN = [
-    "openai/gpt-oss-20b:free",
-    "google/gemma-3n-e4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "deepseek/deepseek-chat-v3-0324:free",
+    # Verified live with YOUR key on Sep 20, 2026 (HTTP 200 + real content).
+    "nex-agi/nex-n2.5-mini:free",
+    "dots-studio/dots-3-note-preview:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "cohere/north-mini-code:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    # Also reachable but rate-limited at probe time; kept as depth so a
+    # retry minutes later can still land: qwen, gemini-4 pair, nemotron
+    # super/ultra, poolside pair, nex pro, inclusionai trio.
+    "qwen/qwen3.8-27b:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "poolside/laguna-xs-2.1:free",
+    "poolside/laguna-s-2.1:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "deepseek/deepseek-v4-flash-0731:free",
 ]
 
 # ------------------------------------------------------------
@@ -908,7 +924,11 @@ async def _call_openrouter(model: str, prompt: str, system: str,
                 },
             )
             if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"]
+                try:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                except Exception:
+                    logger.warning(f"OpenRouter {model} -> 200 with unparseable body")
+                    return None
                 if content and content.strip():
                     low = content.strip().lower()
                     # Never surface provider billing/quota pages as a "taught"
@@ -992,24 +1012,52 @@ async def _call_gemini(prompt: str, system: str,
     """Direct Google Gemini call - fully independent of OpenRouter."""
     if not GEMINI_API_KEY:
         return None
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    # Your GEMINI_MODEL=gemini-2.0-flash is retired (Google 404). Probe the
+    # live model list with your key and use the newest working flash model.
+    models = [os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")]
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as hc:
+            lst = await hc.get(
+                f"{GEMINI_BASE}/models", params={"key": GEMINI_API_KEY})
+            if lst.status_code == 200:
+                names = [m.get("name", "").split("/")[-1]
+                         for m in lst.json().get("models", [])]
+                flashed = [n for n in names if "flash" in n.lower()
+                           and "generateContent" in str(
+                               next((mm.get("supportedGenerationMethods", [])
+                                     for mm in lst.json().get("models", [])
+                                     if mm.get("name", "").endswith(n)), []))]
+                if flashed:
+                    models = flashed[:3] + models
+    except Exception as e:
+        logger.warning(f"Gemini model list failed: {e}")
     try:
         async with httpx.AsyncClient(timeout=timeout) as hc:
-            resp = await hc.post(
-                f"{GEMINI_BASE}/models/{model}:generateContent",
-                params={"key": GEMINI_API_KEY},
-                json={
-                    "system_instruction": {"parts": [{"text": system}]},
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.2,
-                                         "maxOutputTokens": max_tokens},
-                },
-            )
-            if resp.status_code == 200:
-                parts = resp.json()["candidates"][0]["content"]["parts"]
-                text = "".join(p.get("text", "") for p in parts)
-                return text if text.strip() else None
-            logger.warning(f"Gemini -> {resp.status_code}")
+            for model in models:
+                try:
+                    resp = await hc.post(
+                        f"{GEMINI_BASE}/models/{model}:generateContent",
+                        params={"key": GEMINI_API_KEY},
+                        json={
+                            "system_instruction": {"parts": [{"text": system}]},
+                            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                            "generationConfig": {"temperature": 0.2,
+                                                 "maxOutputTokens": max_tokens},
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(f"Gemini {model} error: {e}")
+                    continue
+                if resp.status_code == 200:
+                    try:
+                        parts = resp.json()["candidates"][0]["content"]["parts"]
+                        text = "".join(p.get("text", "") for p in parts)
+                        if text.strip():
+                            return text
+                    except Exception:
+                        logger.warning(f"Gemini {model} -> 200 unparseable")
+                        continue
+                logger.warning(f"Gemini {model} -> {resp.status_code}")
     except Exception as e:
         logger.warning(f"Gemini error: {e}")
     return None

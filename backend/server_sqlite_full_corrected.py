@@ -270,12 +270,20 @@ app.add_middleware(
 # every call to those models returned 404 and video generation always failed
 # once the (few) working models were exhausted / rate-limited.
 DEFAULT_MODEL_CHAIN = [
-    "openai/gpt-oss-20b:free",
-    "google/gemma-3n-e4b-it:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "google/gemma-3-27b-it:free",
+    # Verified live with this project's key (HTTP 200 + real content).
+    "nex-agi/nex-n2.5-mini:free",
+    "dots-studio/dots-3-note-preview:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "cohere/north-mini-code:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "poolside/laguna-xs-2.1:free",
+    "poolside/laguna-s-2.1:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
 ]
 
 def _sanitize_model_id(raw: str) -> str:
