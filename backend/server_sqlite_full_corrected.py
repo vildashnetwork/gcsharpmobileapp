@@ -4403,61 +4403,108 @@ async def update_user_streak(user: dict) -> dict:
     }
 
 async def daily_reminder_job():
-    """Runs hourly, only doing real work at hour==15 UTC (4pm WAT). Safety
-    net for anyone the real-time path missed crediting for yesterday, and
-    sends a reminder email/notification to anyone who missed their goal."""
     now = datetime.utcnow()
-    if now.hour != 15:
+    if now.hour not in (6, 18):
         return
-
-    logger.info("Running daily reminder check")
+    logger.info("Running streak job")
     yesterday = (now - timedelta(days=1)).date()
-    users = await db.users.find({}).to_list(1000)
+    today = now.date()
+    users = await db.users.find({}).to_list(2000)
 
     for user in users:
-        user_id = user["user_id"]
-        email = user.get("email")
-        if not email:
+        user_id = user.get("user_id")
+        if not user_id:
+            continue
+        try:
+            if now.hour == 6:
+                await _streak_settle_yesterday(user, yesterday)
+            else:
+                await _streak_evening_nudge(user, today)
+        except Exception as e:
+            logger.warning(f"Streak job skipped user: {e}")
             continue
 
-        log = await db.reminder_log.find_one({"user_id": user_id, "date": yesterday.isoformat()})
-        if log:
-            continue
 
-        seconds = await get_study_time_for_date(user_id, yesterday)
-        goal = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
-
-        last_met = user.get("last_goal_met_date")
+async def _streak_settle_yesterday(user: dict, yesterday):
+    user_id = user.get("user_id")
+    email = user.get("email")
+    now = datetime.utcnow()
+    log = await db.reminder_log.find_one(
+        {"user_id": user_id, "date": yesterday.isoformat()})
+    if log:
+        return
+    seconds = await get_study_time_for_date(user_id, yesterday)
+    goal = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
+    last_met = user.get("last_goal_met_date")
+    try:
         last_met_date = date.fromisoformat(last_met) if last_met else None
+    except Exception:
+        last_met_date = None
+    if seconds >= goal:
+        if last_met_date != yesterday:
+            streak = user.get("streak", 0)
+            ns = streak + 1 if last_met_date == yesterday - timedelta(days=1) else 1
+            await _credit_streak_day(user_id, ns, yesterday)
+    else:
+        await db.users.update_one({"user_id": user_id}, {"$set": {"streak": 0}})
+        await recompute_user_accuracy(user_id)
+        if email:
+            try:
+                await send_brevo_email(
+                    email,
+                    "Do not break your study streak!",
+                    "You missed yesterday goal. Study today to start a new streak!")
+            except Exception as e:
+                logger.warning(f"Streak email failed: {e}")
+        await create_notification(
+            user_id,
+            "You missed yesterday goal. Study today to start a new streak!",
+            "reminder", "/study")
+    await db.reminder_log.insert_one({
+        "user_id": user_id, "date": yesterday.isoformat(),
+        "sent_at": now.isoformat()})
 
-        if seconds >= goal:
-            if last_met_date != yesterday:
-                streak = user.get("streak", 0)
-                new_streak = streak + 1 if last_met_date == yesterday - timedelta(days=1) else 1
-                await _credit_streak_day(user_id, new_streak, yesterday)
-        else:
-            await db.users.update_one({"user_id": user_id}, {"$set": {"streak": 0}})
-            await recompute_user_accuracy(user_id)
 
-            name = user.get("full_name", "Student")
-            subject = "Don't break your study streak!"
-            html = f"""
-            <h2>Hi {name},</h2>
-            <p>We noticed you didn't study yesterday. Your current streak is <strong>{user.get('streak', 0)}</strong> days.</p>
-            <p>Remember, your daily goal is <strong>{user.get('daily_commitment', '1 hour')}</strong>.</p>
-            <p>Keep going and don't break the chain!</p>
-            <a href="{APP_URL}/dashboard" style="background:#4F46E5;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">Go to Dashboard</a>
-            """
-            await send_brevo_email(email, subject, html, f"Your current streak is {user.get('streak', 0)} days.")
-            await create_notification(
-                user_id,
-                f"⏰ Don't forget to study today! Your daily goal is {user.get('daily_commitment', '1 hour')}.",
-                "reminder", "/study"
-            )
-
-        await db.reminder_log.insert_one({
-            "user_id": user_id, "date": yesterday.isoformat(), "sent_at": now.isoformat(),
-        })
+async def _streak_evening_nudge(user: dict, today):
+    user_id = user.get("user_id")
+    email = user.get("email")
+    now = datetime.utcnow()
+    key = today.isoformat() + "_nudge"
+    log = await db.reminder_log.find_one({"user_id": user_id, "date": key})
+    if log:
+        return
+    seconds = await get_study_time_for_date(user_id, today)
+    goal = parse_daily_commitment(user.get("daily_commitment", "1 hour"))
+    if seconds < goal:
+        left_min = max(1, (goal - seconds + 59) // 60)
+        streak = user.get("streak", 0)
+        msg = "Study reminder"
+        detail = "minutes left to keep streak"
+        try:
+            note = str(left_min) + " " + detail + " " + str(streak)
+        except Exception:
+            note = msg
+        if email:
+            try:
+                await send_brevo_email(email, "Your streak needs you tonight!", note)
+            except Exception as e:
+                logger.warning(f"Streak nudge email failed: {e}")
+        await create_notification(user_id, note, "reminder", "/study")
+    else:
+        try:
+            fresh = await db.users.find_one(
+                {"user_id": user_id},
+                {"_id": 0, "streak": 1, "last_goal_met_date": 1})
+            last = (fresh or {}).get("last_goal_met_date")
+            if last != today.isoformat():
+                lm = date.fromisoformat(last) if last else None
+                st = (fresh or {}).get("streak", 0)
+                ns = st + 1 if lm == today - timedelta(days=1) else 1
+                await _credit_streak_day(user_id, ns, today)
+        except Exception as e:
+            logger.warning(f"Streak credit failed: {e}")
+    await db.reminder_log.insert_one({
+        "user_id": user_id, "date": key, "sent_at": now.isoformat()})
 
 
 @api_router.get("/user/streak")
