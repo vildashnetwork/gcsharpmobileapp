@@ -46,9 +46,7 @@ eas build:configure
 
 eas build --platform android
 
-eas build --platform android --android-app-bundle --profile production
-
-eas build --platform android --profile production --output aab
+eas build --platform android --android-app-bundle --profile production;; --output aab
 
 npx  expo prebuild -p android
 

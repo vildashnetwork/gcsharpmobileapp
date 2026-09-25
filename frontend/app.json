@@ -2,9 +2,9 @@
   "expo": {
     "name": "GCSHARP",
     "slug": "GCSHARP",
-    "version": "2.5.5",
+    "version": "2.5.6",
     "android": {
-      "versionCode": 19,
+      "versionCode": 20,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/gcsharp.png",
         "backgroundColor": "#ffffff"
