@@ -28,7 +28,10 @@ import { File as ExpoFile } from "expo-file-system";
 import { fetch as expoFetch } from "expo/fetch";
 import { CameraView, Camera } from "expo-camera";
 
-const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours"];
+const LEVELS = ["GCE O Level", "GCE A Level", "HND", "Concours", "ATVEE", "ITVEE"];
+
+// { label: "ATVEE", backend: "ATVEE" },
+// { label: "ITVEE", backend: "ITVEE" },
 const DAILY_COMMITMENTS = [
     { label: "15 mins", value: "15 mins" },
     { label: "30 mins", value: "30 mins" },
@@ -359,16 +362,16 @@ export default function EditProfile() {
 
                     {/* Specialization (teachers — shown on their public profile) */}
                     {user?.role === "teacher" && (
-                    <View style={styles.field}>
-                        <Text style={styles.label}>Specialization</Text>
-                        <TextInput
-                            style={styles.input}
-                            value={form.specialization}
-                            onChangeText={(v) => updateField("specialization", v)}
-                            placeholder="e.g. Pure Mathematics, Physics"
-                            placeholderTextColor={theme.onSurfaceMuted}
-                        />
-                    </View>
+                        <View style={styles.field}>
+                            <Text style={styles.label}>Specialization</Text>
+                            <TextInput
+                                style={styles.input}
+                                value={form.specialization}
+                                onChangeText={(v) => updateField("specialization", v)}
+                                placeholder="e.g. Pure Mathematics, Physics"
+                                placeholderTextColor={theme.onSurfaceMuted}
+                            />
+                        </View>
                     )}
 
                     {/* Exam Level */}

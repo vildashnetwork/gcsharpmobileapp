@@ -135,7 +135,7 @@ import {
   enqueueMutation,
 } from "./lib/offlineCache";
 
-export const API_BASE = `https://gcsharpmobileapp.onrender.com/api`;
+export const API_BASE = `https://mobile.gcsharp.com/api`;
 const TOKEN_KEY = "gcsmart_token";
 
 const memoryStore: { token: string | null } = { token: null };

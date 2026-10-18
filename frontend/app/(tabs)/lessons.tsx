@@ -219,6 +219,8 @@ const LEVELS = [
   { label: "GCE A Level", value: "GCE A" },
   { label: "HND", value: "HND" },
   { label: "Concours", value: "CONCOUR" },
+  { label: "ATVEE", value: "ATVEE" },
+  { label: "ITVEE", value: "ITVEE" },
 ] as const;
 const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_THUMBNAIL =

@@ -52,6 +52,8 @@ npx  expo prebuild -p android
 
 npm run android
 
+eas build --platform android --profile production
+
 eas build:list
 
 `adb logcat *:E | Select-String "gcsharp"`

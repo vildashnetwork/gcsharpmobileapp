@@ -57,7 +57,7 @@ type ResetStep = "email" | "otp";
 
 const API_URL =
   process.env.EXPO_PUBLIC_API_URL ??
-  "https://gcsharpmobileapp.onrender.com/api";
+  "https://mobile.gcsharp.com/api";
 
 const FIRST_LAUNCH_KEY = "gcsharp_onboarding_completed";
 const SAVED_EMAIL_KEY = "gcsharp_saved_email";
