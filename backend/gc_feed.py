@@ -42,6 +42,7 @@ MAX_TEXT_LEN = 4000
 MAX_TITLE_LEN = 160
 MAX_IMAGE_BYTES = 8 * 1024 * 1024           # 8 MB for images
 MAX_VIDEO_BYTES = 25 * 1024 * 1024          # 25 MB for short videos
+MAX_MEDIA_PER_POST = 4
 
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
@@ -233,7 +234,9 @@ async def serialize_post(db, doc: Dict[str, Any], viewer_id: str,
     return out
 
 
-async def _generate_ai_answer(db, post: Dict[str, Any]) -> None:
+async def _generate_ai_answer(db, post: Dict[str, Any],
+                              emit_event=None,
+                              create_notification=None) -> None:
     """Attach a GCSharp-model explanation + citations to a post (Phase 2).
 
     Runs the post body/question through the tutor brain (KB -> research ->
@@ -247,7 +250,11 @@ async def _generate_ai_answer(db, post: Dict[str, Any]) -> None:
     if not query:
         return
     await db.feed_posts.update_one({"post_id": post_id},
-                                   {"$set": {"ai_status": "generating"}})
+                                   {"$set": {"ai_status": "generating",
+                                             "updated_at": datetime.utcnow().isoformat()}})
+    if emit_event:
+        await emit_event("ai_answer", {"post_id": post_id,
+                                       "status": "generating"}, topic="feed")
     try:
         outcome = await gc_ai.answer_question(
             db, query, subject=post.get("subject", "General"),
@@ -256,23 +263,56 @@ async def _generate_ai_answer(db, post: Dict[str, Any]) -> None:
         logger.error(f"AI answer error for post {post_id}: {e}")
         await db.feed_posts.update_one(
             {"post_id": post_id},
-            {"$set": {"ai_status": "error", "ai_error": str(e)[:200]}})
+            {"$set": {"ai_status": "error", "ai_error": str(e)[:200],
+                      "updated_at": datetime.utcnow().isoformat()}})
+        if emit_event:
+            await emit_event("ai_answer", {"post_id": post_id,
+                                           "status": "error"}, topic="feed")
         return
 
     if outcome.get("source") == "gc_model_unavailable":
         await db.feed_posts.update_one(
             {"post_id": post_id},
             {"$set": {"ai_status": "unavailable",
-                      "ai_error": (outcome.get("error") or "")[:300]}})
+                      "ai_error": (outcome.get("error") or "")[:300],
+                      "updated_at": datetime.utcnow().isoformat()}})
+        if emit_event:
+            await emit_event("ai_answer", {"post_id": post_id,
+                                           "status": "unavailable"}, topic="feed")
+        return
+
+    answer = (outcome.get("answer") or "").strip()
+    if not answer:
+        logger.error("GCSharp returned an empty answer for post %s", post_id)
+        await db.feed_posts.update_one(
+            {"post_id": post_id},
+            {"$set": {"ai_status": "error",
+                      "ai_error": "GCSharp returned an empty explanation.",
+                      "updated_at": datetime.utcnow().isoformat()}})
+        if emit_event:
+            await emit_event("ai_answer", {"post_id": post_id,
+                                           "status": "error"}, topic="feed")
         return
 
     await db.feed_posts.update_one(
         {"post_id": post_id},
-        {"$set": {"ai_answer": outcome.get("answer", ""),
+        {"$set": {"ai_answer": answer,
                   "ai_citations": outcome.get("citations", []),
                   "ai_source": outcome.get("source", ""),
                   "ai_status": "ready",
                   "updated_at": datetime.utcnow().isoformat()}})
+    if emit_event:
+        await emit_event("ai_answer", {"post_id": post_id,
+                                       "status": "ready"}, topic="feed")
+    if create_notification and post.get("author_id"):
+        try:
+            await create_notification(
+                post["author_id"],
+                "GC AI added an explanation to your learning post.",
+                "ai_answer", link=f"/feed/{post_id}")
+        except Exception as e:
+            logger.warning("AI answer notification failed for post %s: %s",
+                           post_id, e)
 
 
 # ------------------------------------------------------------
@@ -320,7 +360,8 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         except Exception:
             pass
         import asyncio
-        asyncio.create_task(_generate_ai_answer(db, doc))
+        asyncio.create_task(_generate_ai_answer(db, doc, emit_event,
+                                                 create_notification))
         return await serialize_post(db, doc, uid)
 
     # ---------------- upload media ----------------
@@ -335,15 +376,25 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             raise HTTPException(404, "Post not found")
         if post.get("author_id") != uid and user.get("role") not in ("teacher", "admin"):
             raise HTTPException(403, "You can only add media to your own post.")
-        content = await file.read()
-        if not content:
-            raise HTTPException(400, "Empty file.")
         kind = classify_upload(file.content_type, file.filename or "")
         if not kind:
             raise HTTPException(415, "Unsupported type. Use JPG/PNG/WEBP/GIF image or MP4/MOV/WEBM video.")
         cap = MAX_IMAGE_BYTES if kind == "image" else MAX_VIDEO_BYTES
-        if len(content) > cap:
-            raise HTTPException(413, f"{kind.title()} too large (max {cap // (1024*1024)} MB).")
+        if len(post.get("media", [])) >= MAX_MEDIA_PER_POST:
+            raise HTTPException(409, f"A post can have at most {MAX_MEDIA_PER_POST} media files.")
+        chunks = []
+        total_bytes = 0
+        while True:
+            chunk = await file.read(min(64 * 1024, cap + 1 - total_bytes))
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > cap:
+                raise HTTPException(413, f"{kind.title()} too large (max {cap // (1024*1024)} MB).")
+            chunks.append(chunk)
+        if not total_bytes:
+            raise HTTPException(400, "Empty file.")
+        content = b"".join(chunks)
         if not _magic_ok(kind, content[:16]):
             raise HTTPException(415, "File content does not match its declared type.")
         ext = os.path.splitext(file.filename or "")[1].lower()
@@ -356,6 +407,8 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             {"post_id": post_id},
             {"$push": {"media": entry},
              "$set": {"updated_at": datetime.utcnow().isoformat()}})
+        await emit_event("feed:media_updated",
+                         {"post_id": post_id}, topic="feed")
         return entry
 
     # ---------------- list / search / filter ----------------
@@ -548,7 +601,8 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         if not _rate_limit(f"airetry:{user['user_id']}", 10, window_seconds=600):
             raise HTTPException(429, "Too many AI retries. Try again later.")
         import asyncio
-        asyncio.create_task(_generate_ai_answer(db, post))
+        asyncio.create_task(_generate_ai_answer(db, post, emit_event,
+                                                 create_notification))
         return {"ai_status": "generating"}
 
     # ---------------- my saved posts ----------------
@@ -574,4 +628,3 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
                 "question_types": sorted(VALID_QUESTION_TYPES)}
 
     return router
-

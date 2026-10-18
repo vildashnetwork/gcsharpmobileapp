@@ -9,6 +9,7 @@
  *  -> ping (keep-alive)
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { API_BASE, readToken } from "@/src/api";
 
 export type LearningEvent = {
@@ -32,16 +33,10 @@ export function useLearningSocket(onEvent: (e: LearningEvent) => void) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const handlerRef = useRef(onEvent);
-  handlerRef.current = onEvent;
   const retryRef = useRef(0);
   const closedRef = useRef(false);
   const attemptRef = useRef(0);
-  // Remember the last event time so reconnects can replay what we missed.
-  const lastEventAtRef = useRef<string | null>(
-    typeof localStorage !== "undefined"
-      ? localStorage.getItem("gc_learning_last_event_at")
-      : null
-  );
+  const lastEventAtRef = useRef<string | null>(null);
 
   const send = useCallback((payload: Record<string, any>) => {
     const ws = wsRef.current;
@@ -61,14 +56,30 @@ export function useLearningSocket(onEvent: (e: LearningEvent) => void) {
   }, []);
 
   useEffect(() => {
+    handlerRef.current = onEvent;
+  }, [onEvent]);
+
+  useEffect(() => {
     closedRef.current = false;
     let timer: any = null;
     let pingTimer: any = null;
+    const rememberEvent = (event: LearningEvent) => {
+      const createdAt = event.created_at;
+      if (!createdAt || (lastEventAtRef.current &&
+          createdAt <= lastEventAtRef.current)) return;
+      lastEventAtRef.current = createdAt;
+      AsyncStorage.setItem("gc_learning_last_event_at", createdAt)
+        .catch((error) => console.warn("[learning-socket] cursor save failed:", error));
+    };
 
     const connect = async () => {
       const attempt = ++attemptRef.current;
       try {
         const token = await readToken();
+        if (!lastEventAtRef.current) {
+          lastEventAtRef.current =
+            await AsyncStorage.getItem("gc_learning_last_event_at");
+        }
         if (attempt !== attemptRef.current || closedRef.current) return;
         if (!token) {
           retryRef.current += 1;
@@ -91,17 +102,17 @@ export function useLearningSocket(onEvent: (e: LearningEvent) => void) {
           try {
             const data = JSON.parse(ev.data as string);
             if (data?.type === "replay" && Array.isArray(data.events)) {
-              data.events.forEach((e: LearningEvent) =>
-                handlerRef.current?.(e));
+              data.events.forEach((event: LearningEvent) => {
+                rememberEvent(event);
+                handlerRef.current?.(event);
+              });
               return;
             }
-            if (data?.created_at) {
-              lastEventAtRef.current = data.created_at;
-              if (typeof localStorage !== "undefined")
-                localStorage.setItem("gc_learning_last_event_at", data.created_at);
-            }
+            rememberEvent(data as LearningEvent);
             handlerRef.current?.(data as LearningEvent);
-          } catch {}
+          } catch (error) {
+            console.warn("[learning-socket] ignored invalid event:", error);
+          }
         };
         ws.onerror = () => { try { ws.close(); } catch {} };
         ws.onclose = () => {

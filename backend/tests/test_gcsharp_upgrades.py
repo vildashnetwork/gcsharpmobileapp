@@ -258,6 +258,17 @@ class TestKnowledgeGrowth:
         import gc_knowledge_growth as kg
         assert {"GCE O Level", "GCE A Level"} <= set(kg.SEED_TOPICS)
 
+    def test_subdomains_are_not_counted_as_independent_evidence(self):
+        import gc_knowledge_growth as kg
+        assert kg._sources_agree([
+            {"url": "https://math.khanacademy.org/algebra"},
+            {"url": "https://www.khanacademy.org/geometry"},
+        ]) is False
+        assert kg._sources_agree([
+            {"url": "https://www.khanacademy.org/algebra"},
+            {"url": "https://www.bbc.co.uk/bitesize/geometry"},
+        ]) is True
+
 
 # ------------------------------------------------------------
 # Phase 4: controlled training (validation + honest capability report)
@@ -311,6 +322,18 @@ class TestCitationsAndEngine:
         import gc_ai_engine as gc_ai
         assert gc_ai.parse_research_citations("") == []
         assert gc_ai.parse_research_citations("no sources here at all") == []
+
+    def test_knowledge_citations_use_only_saved_http_sources(self):
+        import gc_ai_engine as gc_ai
+        cites = gc_ai._knowledge_citations({"sources": [
+            {"title": "OpenStax", "url": "https://openstax.org/books/physics"},
+            {"title": "Duplicate", "url": "https://openstax.org/books/physics"},
+            {"title": "Unsafe", "url": "javascript:alert(1)"},
+        ]})
+        assert cites == [{
+            "title": "OpenStax",
+            "url": "https://openstax.org/books/physics",
+        }]
 
     def test_answer_question_without_model_flags_unavailable(self, monkeypatch):
         """GC-model path must flag unavailability, not use an external LLM."""
@@ -385,6 +408,7 @@ class TestAppWiring:
         "/api/realtime/events",
         "/api/notifications/unread-count",
         "/api/notifications",
+        "/api/notifications/register-push-token",
     ]
 
     @pytest.fixture(scope="class")
@@ -399,6 +423,13 @@ class TestAppWiring:
     def test_feed_routes_are_under_api_prefix(self, app_paths):
         feed = [p for p in app_paths if p.startswith("/api/feed/")]
         assert len(feed) >= 9
+
+    def test_push_token_endpoint_rejects_non_expo_tokens(self):
+        from pydantic import ValidationError
+        from server_sqlite_full_corrected import PushTokenRequest
+        assert PushTokenRequest(token="ExpoPushToken[valid-Token_123]").token
+        with pytest.raises(ValidationError):
+            PushTokenRequest(token="not-a-push-token")
 
     def test_no_external_llm_generation_helpers_are_reachable(self):
         """_ask_ai_for_json must be hard-blocked (Phase 2 strict rule)."""

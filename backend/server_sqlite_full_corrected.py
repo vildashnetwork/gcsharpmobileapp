@@ -199,7 +199,8 @@ REALTIME_EVENT_RETENTION_DAYS = 14
 async def emit_event(event_type: str, payload: dict, *,
                      topic: str = "feed",
                      target_user_id: Optional[str] = None,
-                     persist: bool = True) -> dict:
+                     persist: bool = True,
+                     deliver: bool = True) -> dict:
     """Store (optionally) and push a real-time event.
 
     If `target_user_id` is given the event is delivered to that user only;
@@ -224,14 +225,15 @@ async def emit_event(event_type: str, payload: dict, *,
             await db.realtime_events.delete_many({"created_at": {"$lt": cutoff}})
         except Exception as e:
             logger.warning(f"realtime event persist failed: {e}")
-    try:
-        if target_user_id:
-            await manager.send_personal_message(event, target_user_id)
-        else:
-            await manager.broadcast(event, topic=topic)
-    except Exception as e:
-        # Socket delivery is best-effort; the persisted event covers misses.
-        logger.warning(f"realtime event delivery failed: {e}")
+    if deliver:
+        try:
+            if target_user_id:
+                await manager.send_personal_message(event, target_user_id)
+            else:
+                await manager.broadcast(event, topic=topic)
+        except Exception as e:
+            # Socket delivery is best-effort; the persisted event covers misses.
+            logger.warning(f"realtime event delivery failed: {e}")
     return event
 
 # ============================================================
@@ -834,16 +836,35 @@ async def send_expo_push(token: str, title: str, body: str,
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(EXPO_PUSH_SEND_URL, json=payload)
             if response.status_code == 200:
-                ok = True
-                break
-            txt = (response.text or "").lower()
-            if any(m in txt for m in ("devicenotfind", "device not found",
-                                      "invalidcredentials", "messagetoolong",
-                                      "message_too_big", "notregistered")):
-                if user_id:
-                    await _mark_token_invalid(user_id, token)
-                return False
-            logger.warning(f"Expo push attempt {attempt} -> {response.status_code}")
+                try:
+                    ticket_data = response.json().get("data", {})
+                except (ValueError, AttributeError):
+                    ticket_data = {}
+                tickets = ticket_data if isinstance(ticket_data, list) else [ticket_data]
+                ticket = next((item for item in tickets if isinstance(item, dict)), {})
+                if ticket.get("status") == "ok":
+                    ok = True
+                    break
+                details = ticket.get("details") or {}
+                error_code = str(details.get("error") or "").lower()
+                message = str(ticket.get("message") or "").lower()
+                if error_code in {"devicenotregistered", "invalidpushtoken"}:
+                    if user_id:
+                        await _mark_token_invalid(user_id, token)
+                    return False
+                logger.warning(
+                    "Expo push ticket rejected (attempt %s): %s %s",
+                    attempt, error_code or "unknown", message[:160])
+            else:
+                txt = (response.text or "").lower()
+                if any(m in txt for m in ("devicenotregistered", "device not found",
+                                          "invalidpushtoken", "notregistered")):
+                    if user_id:
+                        await _mark_token_invalid(user_id, token)
+                    return False
+                logger.warning(f"Expo push attempt {attempt} -> {response.status_code}")
+                if 400 <= response.status_code < 500 and response.status_code != 429:
+                    break
         except Exception as e:
             logger.warning(f"Expo push attempt {attempt} error: {e}")
         if attempt < PUSH_MAX_ATTEMPTS:
@@ -907,11 +928,21 @@ async def create_notification(user_id: str, message: str, type: str = "info",
     result = await db.notifications.insert_one(notif)
     notif["_id"] = str(result.inserted_id)
 
-    # WebSocket real-time (best-effort).
+    # Preserve the legacy notification socket message shape.
     try:
         await manager.send_personal_message(notif, user_id)
     except Exception:
         pass
+    try:
+        await emit_event("notification", {
+            "notification_id": notif["_id"],
+            "message": message,
+            "type": type,
+            "link": link,
+            "read": False,
+        }, topic="notification", target_user_id=user_id, deliver=False)
+    except Exception as e:
+        logger.warning("Could not publish notification event: %s", e)
 
     # Push notification (Expo) - resilient to provider failures.
     try:
@@ -1076,21 +1107,33 @@ def _clean_json(text: str):
 # ============================================================
 
 class PushTokenRequest(BaseModel):
-    token: str
+    token: str = Field(
+        min_length=20, max_length=200,
+        pattern=r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
 
 @api_router.post("/notifications/register-push-token")
 async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_current_user)):
+    # A device token belongs to one account at a time. Remove stale ownership
+    # when someone signs out and another account signs in on the same device.
+    await db.users.update_many(
+        {"user_id": {"$ne": user["user_id"]},
+         "expo_push_token": req.token},
+        {"$unset": {"expo_push_token": ""}})
     await db.users.update_one(
         {"user_id": user["user_id"]},
         {"$set": {"expo_push_token": req.token}}
     )
-    # Send a welcome push as a test
-    await create_notification(
-        user["user_id"],
-        "Push notifications enabled! You'll get study reminders and updates.",
-        "info",
-        "/dashboard"
-    )
+    return {"ok": True}
+
+
+@api_router.delete("/notifications/register-push-token")
+async def unregister_push_token(token: str,
+                                user: dict = Depends(get_current_user)):
+    # Reuse the registration validator to reject malformed token values.
+    PushTokenRequest(token=token)
+    await db.users.update_one(
+        {"user_id": user["user_id"], "expo_push_token": token},
+        {"$unset": {"expo_push_token": ""}})
     return {"ok": True}
 
 
@@ -4680,7 +4723,7 @@ async def pdf_to_video(file: UploadFile, user: dict = Depends(get_current_user))
     """Uploaded PDF -> extracted content -> GCSharp-model video lesson."""
     if not _rate_limit_text_video(user["user_id"]):
         raise HTTPException(429, "Too many video generations. Try again later.")
-    content = await file.read()
+    content = await file.read(15 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(400, "Empty PDF upload.")
     if len(content) > 15 * 1024 * 1024:

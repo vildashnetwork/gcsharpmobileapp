@@ -233,7 +233,7 @@
 
 
 // app/_layout.tsx
-import { Stack, useRouter } from "expo-router";
+import { Stack, useRouter, type Href } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef, useState } from "react";
 import { LogBox, StatusBar, View, Text, StyleSheet, Modal, Pressable } from "react-native";
@@ -251,6 +251,10 @@ import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { storage } from "@/src/utils/storage";
 import { useAppUpdates } from "@/src/hooks/useAppUpdates";
+import {
+  installNotificationResponseHandler,
+  registerPushToken,
+} from "@/src/lib/pushNotifications";
 
 LogBox.ignoreAllLogs(true);
 
@@ -361,9 +365,44 @@ function AppLoader() {
 
 // ----- Main App with Auth -----
 function AppContent() {
-  const { loading } = useAuth();
+  const { loading, user, isOnline } = useAuth();
   const t = useTheme();
+  const router = useRouter();
+  const handledNotificationRef = useRef<string | null>(null);
   useAppUpdates();
+
+  useEffect(() => {
+    if (loading || !user?.user_id) return;
+
+    let active = true;
+    let disposeResponseHandler = () => {};
+    const timer = isOnline ? setTimeout(() => {
+      registerPushToken().catch((error) => {
+        console.warn("[push] registration failed:", error);
+      });
+    }, 1200) : null;
+    installNotificationResponseHandler((link, responseId) => {
+      if (active && handledNotificationRef.current !== responseId) {
+        handledNotificationRef.current = responseId;
+        try {
+          router.push(link as Href);
+        } catch (error) {
+          console.warn("[push] failed to open notification link:", error);
+        }
+      }
+    }).then((dispose) => {
+      if (active) disposeResponseHandler = dispose;
+      else dispose();
+    }).catch((error) => {
+      console.warn("[push] notification handlers could not be initialized:", error);
+    });
+
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      disposeResponseHandler();
+    };
+  }, [loading, user?.user_id, isOnline, router]);
 
   // Show loader over the entire app during auth initialization
   if (loading) {

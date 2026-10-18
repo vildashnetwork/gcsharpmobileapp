@@ -31,6 +31,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 import gc_ai_engine as gc_ai
 from gc_model import GCModelUnavailableError, get_gc_model
@@ -56,13 +57,26 @@ _TRUSTED_DOMAINS = {
     "byjus.com": 0.6, "toppr.com": 0.6, "coursehero.com": 0.3,
     "chegg.com": 0.3, "brainly.com": 0.35, "scribd.com": 0.25,
 }
-_LOW_TRUST_PENALTY_DOMAINS = {"pinterest.", "facebook.", "twitter.", "x.com",
-                              "tiktok.", "instagram.", "reddit."}
+_LOW_TRUST_PENALTY_DOMAINS = {
+    "pinterest.com", "facebook.com", "twitter.com", "x.com",
+    "tiktok.com", "instagram.com", "reddit.com",
+}
 
 
 def _domain_of(url: str) -> str:
-    m = re.search(r"https?://(?:www\.)?([^/\s:?#]+)", url or "")
-    return (m.group(1).lower() if m else "")
+    try:
+        return (urlsplit(url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""
+
+
+def _source_family(url: str) -> str:
+    """Canonical host key used to avoid counting subdomains as independent."""
+    domain = _domain_of(url)
+    for trusted_domain in _TRUSTED_DOMAINS:
+        if domain == trusted_domain or domain.endswith("." + trusted_domain):
+            return trusted_domain
+    return domain
 
 
 def score_source(title: str, snippet: str, url: str, topic: str) -> float:
@@ -75,10 +89,11 @@ def score_source(title: str, snippet: str, url: str, topic: str) -> float:
     dom = _domain_of(url)
     score = 0.5  # neutral baseline
     for trusted, val in _TRUSTED_DOMAINS.items():
-        if trusted in dom:
+        if dom == trusted or dom.endswith("." + trusted):
             score = max(score, val)
             break
-    if any(bad in dom for bad in _LOW_TRUST_PENALTY_DOMAINS):
+    if any(dom == bad or dom.endswith("." + bad)
+           for bad in _LOW_TRUST_PENALTY_DOMAINS):
         score = min(score, 0.15)
     # Topical overlap between the query/topic and the result text.
     topic_tokens = set(re.findall(r"[a-z]{3,}", (topic or "").lower()))
@@ -306,12 +321,14 @@ async def _research_sources(topic: str, level: str) -> Tuple[List[Dict], str]:
 
 
 def _sources_agree(vetted: List[Dict[str, Any]]) -> bool:
-    """Crude consistency check: require >=2 sources when more than one exists.
-
-    A single source is allowed (quality-gated) but flagged so the stored
-    verification_status reflects weaker corroboration.
-    """
-    return len(vetted) >= 2
+    """Require independent hosts before treating retrieved evidence as verified."""
+    families = {
+        _source_family(source.get("url", ""))
+        for source in vetted
+        if source.get("url")
+    }
+    families.discard("")
+    return len(families) >= 2
 
 
 async def ingest_topic(db, topic_info: Dict[str, str]) -> Dict[str, Any]:
@@ -358,7 +375,13 @@ async def ingest_topic(db, topic_info: Dict[str, str]) -> Dict[str, Any]:
         return result
 
     quality = round(sum(s["quality"] for s in vetted) / len(vetted), 3)
-    status = "verified" if _sources_agree(vetted) else "single_source"
+    if re.search(r"\b(?:conflict|conflicting|insufficient)\b|(?:^|\n)Note:",
+                 answer, flags=re.IGNORECASE):
+        status = "needs_review"
+    elif _sources_agree(vetted):
+        status = "verified"
+    else:
+        status = "single_source" if len(vetted) < 2 else "needs_review"
     store = KnowledgeStore(db)
     await store.ensure_indexes()
     entry_id = await store.save(

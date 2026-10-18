@@ -186,6 +186,7 @@ import { useThemeMode, type ThemePref } from "@/src/theme-context";
 import { useAuth } from "@/src/auth";
 import { storage } from "@/src/utils/storage";
 import { useLanguage, type Lang } from "@/src/i18n";
+import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 
 const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
 const HELP_CENTER_URL = "https://support.gcsharp.com";
@@ -248,6 +249,7 @@ export default function Profile() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="profile-screen">
+      <GlobalAppHeader onSearchPress={() => router.push("/(tabs)/papers")} />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 32 }}>
         {/* Profile header with image or fallback */}
         <View style={styles.head}>
@@ -388,20 +390,25 @@ export default function Profile() {
           <Metric icon="star" label={t.home.xp} value={String(user?.xp ?? 0)} tint={theme.success} />
         </View>
 
+        <Row icon="home-outline" label={t.tabs.home} onPress={() => router.push("/(tabs)/index")} testID="row-dashboard" />
         <Row icon="create-outline" label={t.profile.editProfile} onPress={() => router.push("/edit-profile")} testID="row-edit" />
         <Row icon="stats-chart-outline" label={t.stats.title} onPress={() => router.push("/stats")} testID="row-stats" />
         <Row icon="bookmark-outline" label={t.profile.drafts} onPress={() => router.push("/drafts")} testID="row-drafts" />
         <Row icon="document-text-outline" label={t.pastQuestions.title} onPress={() => router.push("/past-questions")} testID="row-pastq" />
         <Row icon="chatbubble-ellipses-outline" label={t.tabs.ai} onPress={() => router.push("/(tabs)/ai")} testID="row-ai" />
+        <Row icon="people-outline" label={t.tabs.groups} onPress={() => router.push("/(tabs)/groups")} testID="row-groups" />
         <Row icon="videocam-outline" label={t.tabs.lessons} onPress={() => router.push("/(tabs)/lessons")} testID="row-lessons" />
         <Row icon="book-outline" label={t.tabs.library} onPress={() => router.push("/(tabs)/library")} testID="row-library" />
-        {user?.role === "teacher" && (
-          <Row
-            icon="person-circle-outline"
-            label="My Teacher Profile"
-            onPress={() => user.user_id && router.push(`/teacher-profile/${user.user_id}` as any)}
-            testID="row-teacher-profile"
-          />
+        {(user?.role === "teacher" || user?.role === "admin") && (
+          <>
+            <Row icon="cloud-upload-outline" label={t.tabs.upload} onPress={() => router.push("/(tabs)/teacher-upload")} testID="row-teacher-upload" />
+            <Row
+              icon="person-circle-outline"
+              label="My Teacher Profile"
+              onPress={() => user.user_id && router.push(`/teacher-profile/${user.user_id}` as any)}
+              testID="row-teacher-profile"
+            />
+          </>
         )}
         <Row icon="help-circle-outline" label="Help Center" onPress={() => Linking.openURL(HELP_CENTER_URL)} testID="row-help-center" />
 

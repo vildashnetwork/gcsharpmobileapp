@@ -194,6 +194,7 @@ import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 
 type Course = {
   course_id: string;
@@ -467,6 +468,7 @@ export default function Library() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="library-screen">
+      <GlobalAppHeader onSearchPress={() => router.push("/(tabs)/papers")} />
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Lessons</Text>

@@ -21,7 +21,7 @@ import { FontAwesome6 } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
@@ -29,6 +29,7 @@ import { api, API_BASE, readToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { humanize } from "@/src/format";
 import { useGcVoice } from "@/src/hooks/useGcVoice";
+import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.75, 300);
@@ -138,6 +139,7 @@ function sortAndDeduplicateSessions(input: Session[]): Session[] {
 export default function AITutor() {
   useTheme(); // re-render this screen when light/dark changes
   const { user } = useAuth();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ seed?: string }>();
   const [msgs, setMsgs] = useState<Msg[]>([]);
@@ -737,6 +739,7 @@ export default function AITutor() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="ai-screen">
+      <GlobalAppHeader onSearchPress={() => router.push("/(tabs)/papers")} />
       {/* Header */}
       <View style={styles.header}>
         <Pressable onPress={openDrawer} style={styles.menuBtn}>
@@ -745,7 +748,13 @@ export default function AITutor() {
         <Text style={styles.headerTitle} numberOfLines={1}>
           {currentTitle}
         </Text>
-        <Pressable onPress={createNewChat} style={styles.newChatBtn}>
+        <Pressable onPress={() => router.push("/ai-video")}
+          style={styles.newChatBtn} accessibilityRole="button"
+          accessibilityLabel="Create a video lesson">
+          <Ionicons name="videocam-outline" size={23} color={theme.brandPrimary} />
+        </Pressable>
+        <Pressable onPress={createNewChat} style={styles.newChatBtn}
+          accessibilityRole="button" accessibilityLabel="Start a new chat">
           <Ionicons name="add-circle" size={28} color={theme.brandPrimary} />
         </Pressable>
       </View>
@@ -1392,9 +1401,6 @@ let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => {
   styles = createStyles(getPaletteSnapshot());
 });
-
-
-
 
 
 

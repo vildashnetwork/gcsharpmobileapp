@@ -1279,6 +1279,33 @@ def parse_research_citations(research: str) -> List[Dict]:
     return cites[:6]
 
 
+def _knowledge_citations(entry: Dict) -> List[Dict[str, str]]:
+    """Return only real source URLs stored with a knowledge-base entry."""
+    raw_sources = entry.get("sources") or []
+    if not raw_sources and entry.get("source_url"):
+        raw_sources = [{
+            "title": entry.get("source_title", ""),
+            "url": entry["source_url"],
+        }]
+
+    citations: List[Dict[str, str]] = []
+    seen_urls = set()
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        url = (source.get("url") or "").strip()
+        if not url.startswith(("https://", "http://")) or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        citations.append({
+            "title": (source.get("title") or url)[:160],
+            "url": url,
+        })
+        if len(citations) == 6:
+            break
+    return citations
+
+
 async def answer_question(db, question: str, subject: str = "General",
                           history_context: str = "",
                           profile_snapshot: Optional[Dict] = None,
@@ -1328,7 +1355,8 @@ async def answer_question(db, question: str, subject: str = "General",
     if match and match.get("answer"):
         logger.info(f"GC AI answered from knowledge base "
                     f"(similarity={match.get('_similarity')})")
-        result.update(answer=match["answer"], source="knowledge_base")
+        result.update(answer=match["answer"], source="knowledge_base",
+                      citations=_knowledge_citations(match))
         return result
 
     # --- Step 3: web research, then LLM synthesis -------------
@@ -1417,4 +1445,3 @@ def generate_title(question: str) -> str:
     if not toks:
         return (normalize_text(question)[:30] or "New chat").title()
     return " ".join(toks).title()[:48]
-

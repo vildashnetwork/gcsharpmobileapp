@@ -3,14 +3,14 @@
  * Text + optional image/short-video upload; created post triggers the
  * GCSharp-model explanation in the background.
  */
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, TextInput, Pressable, ScrollView,
   ActivityIndicator, Alert, Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, shadow1, type Palette } from "@/src/theme";
@@ -59,22 +59,24 @@ export default function ComposeScreen() {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const router = useRouter();
+  const params = useLocalSearchParams<{ paperScan?: string; mediaType?: string }>();
+  const autoOpenedPaperPicker = useRef(false);
 
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [subject, setSubject] = useState("");
   const [topic, setTopic] = useState("");
   const [examLevel, setExamLevel] = useState("General");
-  const [questionType, setQuestionType] = useState("question");
+  const [questionType, setQuestionType] = useState(params.paperScan === "true" ? "past_paper" : "question");
   const [file, setFile] = useState<PickedFile | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const pickFile = async () => {
+  const pickFile = useCallback(async (kind: "image" | "video" | "any" = "any") => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
-        type: ["image/*", "video/*"],
+        type: kind === "image" ? ["image/*"] : kind === "video" ? ["video/*"] : ["image/*", "video/*"],
         copyToCacheDirectory: true,
         multiple: false,
       });
@@ -94,7 +96,14 @@ export default function ComposeScreen() {
     } catch (e: any) {
       Alert.alert("Could not open picker", e?.message || "Please try again.");
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    const mediaType = params.paperScan === "true" ? "image" : params.mediaType;
+    if ((mediaType !== "image" && mediaType !== "video") || autoOpenedPaperPicker.current) return;
+    autoOpenedPaperPicker.current = true;
+    void pickFile(mediaType);
+  }, [params.mediaType, params.paperScan, pickFile]);
 
   const submit = async () => {
     if (!title.trim() && !body.trim()) {
@@ -181,7 +190,7 @@ export default function ComposeScreen() {
           </View>
         ) : (
           <View style={styles.mediaButtons}>
-            <Pressable style={styles.mediaBtn} onPress={pickFile} testID="feed-pick-media">
+            <Pressable style={styles.mediaBtn} onPress={() => pickFile()} testID="feed-pick-media">
               <Ionicons name="image-outline" size={18} color={t.brandPrimary} />
               <Text style={styles.mediaBtnText}>Image / Video</Text>
             </Pressable>
@@ -304,5 +313,3 @@ const createStyles = (s: Palette) => StyleSheet.create({
   error: { fontSize: 13, color: s.error },
   hint: { fontSize: 11, color: s.onSurfaceMuted, textAlign: "center", marginTop: 4 },
 });
-
-
