@@ -15,6 +15,7 @@ function useTabItems() {
   const { t } = useLanguage();
   return [
     { name: "index", label: t.tabs.home, icon: "home-outline", iconActive: "home" },
+    { name: "feed", label: (t.tabs as any).feed ?? "Feed", icon: "newspaper-outline", iconActive: "newspaper" },
     { name: "lessons", label: t.tabs.lessons, icon: "videocam-outline", iconActive: "videocam" },
     { name: "ai", label: t.tabs.ai, icon: "sparkles-outline", iconActive: "sparkles", center: true },
     { name: "groups", label: (t.tabs as any).groups ?? "Groups", icon: "people-outline", iconActive: "people", studentOnly: true },
@@ -103,6 +104,7 @@ export default function TabsLayout() {
     >
       {/* Order here determines tab order – we place AI third (center) */}
       <Tabs.Screen name="index" />
+      <Tabs.Screen name="feed" />
       <Tabs.Screen name="lessons" />
       <Tabs.Screen name="ai" />
       <Tabs.Screen name="groups" />

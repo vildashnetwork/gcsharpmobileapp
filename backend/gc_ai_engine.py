@@ -29,6 +29,11 @@ from typing import Optional, List, Dict, Tuple
 
 import httpx
 
+# GCSharp personal model. Imported lazily inside functions that need it so
+# this module stays importable even if the adapter's optional deps change.
+# The GC model is the ONLY synthesiser used when use_gc_model=True; there is
+# deliberately no external-LLM fallback on that path.
+
 logger = logging.getLogger("gc_ai_engine")
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -1253,22 +1258,48 @@ def _compose_research_answer(question: str, research: str,
 # 5. LEARNING LOOP - answer a question end to end
 # ------------------------------------------------------------
 
+def parse_research_citations(research: str) -> List[Dict]:
+    """Extract structured {title, url} citations from a research_context block.
+
+    research_context() renders each line as '[i] Title: Snippet (source: URL)'.
+    We recover the title+url so the app can show tappable source links next to
+    an AI answer. Only URLs actually present in the research text are returned,
+    so citations are never fabricated.
+    """
+    cites: List[Dict] = []
+    seen_urls = set()
+    for m in re.finditer(r"\[\d+\]\s*(.+?):\s.*?\(source:\s*(https?://[^\s)]+)\)",
+                         research or ""):
+        title = m.group(1).strip()[:120]
+        url = m.group(2).strip()
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        cites.append({"title": title, "url": url})
+    return cites[:6]
+
+
 async def answer_question(db, question: str, subject: str = "General",
                           history_context: str = "",
                           profile_snapshot: Optional[Dict] = None,
                           allow_web_learning: bool = True,
-                          use_local_solver=None) -> Dict:
+                          use_local_solver=None,
+                          use_gc_model: bool = False) -> Dict:
     """The full GC AI brain:
 
     0. Small talk (greetings, thanks, identity) - instant, local.
     1. Local math solver (sympy) - instant, offline.
     2. Knowledge base lookup - instant, learned from before.
-    3. Web research (Google/DuckDuckGo) + LLM synthesis - learns and stores.
-    4. LLM direct with graceful degradation - never a hard failure.
+    3. Web research (Google/DuckDuckGo) + synthesis - learns and stores.
 
-    Returns {"answer", "source", "learned"}.
+    When use_gc_model=True, step 3 synthesises with the GCSharp personal model
+    ONLY (no external-LLM fallback); if that model is unavailable a clear
+    GCModelUnavailableError-typed dict is returned so the API layer can surface
+    a retryable 503. Otherwise step 3 uses the legacy multi-provider chain.
+
+    Returns {"answer", "source", "learned", "citations"}.
     """
-    result: Dict = {"answer": "", "source": "", "learned": False}
+    result: Dict = {"answer": "", "source": "", "learned": False, "citations": []}
 
     # --- Step 0: small talk - answer instantly, no LLM/web needed ---
     small_talk = detect_small_talk(question)
@@ -1311,6 +1342,10 @@ async def answer_question(db, question: str, subject: str = "General",
         except Exception as e:
             logger.warning(f"Research error: {e}")
 
+    # Citations come only from the research we actually gathered.
+    if found:
+        result["citations"] = parse_research_citations(research)
+
     profile_str = json.dumps(profile_snapshot or {}, ensure_ascii=False)
     system = FALLBACK_SYSTEM + f"\n\nStudent profile: {profile_str}. Subject focus: {subject}."
     if history_context:
@@ -1325,6 +1360,27 @@ async def answer_question(db, question: str, subject: str = "General",
 
     prompt = (history_context + "\n" if history_context else "") + \
         "Current question:\n" + question
+
+    # --- Step 3a: GCSharp personal model (STRICT, no external fallback) ---
+    if use_gc_model:
+        from gc_model import get_gc_model, GCModelUnavailableError  # local import
+        model = get_gc_model()
+        try:
+            answer = await model.generate(prompt, system=system, max_tokens=1000)
+        except GCModelUnavailableError as e:
+            # Surface a precise, retryable failure instead of silently using a
+            # third-party LLM or inventing an answer.
+            result.update(answer="", source="gc_model_unavailable",
+                          error=str(e))
+            return result
+        answer = clean_markdown(answer)
+        result.update(answer=answer, source="gc_model")
+        if found and answer:
+            stored = await kb.store(question, answer, source="gc_model+web",
+                                    subject=subject)
+            result["learned"] = bool(stored)
+        return result
+
     answer, provider = await call_llm(prompt, system=system, max_tokens=1000)
     result.update(answer=answer, source=provider)
 

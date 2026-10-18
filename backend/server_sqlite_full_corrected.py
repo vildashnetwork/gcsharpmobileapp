@@ -37,6 +37,14 @@ import httpx
 # GC AI self-learning engine (NLP, knowledge base, web search, multi-provider LLM)
 import gc_ai_engine as gc_ai
 
+# GCSharp personal model adapter (STRICT: the only runtime generator for
+# tutor answers, highlight explanations and video scripts - no external LLM).
+from gc_model import get_gc_model, GCModelUnavailableError
+
+# Continuous knowledge growth (Phase 3) + controlled training (Phase 4)
+import gc_knowledge_growth as gc_kg
+import gc_training as gc_train
+
 # Optional integrations (SMS OTP + scheduled jobs). Guarded so the app still
 # boots if these packages aren't installed yet — install with:
 #   pip install twilio apscheduler
@@ -109,25 +117,122 @@ scheduler = AsyncIOScheduler() if AsyncIOScheduler else None
 # ============================================================
 
 class ConnectionManager:
+    """Manages WebSocket connections for real-time updates (Phase 5).
+
+    Upgrades over the original single-socket manager:
+      * Multiple sockets per user (reconnects no longer drop the newer one).
+      * Topic-based broadcast (e.g. "feed") alongside per-user messages.
+      * Event validation and delivery-failure tolerance.
+    """
+
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
+        # user_id -> set of sockets (a user may have several devices/reconnects)
+        self.active_connections: Dict[str, set] = {}
 
     async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections[user_id] = websocket
+        self.active_connections.setdefault(user_id, set()).add(websocket)
 
-    def disconnect(self, user_id: str):
-        self.active_connections.pop(user_id, None)
+    def disconnect(self, user_id: str, websocket: Optional[WebSocket] = None):
+        socks = self.active_connections.get(user_id)
+        if not socks:
+            return
+        if websocket is not None:
+            socks.discard(websocket)
+            if not socks:
+                self.active_connections.pop(user_id, None)
+        else:
+            self.active_connections.pop(user_id, None)
 
     async def send_personal_message(self, message: dict, user_id: str):
-        websocket = self.active_connections.get(user_id)
-        if websocket:
+        socks = self.active_connections.get(user_id)
+        if not socks:
+            return
+        dead = []
+        for ws in list(socks):
             try:
-                await websocket.send_json(message)
+                await ws.send_json(message)
             except Exception:
-                self.disconnect(user_id)
+                dead.append(ws)
+        for ws in dead:
+            socks.discard(ws)
+        if not socks:
+            self.active_connections.pop(user_id, None)
+
+    async def broadcast(self, message: dict, topic: str = "feed") -> int:
+        """Send an event to every connected socket. Returns delivery count.
+
+        Delivery failures on individual sockets are swallowed so one bad
+        client cannot break a broadcast.
+        """
+        payload = dict(message)
+        payload.setdefault("topic", topic)
+        delivered = 0
+        for user_id, socks in list(self.active_connections.items()):
+            for ws in list(socks):
+                try:
+                    await ws.send_json(payload)
+                    delivered += 1
+                except Exception:
+                    socks.discard(ws)
+            if not socks:
+                self.active_connections.pop(user_id, None)
+        return delivered
+
+    def online_user_ids(self) -> List[str]:
+        return list(self.active_connections.keys())
+
+    def connection_count(self) -> int:
+        return sum(len(s) for s in self.active_connections.values())
 
 manager = ConnectionManager()
+
+# ============================================================
+# Persistent real-time events (Phase 5)
+# Important events are stored so users recover them after reconnecting;
+# delivery never depends solely on an open socket.
+# ============================================================
+
+REALTIME_EVENT_RETENTION_DAYS = 14
+
+
+async def emit_event(event_type: str, payload: dict, *,
+                     topic: str = "feed",
+                     target_user_id: Optional[str] = None,
+                     persist: bool = True) -> dict:
+    """Store (optionally) and push a real-time event.
+
+    If `target_user_id` is given the event is delivered to that user only;
+    otherwise it is broadcast on `topic`. The event is persisted first so a
+    client that reconnects later can fetch missed events via
+    GET /api/realtime/events?since=<iso>.
+    """
+    event = {
+        "event_id": "ev_" + uuid.uuid4().hex[:16],
+        "type": event_type,
+        "topic": topic,
+        "target_user_id": target_user_id,
+        "payload": payload,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    if persist:
+        try:
+            await db.realtime_events.insert_one(dict(event))
+            # Bounded retention: prune old events opportunistically.
+            cutoff = (datetime.utcnow() - timedelta(
+                days=REALTIME_EVENT_RETENTION_DAYS)).isoformat()
+            await db.realtime_events.delete_many({"created_at": {"$lt": cutoff}})
+        except Exception as e:
+            logger.warning(f"realtime event persist failed: {e}")
+    try:
+        if target_user_id:
+            await manager.send_personal_message(event, target_user_id)
+        else:
+            await manager.broadcast(event, topic=topic)
+    except Exception as e:
+        # Socket delivery is best-effort; the persisted event covers misses.
+        logger.warning(f"realtime event delivery failed: {e}")
+    return event
 
 # ============================================================
 # Lifespan Events
@@ -198,7 +303,43 @@ async def lifespan(app: FastAPI):
         await db.study_group_messages.create_index([("group_id", 1), ("created_at", -1)])
         await db.reminder_log.create_index([("user_id", 1), ("date", 1)])
         await db.ai_sessions.create_index([("user_id", 1), ("updated_at", -1)])
-        
+
+        # ---- Phase 1: Learning feed indexes ----
+        await db.feed_posts.create_index("post_id", unique=True)
+        await db.feed_posts.create_index([("created_at", -1)])
+        await db.feed_posts.create_index([("author_id", 1), ("created_at", -1)])
+        await db.feed_posts.create_index([("subject", 1), ("created_at", -1)])
+        await db.feed_posts.create_index([("topic", 1), ("created_at", -1)])
+        await db.feed_posts.create_index([("exam_level", 1), ("created_at", -1)])
+        await db.feed_posts.create_index([("question_type", 1), ("created_at", -1)])
+        await db.feed_posts.create_index([("like_count", -1)])
+        # Text index powers post search (guarded: may fail if already exists).
+        try:
+            await db.feed_posts.create_index(
+                [("title", "text"), ("body", "text")], name="feed_text_search")
+        except Exception:
+            pass
+        await db.feed_comments.create_index("comment_id", unique=True)
+        await db.feed_comments.create_index([("post_id", 1), ("created_at", 1)])
+        await db.feed_comments.create_index([("parent_comment_id", 1)])
+        await db.feed_likes.create_index(
+            [("post_id", 1), ("user_id", 1)], unique=True)
+        await db.feed_saves.create_index(
+            [("post_id", 1), ("user_id", 1)], unique=True)
+
+        # ---- Phase 5: persistent real-time events ----
+        await db.realtime_events.create_index("event_id", unique=True)
+        await db.realtime_events.create_index(
+            [("target_user_id", 1), ("created_at", -1)])
+        await db.realtime_events.create_index(
+            [("topic", 1), ("created_at", -1)])
+        await db.realtime_events.create_index(
+            "created_at", expireAfterSeconds=REALTIME_EVENT_RETENTION_DAYS * 86400)
+
+        # ---- Phase 6: push reliability ----
+        await db.push_log.create_index("dedupe_key")
+        await db.push_log.create_index("created_at")
+
         print("Indexes created successfully")
     except Exception as e:
         print(f"Index creation warning (may be harmless): {e}")
@@ -215,6 +356,13 @@ async def lifespan(app: FastAPI):
             print("Scheduler started for daily reminders")
         except Exception as e:
             print(f"Scheduler warning: {e}")
+        # Phase 3: continuous knowledge growth (bounded, restartable).
+        try:
+            gc_kg.schedule_job(scheduler, db,
+                               interval_hours=int(os.environ.get("KG_INTERVAL_HOURS", "6")))
+            print("Scheduler registered knowledge-growth job")
+        except Exception as e:
+            print(f"Knowledge-growth scheduler warning: {e}")
     else:
         print("APScheduler not installed - daily reminder job disabled (pip install apscheduler)")
     
@@ -245,6 +393,11 @@ api_router = APIRouter(prefix="/api")
 PDF_DIR = ROOT_DIR / "pdfs"
 PDF_DIR.mkdir(exist_ok=True)
 app.mount("/api/pdfs", StaticFiles(directory=str(PDF_DIR)), name="pdfs")
+
+# Learning Feed media (Phase 1): images + short videos uploaded by students.
+FEED_MEDIA_DIR = ROOT_DIR / "feed_media"
+FEED_MEDIA_DIR.mkdir(exist_ok=True)
+app.mount("/api/feed/media", StaticFiles(directory=str(FEED_MEDIA_DIR)), name="feed_media")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gcsmart")
@@ -621,37 +774,128 @@ class ResetPinWithOtpRequest(BaseModel):
 # PUSH NOTIFICATION HELPERS
 # ============================================================
 
-EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/push/send"
+EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/payloads"
+# The legacy single-send endpoint is still honoured as a fallback.
+EXPO_PUSH_SEND_URL = "https://exp.host/--/api/v2/push/send"
 
-async def send_expo_push(token: str, title: str, body: str, data: Optional[dict] = None):
-    """
-    Send a push notification to a single Expo push token.
+# Push reliability (Phase 6): bounded retries with exponential backoff.
+PUSH_MAX_ATTEMPTS = 3
+_PUSH_DEDUP_TTL_SECONDS = 300  # suppress identical pushes within 5 minutes
+
+
+def _push_dedupe_key(user_id: str, title: str, body: str) -> str:
+    return hashlib.sha1(f"{user_id}|{title}|{body}".encode()).hexdigest()
+
+
+async def _mark_token_invalid(user_id: str, token: str) -> None:
+    """Clear a dead Expo token so we stop re-sending to it."""
+    try:
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$unset": {"expo_push_token": ""},
+             "$push": {"invalid_push_tokens": {"$each": [token],
+                                                "$slice": -20}}})
+        logger.info(f"Cleared invalid push token for user {user_id}")
+    except Exception as e:
+        logger.warning(f"Failed to clear invalid push token: {e}")
+
+
+async def send_expo_push(token: str, title: str, body: str,
+                         data: Optional[dict] = None,
+                         user_id: Optional[str] = None) -> bool:
+    """Send a push to one Expo token with retry + invalid-token cleanup.
+
+    Returns True when Expo accepted the message. Failures are retried up to
+    PUSH_MAX_ATTEMPTS with backoff. A dead token is removed from the user.
     """
     if not token:
-        return
+        return False
+
+    if user_id:
+        dkey = _push_dedupe_key(user_id, title, body)
+        try:
+            recent = await db.push_log.find_one(
+                {"dedupe_key": dkey, "created_at": {
+                    "$gte": (datetime.utcnow() - timedelta(
+                        seconds=_PUSH_DEDUP_TTL_SECONDS)).isoformat()}})
+            if recent:
+                logger.info(f"Push suppressed as duplicate for user {user_id}")
+                return False
+        except Exception:
+            pass  # logging issues must never block a send
+
     payload = {
-        "to": token,
-        "sound": "default",
-        "title": title,
-        "body": body,
-        "data": data or {},
-        "priority": "high",
+        "to": token, "sound": "default", "title": title, "body": body,
+        "data": data or {}, "priority": "high",
     }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(EXPO_PUSH_API_URL, json=payload)
-            if response.status_code != 200:
-                logger.error(f"Expo push failed: {response.text}")
-            else:
-                logger.info(f"Push sent to {token[:10]}...")
-    except Exception as e:
-        logger.error(f"Expo push error: {e}")
+    ok = False
+    for attempt in range(1, PUSH_MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(EXPO_PUSH_SEND_URL, json=payload)
+            if response.status_code == 200:
+                ok = True
+                break
+            txt = (response.text or "").lower()
+            if any(m in txt for m in ("devicenotfind", "device not found",
+                                      "invalidcredentials", "messagetoolong",
+                                      "message_too_big", "notregistered")):
+                if user_id:
+                    await _mark_token_invalid(user_id, token)
+                return False
+            logger.warning(f"Expo push attempt {attempt} -> {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Expo push attempt {attempt} error: {e}")
+        if attempt < PUSH_MAX_ATTEMPTS:
+            await asyncio.sleep(0.8 * (2 ** (attempt - 1)))  # 0.8s, 1.6s, ...
+
+    if user_id:
+        try:
+            await db.push_log.insert_one({
+                "dedupe_key": _push_dedupe_key(user_id, title, body),
+                "user_id": user_id, "ok": ok,
+                "created_at": datetime.utcnow().isoformat()})
+        except Exception:
+            pass
+    return ok
 
 # ============================================================
 # MODIFIED create_notification – now sends push too
 # ============================================================
 
-async def create_notification(user_id: str, message: str, type: str = "info", link: Optional[str] = None) -> dict:
+# Notification type -> push title mapping (extensible).
+_NOTIF_TITLES = {
+    "streak": "\U0001F525 Streak Update",
+    "reminder": "⏰ Study Reminder",
+    "ai_reply": "\U0001F916 AI Reply",
+    "reply": "\U0001F4AC New Reply",
+    "mention": "\U0001F4CC You were mentioned",
+    "feed_post": "\U0001F4E2 New in Learning Feed",
+    "video_ready": "\U0001F3A5 Video Ready",
+    "ai_answer": "\U0001F916 AI Answer Ready",
+}
+
+
+async def create_notification(user_id: str, message: str, type: str = "info",
+                              link: Optional[str] = None,
+                              dedupe: bool = True) -> dict:
+    """Persist + push a notification, with duplicate suppression.
+
+    `dedupe=True` skips storing an identical unread notification for the same
+    user within the suppression window (stops double-fires on retries).
+    """
+    if dedupe:
+        try:
+            recent = await db.notifications.find_one({
+                "user_id": user_id, "message": message, "read": False,
+                "created_at": {"$gte": (
+                    datetime.utcnow() - timedelta(
+                        seconds=_PUSH_DEDUP_TTL_SECONDS)).isoformat()}})
+            if recent:
+                return {**recent, "_id": str(recent.get("_id", ""))}
+        except Exception:
+            pass
+
     notif = {
         "user_id": user_id,
         "message": message,
@@ -663,20 +907,23 @@ async def create_notification(user_id: str, message: str, type: str = "info", li
     result = await db.notifications.insert_one(notif)
     notif["_id"] = str(result.inserted_id)
 
-    # WebSocket real‑time
-    await manager.send_personal_message(notif, user_id)
+    # WebSocket real-time (best-effort).
+    try:
+        await manager.send_personal_message(notif, user_id)
+    except Exception:
+        pass
 
-    # Push notification (Expo)
-    user_doc = await db.users.find_one({"user_id": user_id}, {"_id": 0, "expo_push_token": 1})
-    if user_doc and user_doc.get("expo_push_token"):
-        title = "GC Smart"
-        if type == "streak":
-            title = "🔥 Streak Update"
-        elif type == "reminder":
-            title = "⏰ Study Reminder"
-        elif type == "ai_reply":
-            title = "🤖 AI Reply"
-        await send_expo_push(user_doc["expo_push_token"], title, message, {"link": link})
+    # Push notification (Expo) - resilient to provider failures.
+    try:
+        user_doc = await db.users.find_one(
+            {"user_id": user_id}, {"_id": 0, "expo_push_token": 1})
+        if user_doc and user_doc.get("expo_push_token"):
+            title = _NOTIF_TITLES.get(type, "GC Smart")
+            await send_expo_push(user_doc["expo_push_token"], title, message,
+                                 {"link": link, "type": type}, user_id=user_id)
+    except Exception as e:
+        # A push-provider outage must never break the API response.
+        logger.warning(f"Push dispatch failed (non-fatal): {e}")
 
     return notif
 
@@ -1044,6 +1291,14 @@ class ReadingTimeRequest(BaseModel):
 class HighlightVideoRequest(BaseModel):
     text: str
     context: Optional[str] = None
+
+
+class TextToVideoRequest(BaseModel):
+    """Text-to-video (Phase 2): student's text or topic -> structured lesson."""
+    text: str = Field(..., min_length=3, max_length=6000)
+    subject: str = Field(default="General", max_length=80)
+    level: str = Field(default="General", max_length=40)
+    lesson_focus: str = Field(default="explain", max_length=40)  # explain | solve
 
 # ============================================================
 # Auth Helpers
@@ -2202,15 +2457,26 @@ async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current
 
     try:
         system = "You are a math expert. Solve the problem step by step. Return the final answer clearly."
-        chat = _new_chat(f"solve_{uuid.uuid4().hex[:12]}", system)
-        response = await chat.send_message(req.question)
+        # Phase 2: the GCSharp model solves it (no external LLM fallback).
+        _ensure_gc_model()
+        model = get_gc_model()
+        response = await model.generate(req.question, system=system,
+                                        max_tokens=1000, timeout=QA_TIMEOUT)
         return {
             "success": True,
             "answer": response,
-            "source": "ai_solver",
+            "source": "gc_model",
             "confidence": 0.85,
             "question": req.question,
             "subject": req.subject or "General"
+        }
+    except (GCModelUnavailableError, HTTPException) as e:
+        detail = getattr(e, "detail", str(e))
+        return {
+            "success": False,
+            "error": detail,
+            "retryable": True,
+            "suggestion": "The GCSharp model is unavailable right now - please retry shortly."
         }
     except Exception as e:
         logger.error(f"Solve endpoint error: {e}")
@@ -2245,8 +2511,15 @@ async def generate_questions(req: GenerateQuestionsRequest, user: dict = Depends
         "topic (short topic name), difficulty (one of easy/medium/hard), marks (integer 1-4). "
         "Make questions realistic and curriculum-appropriate. Return ONLY the JSON object."
     )
-    chat = _new_chat(f"gen_{uuid.uuid4().hex}", system)
-    resp = await chat.send_message(prompt)
+    # Phase 2: exam-question content is generated by the GCSharp model only.
+    _ensure_gc_model()
+    model = get_gc_model()
+    try:
+        resp = await model.generate(prompt, system=system,
+                                    max_tokens=VIDEO_MAX_TOKENS,
+                                    timeout=QA_TIMEOUT)
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
     try:
         data = _clean_json(resp)
         questions = data.get("questions", data if isinstance(data, list) else [])
@@ -2640,11 +2913,11 @@ async def teacher_overview(user: dict = Depends(get_current_user)):
 
 @api_router.post("/ai/chat/emergent")
 async def ai_chat_emergent(inp: ChatRequest, user: dict = Depends(get_current_user)):
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-    except Exception as e:
-        raise HTTPException(500, f"AI unavailable: {e}")
+    """Legacy chat route, now served by the GCSharp personal model.
 
+    Phase 2: the external Emergent/Claude path is gone - this route keeps its
+    storage contract but generates with the GCSharp model only.
+    """
     history = await db.chat_messages.find(
         {"user_id": user["user_id"], "session_id": inp.session_id},
         {"_id": 0},
@@ -2664,24 +2937,19 @@ async def ai_chat_emergent(inp: ChatRequest, user: dict = Depends(get_current_us
     if inp.current_problem:
         system += f"\n\nCurrent problem context:\n{inp.current_problem}"
 
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=inp.session_id,
-        system_message=system,
-    ).with_model("anthropic", "claude-haiku-4-5-20251001")
+    # Conversation memory from this session (plain-text context).
+    mem_lines = [f"{m.get('role','user').upper()}: {m.get('content','')}"
+                 for m in history if m.get("content")]
+    prompt = (("Conversation so far:\n" + "\n".join(mem_lines[-10:]) + "\n\n")
+              if mem_lines else "") + inp.message
 
-    for m in history:
-        if m.get("role") == "user":
-            try:
-                await chat.send_message(UserMessage(text=m["content"]))
-            except Exception:
-                pass
-
+    _ensure_gc_model()
+    model = get_gc_model()
     try:
-        reply = await chat.send_message(UserMessage(text=inp.message))
-    except Exception as e:
-        logger.exception("AI error")
-        raise HTTPException(500, f"AI error: {e}")
+        reply = await model.generate(prompt, system=system,
+                                     max_tokens=1000, timeout=QA_TIMEOUT)
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
 
     now = datetime.utcnow()
     await db.chat_messages.insert_many([
@@ -2721,9 +2989,16 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
         "reads them well.\n"
         "Return ONLY valid JSON, no markdown, no code fences."
     )
-    chat = _new_chat(f"sol_{uuid.uuid4().hex[:8]}", system)
+    model = get_gc_model()
+    _ensure_gc_model()
     try:
-        reply = await chat.send_message(inp.question)
+        reply = await model.generate(inp.question, system=system,
+                                     max_tokens=QA_MAX_TOKENS,
+                                     timeout=QA_TIMEOUT)
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("AI solution generation error")
         raise HTTPException(500, f"AI error: {e}")
@@ -2857,7 +3132,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
         learned = False
         try:
             # GC AI brain: local solver -> knowledge base -> web research +
-            # multi-provider LLM (Gemini / OpenRouter) -> learn & store.
+            # GCSharp personal model synthesis (Phase 2: NO external LLM).
             outcome = await gc_ai.answer_question(
                 db,
                 req.message,
@@ -2866,11 +3141,18 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
                 profile_snapshot=profile_snapshot,
                 allow_web_learning=True,
                 use_local_solver=solve_math_local,
+                use_gc_model=True,
             )
             full = (outcome.get("answer") or "").strip()
             source = outcome.get("source") or "ai"
             learned = bool(outcome.get("learned"))
-            if not full:
+            if source == "gc_model_unavailable":
+                # Clear, retryable message - never a silent external fallback.
+                full = ("The GCSharp model is unavailable right now, so I can't "
+                        "generate a new answer. Please tap retry in a moment. "
+                        f"({(outcome.get('error') or '')[:160]})")
+                source = "gc_model_unavailable"
+            elif not full:
                 full = ("I could not generate a complete answer just now. Please try "
                         "rephrasing the question or ask again in a moment.")
             for chunk in [full[i:i+50] for i in range(0, len(full), 50)]:
@@ -2983,19 +3265,26 @@ async def ai_health():
 
 @api_router.post("/ai/explain")
 async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
-    # Full GC AI brain: local solver -> knowledge base -> web research +
-    # multi-provider LLM. Always returns a usable answer, never a hard error.
+    # GCSharp tutor brain: local solver -> knowledge base -> web research +
+    # GCSharp personal model synthesis (NO external LLM). Returns clickable
+    # source citations gathered from real research.
     outcome = await gc_ai.answer_question(
         db,
         req.message,
         subject=req.subject or "General",
         allow_web_learning=True,
         use_local_solver=solve_math_local,
+        use_gc_model=True,
     )
+    # The GCSharp model could not serve this request -> clear retryable 503.
+    if outcome.get("source") == "gc_model_unavailable":
+        raise HTTPException(503, outcome.get("error") or
+                            "The GCSharp model is unavailable. Please retry.")
     return {
         "answer": outcome["answer"],
         "source": outcome["source"],
         "learned": outcome.get("learned", False),
+        "citations": outcome.get("citations", []),
     }
 
 
@@ -3902,6 +4191,15 @@ async def _ask_ai_for_json(chat: SimpleLLM, prompt: str, required_key: str, retr
                            max_tokens: int = VIDEO_MAX_TOKENS,
                            timeout: float = VIDEO_TIMEOUT,
                            num_models: int = VIDEO_NUM_MODELS) -> dict:
+    # Phase 2 STRICT RULE: this legacy helper drove the external OpenRouter
+    # chain. No production endpoint calls it anymore (all video/QA routes use
+    # get_gc_model().generate_json). The guard below guarantees it can never
+    # silently generate educational content through an external LLM again.
+    raise HTTPException(
+        503,
+        "External LLM generation is disabled. Use get_gc_model().generate_json() "
+        "so content is produced by the GCSharp model. See backend/DEPLOY_GCSHARP_MODEL.md.",
+    )
     last_resp = ""
     for attempt in range(retries + 1):
         this_prompt = prompt if attempt == 0 else (
@@ -4009,13 +4307,26 @@ async def _fetch_paper_text(p: dict, max_chars: int = 7000) -> str:
         )
     return text
 
-def _ensure_openrouter_key():
-    if not OPENROUTER_API_KEY:
+def _ensure_gc_model():
+    """Phase 2 STRICT rule: video/answer scripts come from the GCSharp model.
+
+    Raises HTTP 503 with a clear, retryable message when the personal model is
+    not configured or unreachable. We NEVER fall back to an external LLM.
+    """
+    model = get_gc_model()
+    if not model.configured:
         raise HTTPException(
             503,
-            "AI video generation is not configured on the server (OPENROUTER_API_KEY is missing). "
-            "Add it to backend/.env and restart the server.",
+            model.unavailable_reason()
+            + " (Retry once the GCSharp model server is running.)",
         )
+
+
+def _gc_unavailable_to_http(e: GCModelUnavailableError) -> HTTPException:
+    """Convert a model failure into a clear, retryable 503 for the app."""
+    logger.error(f"GCSharp model unavailable: {e}")
+    return HTTPException(503, f"{e} Please retry.")
+
 
 def _strip_reasoning_preamble(text: str) -> str:
     match = re.search(r'##\s*(Given|Solution)', text)
@@ -4048,8 +4359,14 @@ async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user
         "The final numeric or symbolic result, stated in one line.\n\n"
         "Be concise. Do not restate the question. Do not apologize or hedge."
     )
-    chat = _new_chat(f"ask_{uuid.uuid4().hex}", system)
-    resp = await chat.send_message(f"Question:\n\n{req.question}")
+    _ensure_gc_model()
+    model = get_gc_model()
+    try:
+        resp = await model.generate(f"Question:\n\n{req.question}",
+                                    system=system, max_tokens=QA_MAX_TOKENS,
+                                    timeout=QA_TIMEOUT)
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
     resp = _strip_reasoning_preamble(resp)
     return {"answer": resp}
 
@@ -4103,7 +4420,7 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
     if cached:
         return {"items": _normalise_qa_items(cached.get("items")), "cached": True}
 
-    _ensure_openrouter_key()
+    _ensure_gc_model()
     text = await _fetch_paper_text(p, max_chars=9000)
     system = ("You are a senior Cameroon GCE examiner. Read the exam paper text and produce a clear, "
               "step-by-step worked solution section. Return STRICT JSON only, with no reasoning or thinking text before or after it.")
@@ -4114,13 +4431,16 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
         "Return JSON: {\"items\":[{\"number\":\"1\",\"question\":\"...\",\"steps\":[\"step 1\",\"step 2\"],\"answer\":\"final answer\"}]}. "
         "Solve at least the first 8 questions you can identify. Keep steps concise and mathematically correct. Return ONLY JSON."
     )
-    chat = _new_chat(f"qa_{uuid.uuid4().hex}", system)
+    model = get_gc_model()
     try:
-        parsed = await _ask_ai_for_json(chat, prompt, "items", retries=2,
-                                        max_tokens=QA_MAX_TOKENS, timeout=QA_TIMEOUT)
+        parsed = await model.generate_json(prompt, "items", system=system,
+                                           max_tokens=QA_MAX_TOKENS,
+                                           timeout=QA_TIMEOUT, retries=2)
         items = _normalise_qa_items(parsed.get("items", []))
         if not items:
             raise ValueError("empty items")
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -4139,7 +4459,7 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
         return {"scenes": cached["scenes"], "title": cached.get("title", p.get("title", "")),
                 "question": cached.get("question", ""), "cached": True}
 
-    _ensure_openrouter_key()
+    _ensure_gc_model()
     text = await _fetch_paper_text(p, max_chars=7000)
     system = ("You are a master teacher creating a narrated video lesson that solves an exam question "
               "step by step on a virtual whiteboard. Return STRICT JSON only, with no reasoning or thinking text before or after it. "
@@ -4154,12 +4474,16 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
         "Create 4 to 6 scenes, and the last scene must end with a clear final answer, e.g. 'Final answer: B'. "
         "Narration must be natural spoken English. Return ONLY JSON."
     )
-    chat = _new_chat(f"vid_{uuid.uuid4().hex}", system)
+    model = get_gc_model()
     try:
-        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=2)
+        parsed = await model.generate_json(prompt, "scenes", system=system,
+                                           max_tokens=VIDEO_MAX_TOKENS,
+                                           timeout=VIDEO_TIMEOUT, retries=2)
         raw_scenes = parsed.get("scenes", [])
         if not raw_scenes:
             raise ValueError("empty scenes")
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -4190,7 +4514,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
     if cached:
         return {"scenes": cached["scenes"], "title": cached["title"], "question": cached["question"], "cached": True}
 
-    _ensure_openrouter_key()
+    _ensure_gc_model()
     # Highlight videos don't strictly need the full PDF — the selection itself
     # is enough. Only use the PDF as optional context so a broken PDF link
     # can't break this endpoint.
@@ -4223,11 +4547,15 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
         "\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
         "Create 3-6 scenes. Ensure the final scene ends with a final answer, e.g. 'Final answer: B'. Return ONLY JSON."
     )
-    chat = _new_chat(f"highlight_vid_{uuid.uuid4().hex}", system)
+    model = get_gc_model()
 
     try:
-        parsed = await _ask_ai_for_json(chat, prompt, "scenes", retries=2)
+        parsed = await model.generate_json(prompt, "scenes", system=system,
+                                           max_tokens=VIDEO_MAX_TOKENS,
+                                           timeout=VIDEO_TIMEOUT, retries=2)
         raw_scenes = parsed["scenes"]
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
     except HTTPException:
         raise
     except Exception as e:
@@ -4246,6 +4574,148 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
     }
     await db.highlight_video_cache.insert_one(dict(doc))
     return {"scenes": scenes, "title": doc["title"], "question": doc["question"], "cached": False}
+
+
+# ============================================================
+# Text-to-video + PDF-to-video (Phase 2 - GCSharp model ONLY)
+# The GCSharp backend model generates the lesson script (scenes with
+# heading/whiteboard/narration); existing TTS + audio cache + player
+# components consume the same scene shape as the other video routes.
+# ============================================================
+
+_VIDEO_SCENE_SYSTEM = (
+    "You are a master teacher creating a narrated video lesson on a virtual "
+    "whiteboard for a student in Cameroon. Return STRICT JSON only, with no "
+    "reasoning or thinking text before or after it. Narration must be natural "
+    "spoken English (<= 500 chars per scene), plain text only. If the lesson "
+    "has a single result or multiple-choice answer, the last narration "
+    "sentence must end with 'Final answer: X'."
+)
+
+
+async def _generate_text_lesson(source_text: str, *, title_hint: str,
+                                subject: str, level: str,
+                                focus: str) -> dict:
+    """Shared GCSharp-model lesson builder used by text-to-video routes."""
+    _ensure_gc_model()
+    focus_line = ("Solve the problem step by step." if focus == "solve"
+                  else "Explain the concept clearly with a worked example.")
+    prompt = (
+        f"Subject: {subject}\nLevel: {level}\n\n"
+        f"SOURCE MATERIAL:\n{source_text[:6000]}\n\n"
+        "Create a 4 to 6 scene video lesson from this material. "
+        "Pick the most important idea or the first substantial problem. "
+        f"{focus_line} "
+        "Return JSON: {\"title\":\"...\",\"question\":\"...\",\"scenes\":[{"
+        "\"heading\":\"Step title\","
+        "\"board\":[\"line shown on whiteboard\",\"another line\"],"
+        "\"narration\":\"what the teacher says, <= 500 chars\"}]}. "
+        "The last scene must end with a clear final answer or takeaway. "
+        "Return ONLY JSON."
+    )
+    model = get_gc_model()
+    parsed = await model.generate_json(prompt, "scenes",
+                                       system=_VIDEO_SCENE_SYSTEM,
+                                       max_tokens=VIDEO_MAX_TOKENS,
+                                       timeout=VIDEO_TIMEOUT, retries=2)
+    raw_scenes = parsed.get("scenes", [])
+    scenes = _normalise_video_scenes(raw_scenes, limit=8)
+    if not scenes:
+        raise HTTPException(502, "The GCSharp model returned an empty video script. Please retry.")
+    return {
+        "title": parsed.get("title") or title_hint[:80],
+        "question": parsed.get("question") or title_hint[:200],
+        "scenes": scenes,
+    }
+
+
+def _rate_limit_text_video(user_id: str) -> bool:
+    """Small per-user budget for expensive video generation (10 / 10 min)."""
+    import time as _t
+    key = f"t2v:{user_id}"
+    now = _t.time()
+    hits = globals().setdefault("_t2v_hits", {}).setdefault(key, [])
+    hits[:] = [h for h in hits if now - h < 600]
+    if len(hits) >= 10:
+        return False
+    hits.append(now)
+    return True
+
+
+@api_router.post("/ai/video/from-text")
+async def text_to_video(req: TextToVideoRequest,
+                        user: dict = Depends(get_current_user)):
+    """Text/topic -> structured educational lesson (GCSharp model only)."""
+    if not _rate_limit_text_video(user["user_id"]):
+        raise HTTPException(429, "Too many video generations. Try again later.")
+    text = (req.text or "").strip()
+    if len(text.strip()) < 3:
+        raise HTTPException(400, "Provide a topic or some text to build the lesson from.")
+    cache_key = "t2v_" + hashlib.sha256(
+        f"{text}|{req.subject}|{req.level}|{req.lesson_focus}".encode()).hexdigest()[:24]
+    cached = await db.text_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if cached:
+        return {**cached, "cached": True}
+
+    try:
+        lesson = await _generate_text_lesson(
+            text, title_hint=text[:80], subject=req.subject,
+            level=req.level, focus=req.lesson_focus)
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Text-to-video failed: {e}")
+        raise HTTPException(502, "Couldn't build the lesson video right now. Please retry.")
+
+    doc = {**lesson, "cache_key": cache_key, "kind": "text",
+           "created_at": datetime.utcnow().isoformat()}
+    await db.text_video_cache.insert_one(dict(doc))
+    return {**lesson, "cached": False}
+
+
+@api_router.post("/ai/video/from-pdf")
+async def pdf_to_video(file: UploadFile, user: dict = Depends(get_current_user)):
+    """Uploaded PDF -> extracted content -> GCSharp-model video lesson."""
+    if not _rate_limit_text_video(user["user_id"]):
+        raise HTTPException(429, "Too many video generations. Try again later.")
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty PDF upload.")
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(413, "PDF too large (max 15 MB).")
+    if content[:5] != b"%PDF-":
+        raise HTTPException(415, "That file is not a PDF.")
+    # Step 1: extract + analyse the PDF content before generating the lesson.
+    text = extract_pdf_text(content, max_chars=7000)
+    if not text or len(text.strip()) < 50:
+        raise HTTPException(
+            422, "This PDF has no readable text (it may be a scanned image), "
+                 "so a video lesson can't be generated from it.")
+    filename = (file.filename or "document.pdf")[:80]
+    cache_key = "p2v_" + hashlib.sha256(
+        f"{filename}|{len(content)}|{text[:500]}".encode()).hexdigest()[:24]
+    cached = await db.text_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
+    if cached:
+        return {**cached, "cached": True}
+
+    try:
+        lesson = await _generate_text_lesson(
+            text, title_hint=filename, subject="General",
+            level="General", focus="explain")
+    except GCModelUnavailableError as e:
+        raise _gc_unavailable_to_http(e)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PDF-to-video failed: {e}")
+        raise HTTPException(502, "Couldn't build the lesson video right now. Please retry.")
+
+    doc = {**lesson, "cache_key": cache_key, "kind": "pdf",
+           "source_name": filename, "created_at": datetime.utcnow().isoformat()}
+    await db.text_video_cache.insert_one(dict(doc))
+    return {**lesson, "cached": False}
 
 
 # ============================================================
@@ -4690,6 +5160,7 @@ async def _answer_group_ai(db, group: dict, question: str, asker: dict) -> Dict:
             "group": group.get("name"),
         },
         use_local_solver=solve_math_local,
+        use_gc_model=True,
     )
     return outcome
 
@@ -4799,6 +5270,13 @@ async def _reply_group_ai(group: dict, trigger_msg: dict, asker: dict) -> dict:
                    "source": "error", "learned": False}
     finally:
         await _broadcast_group(group["group_id"], {"type": "ai_typing", "typing": False})
+    if outcome.get("source") == "gc_model_unavailable":
+        # Clear retryable notice - never a silent external fallback.
+        outcome = {
+            "answer": ("The GCSharp model is unavailable right now, so I can't "
+                       "generate a new answer. Please try again in a moment."),
+            "source": "gc_model_unavailable", "learned": False,
+        }
     ai_msg = await _store_group_message(
         group,
         {"user_id": "gc_ai", "full_name": "GC AI", "profile_photo": None},
@@ -5348,6 +5826,239 @@ async def root():
             "docs": "/docs"
         }
     }
+
+
+# ============================================================
+# Phase 7: Learning feed router (reuses this server's db/manager/auth)
+# ============================================================
+try:
+    from gc_feed import build_feed_router as _build_feed_router
+    _feed_router = _build_feed_router(
+        db=db, manager=manager, emit_event=emit_event,
+        create_notification=create_notification,
+        get_current_user=get_current_user,
+        get_current_user_optional=get_current_user_optional,
+        media_dir=str(FEED_MEDIA_DIR),
+        media_base_url=(APP_URL.rstrip("/") + "/api/feed/media"),
+    )
+    api_router.include_router(_feed_router)
+    print("Learning feed router mounted at /api/feed")
+except Exception as _feed_err:
+    print(f"Learning feed router failed to mount: {_feed_err}")
+
+
+# ============================================================
+# Phase 2: GCSharp model status + probe (operators + in-app retry UX)
+# ============================================================
+
+@api_router.get("/ai/model/status")
+async def gc_model_status(probe: int = 0):
+    """Status of the GCSharp personal model. ?probe=1 does a live call."""
+    model = get_gc_model()
+    if probe:
+        st = await model.healthcheck()
+    else:
+        st = model.status()
+    return {**st, "unavailable_reason": None if st.get("configured") else model.unavailable_reason()}
+
+
+# ============================================================
+# Phase 5: authenticated learning WebSocket + missed-event recovery
+# ============================================================
+
+@api_router.get("/realtime/events")
+async def realtime_events(since: Optional[str] = None, limit: int = 50,
+                          user: dict = Depends(get_current_user)):
+    """Recover events missed while disconnected (persistent event log)."""
+    limit = max(1, min(limit, 100))
+    q: Dict = {"$or": [{"target_user_id": None},
+                       {"target_user_id": user["user_id"]}]}
+    if since:
+        q["created_at"] = {"$gt": since}
+    rows = await db.realtime_events.find(q, {"_id": 0}).sort(
+        "created_at", -1).limit(limit).to_list(limit)
+    return {"events": list(reversed(rows)),
+            "server_time": datetime.utcnow().isoformat()}
+
+
+@api_router.websocket("/ws/learning")
+async def websocket_learning(websocket: WebSocket, token: str = None,
+                             since: Optional[str] = None):
+    """Authenticated real-time channel for feed + AI + video events.
+
+    Auth: a valid JWT must be supplied as ?token= (browsers cannot send
+    headers on websockets). Invalid/missing tokens close with 1008.
+    On connect, events newer than ?since= are replayed from the persistent
+    log so nothing important depends solely on an open socket.
+    """
+    user_id = None
+    if token:
+        try:
+            decoded = pyjwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            user_id = decoded.get("sub")
+        except Exception:
+            user_id = None
+    if not user_id:
+        await websocket.close(code=1008, reason="unauthorized")
+        return
+    exists = await db.users.find_one({"user_id": user_id}, {"_id": 1})
+    if not exists:
+        await websocket.close(code=1008, reason="unauthorized")
+        return
+
+    await manager.connect(user_id, websocket)
+    try:
+        # Replay missed persistent events first (recovery after reconnect).
+        try:
+            q: Dict = {"$or": [{"target_user_id": None},
+                               {"target_user_id": user_id}]}
+            if since:
+                q["created_at"] = {"$gt": since}
+            missed = await db.realtime_events.find(q, {"_id": 0}).sort(
+                "created_at", 1).limit(50).to_list(50)
+            if missed:
+                await websocket.send_json({"type": "replay", "events": missed})
+            else:
+                await websocket.send_json({"type": "ready", "user_id": user_id})
+        except Exception:
+            pass
+        while True:
+            raw = await websocket.receive_text()
+            # Validate inbound frames; keep-alives and acks only.
+            try:
+                msg = json.loads(raw) if raw.startswith("{") else {"type": raw}
+            except Exception:
+                continue
+            mtype = str(msg.get("type", ""))
+            if mtype == "ping":
+                try:
+                    await websocket.send_json({"type": "pong",
+                                               "ts": datetime.utcnow().isoformat()})
+                except Exception:
+                    break
+            elif mtype == "ack":
+                # Client confirms it persisted an event; optional bookkeeping.
+                continue
+    except WebSocketDisconnect:
+        manager.disconnect(user_id, websocket)
+    except Exception:
+        manager.disconnect(user_id, websocket)
+
+
+# ============================================================
+# Phase 6: notification history helpers (read/unread state + badge count)
+# ============================================================
+
+@api_router.get("/notifications/unread-count")
+async def notifications_unread_count(user: dict = Depends(get_current_user)):
+    n = await db.notifications.count_documents(
+        {"user_id": user["user_id"], "read": False})
+    return {"unread": n}
+
+
+@api_router.delete("/notifications/{notification_id}")
+async def delete_notification(notification_id: str,
+                              user: dict = Depends(get_current_user)):
+    res = await db.notifications.delete_one(
+        {"_id": ObjectId(notification_id), "user_id": user["user_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Notification not found")
+    return {"deleted": True}
+
+
+# ============================================================
+# Phase 3: knowledge growth - observability + controlled triggers
+# ============================================================
+
+def _require_admin(user: dict) -> None:
+    if user.get("role") not in ("admin", "teacher"):
+        raise HTTPException(403, "Teachers and admins only")
+
+
+@api_router.get("/ai/knowledge/growth/status")
+async def knowledge_growth_status(user: dict = Depends(get_current_user)):
+    """Summary of the continuous knowledge-growth pipeline."""
+    total = await db.ai_knowledge.count_documents(
+        {"source": "gc_knowledge_growth"})
+    verified = await db.ai_knowledge.count_documents(
+        {"source": "gc_knowledge_growth", "verification_status": "verified"})
+    recent = await db.kg_runs.find({}, {"_id": 0}).sort(
+        "started_at", -1).limit(5).to_list(5)
+    kb_total = await db.ai_knowledge.count_documents({})
+    return {"ingested_total": total, "verified_total": verified,
+            "kb_total": kb_total, "recent_runs": recent,
+            "content_version": gc_kg.KG_CONTENT_VERSION,
+            "schedule_hours": int(os.environ.get("KG_INTERVAL_HOURS", "6"))}
+
+
+@api_router.post("/ai/knowledge/growth/run")
+async def knowledge_growth_run(user: dict = Depends(get_current_user)):
+    """Trigger one bounded knowledge-growth pass (teachers/admins).
+
+    Non-blocking relative to other jobs: run_once has an internal lock, so a
+    second call while one is running returns {skipped: true}.
+    """
+    _require_admin(user)
+    summary = await gc_kg.run_once(db)
+    return summary
+
+
+@api_router.get("/ai/knowledge/entries")
+async def knowledge_entries(status: Optional[str] = None, limit: int = 30,
+                            user: dict = Depends(get_current_user)):
+    """Browse stored knowledge with provenance (teachers/admins)."""
+    _require_admin(user)
+    limit = max(1, min(limit, 100))
+    q: Dict = {}
+    if status:
+        q["verification_status"] = status
+    rows = await db.ai_knowledge.find(q, {
+        "_id": 0, "entry_id": 1, "question": 1, "subject": 1, "topic": 1,
+        "level": 1, "source_url": 1, "source_title": 1, "verification_status": 1,
+        "quality_score": 1, "content_version": 1, "created_at": 1,
+        "retrieved_at": 1, "hits": 1,
+    }).sort("created_at", -1).limit(limit).to_list(limit)
+    return {"entries": rows}
+
+
+# ============================================================
+# Phase 4: controlled training - manual trigger + runs/checkpoints
+# ============================================================
+
+@api_router.get("/ai/training/status")
+async def training_status(user: dict = Depends(get_current_user)):
+    """What the training pipeline can do right now (honest reporting)."""
+    return {
+        "backend": gc_train.TR_BACKEND,
+        "supports_fine_tune": gc_train.TrainingBackend.supports_fine_tune(),
+        "description": gc_train.TrainingBackend.description(),
+        "min_examples": gc_train.TR_MIN_EXAMPLES,
+        "separation": ("knowledge ingestion updates MongoDB retrieval instantly; "
+                       "weight training is a separate manual job"),
+    }
+
+
+@api_router.post("/ai/training/run")
+async def training_run(user: dict = Depends(get_current_user)):
+    """Start a controlled training run (teachers/admins, never in-request).
+
+    If the dataset is too small or the runtime cannot fine-tune, the run
+    reports exactly that - it never claims weights were updated.
+    """
+    _require_admin(user)
+    return await gc_train.run_training(db, requested_by=user.get("full_name", "admin"))
+
+
+@api_router.get("/ai/training/runs")
+async def training_runs(limit: int = 20, user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    return {"runs": await gc_train.list_runs(db, limit=max(1, min(limit, 50)))}
+
+
+@api_router.get("/ai/training/checkpoints")
+async def training_checkpoints(user: dict = Depends(get_current_user)):
+    _require_admin(user)
+    return {"checkpoints": await gc_train.list_checkpoints(db)}
 
 
 app.include_router(api_router)
