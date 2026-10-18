@@ -45,9 +45,16 @@ MAX_VIDEO_BYTES = 25 * 1024 * 1024          # 25 MB for short videos
 MAX_MEDIA_PER_POST = 4
 
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
-ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
+ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".3gp"}
 ALLOWED_IMAGE_MIME_PREFIX = "image/"
 ALLOWED_VIDEO_MIME_PREFIX = "video/"
+GENERIC_UPLOAD_MIMES = {"", "application/octet-stream", "binary/octet-stream"}
+VIDEO_MIME_EXTENSIONS = {
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/3gpp": ".3gp",
+}
 
 VALID_QUESTION_TYPES = {"question", "concept", "past_paper", "discussion", "note"}
 VALID_EXAM_LEVELS = {"GCE O Level", "GCE A Level", "HND", "Concours", "General"}
@@ -60,6 +67,15 @@ class FeedPostIn(BaseModel):
     topic: str = Field(default="", max_length=120)
     exam_level: str = Field(default="General", max_length=40)
     question_type: str = Field(default="question", max_length=30)
+
+
+class FeedPostUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=MAX_TITLE_LEN)
+    body: Optional[str] = Field(default=None, max_length=MAX_TEXT_LEN)
+    subject: Optional[str] = Field(default=None, max_length=80)
+    topic: Optional[str] = Field(default=None, max_length=120)
+    exam_level: Optional[str] = Field(default=None, max_length=40)
+    question_type: Optional[str] = Field(default=None, max_length=30)
 
 
 class FeedCommentIn(BaseModel):
@@ -115,14 +131,19 @@ def _rate_limit(key: str, limit: int, window_seconds: int = 3600) -> bool:
 def classify_upload(content_type: str, filename: str) -> Optional[str]:
     """Return 'image' | 'video' | None based on MIME + extension.
 
-    Both the declared content-type AND the file extension must agree, so a
-    .exe renamed to .jpg is rejected.
+    Specific MIME types must match the extension. Generic mobile picker MIME
+    values can use the allowlisted extension; upload magic bytes are checked
+    separately before the file is stored.
     """
     ct = (content_type or "").lower()
     ext = os.path.splitext(filename or "")[1].lower()
-    if ct.startswith(ALLOWED_IMAGE_MIME_PREFIX) and ext in ALLOWED_IMAGE_EXT:
-        return "image"
-    if ct.startswith(ALLOWED_VIDEO_MIME_PREFIX) and ext in ALLOWED_VIDEO_EXT:
+    if ext in ALLOWED_IMAGE_EXT:
+        if ct in GENERIC_UPLOAD_MIMES or ct.startswith(ALLOWED_IMAGE_MIME_PREFIX):
+            return "image"
+    if ext in ALLOWED_VIDEO_EXT:
+        if ct in GENERIC_UPLOAD_MIMES or ct.startswith(ALLOWED_VIDEO_MIME_PREFIX):
+            return "video"
+    if not ext and ct in VIDEO_MIME_EXTENSIONS:
         return "video"
     return None
 
@@ -378,7 +399,11 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             raise HTTPException(403, "You can only add media to your own post.")
         kind = classify_upload(file.content_type, file.filename or "")
         if not kind:
-            raise HTTPException(415, "Unsupported type. Use JPG/PNG/WEBP/GIF image or MP4/MOV/WEBM video.")
+            raise HTTPException(
+                415,
+                "Unsupported type. Use JPG/PNG/WEBP/GIF images or "
+                "MP4/MOV/M4V/WEBM/3GP videos.",
+            )
         cap = MAX_IMAGE_BYTES if kind == "image" else MAX_VIDEO_BYTES
         if len(post.get("media", [])) >= MAX_MEDIA_PER_POST:
             raise HTTPException(409, f"A post can have at most {MAX_MEDIA_PER_POST} media files.")
@@ -398,6 +423,8 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         if not _magic_ok(kind, content[:16]):
             raise HTTPException(415, "File content does not match its declared type.")
         ext = os.path.splitext(file.filename or "")[1].lower()
+        if not ext:
+            ext = VIDEO_MIME_EXTENSIONS.get((file.content_type or "").lower(), "")
         name = _safe_upload_name(file.filename, ext)
         with open(os.path.join(media_dir, name), "wb") as fh:
             fh.write(content)
@@ -457,6 +484,100 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
                                        {"$inc": {"view_count": 1}})
         viewer = user["user_id"] if user else ""
         return await serialize_post(db, doc, viewer, include_comments=True)
+
+    # ---------------- edit / delete own posts ----------------
+    @router.patch("/posts/{post_id}")
+    async def update_post(post_id: str, payload: FeedPostUpdate,
+                          user: dict = Depends(get_current_user)):
+        post = await db.feed_posts.find_one({"post_id": post_id})
+        if not post:
+            raise HTTPException(404, "Post not found")
+        if post.get("author_id") != user["user_id"] and user.get("role") != "admin":
+            raise HTTPException(403, "You can only edit your own post.")
+
+        supplied = payload.dict(exclude_unset=True)
+        if not supplied:
+            raise HTTPException(400, "Provide at least one field to update.")
+        if "question_type" in supplied and supplied["question_type"] not in VALID_QUESTION_TYPES:
+            raise HTTPException(422, "Invalid question type.")
+        if "exam_level" in supplied and supplied["exam_level"] not in VALID_EXAM_LEVELS:
+            raise HTTPException(422, "Invalid exam level.")
+
+        limits = {
+            "title": MAX_TITLE_LEN, "body": MAX_TEXT_LEN, "subject": 80,
+            "topic": 120, "exam_level": 40, "question_type": 30,
+        }
+        updates = {
+            key: _clean_text(value, limits[key]) if value is not None else ""
+            for key, value in supplied.items()
+        }
+        resulting_title = updates.get("title", post.get("title", ""))
+        resulting_body = updates.get("body", post.get("body", ""))
+        if not resulting_title and not resulting_body:
+            raise HTTPException(400, "A post needs a title or some content.")
+
+        updates["updated_at"] = datetime.utcnow().isoformat()
+        content_changed = bool(
+            set(supplied).intersection(
+                {"title", "body", "subject", "topic", "exam_level", "question_type"}
+            )
+        )
+        if content_changed:
+            updates.update({
+                "ai_answer": None,
+                "ai_citations": [],
+                "ai_status": "pending",
+                "ai_error": None,
+            })
+        await db.feed_posts.update_one({"post_id": post_id}, {"$set": updates})
+        updated = await db.feed_posts.find_one({"post_id": post_id}, {"_id": 0})
+        if not updated:
+            raise HTTPException(404, "Post not found")
+
+        try:
+            await emit_event("feed:post_updated", {"post_id": post_id}, topic="feed")
+        except Exception as e:
+            logger.warning("Feed post update event failed for %s: %s", post_id, e)
+
+        if content_changed:
+            import asyncio
+            asyncio.create_task(_generate_ai_answer(
+                db, updated, emit_event, create_notification))
+        return await serialize_post(db, updated, user["user_id"])
+
+    @router.delete("/posts/{post_id}")
+    async def delete_post(post_id: str, user: dict = Depends(get_current_user)):
+        post = await db.feed_posts.find_one({"post_id": post_id})
+        if not post:
+            raise HTTPException(404, "Post not found")
+        if post.get("author_id") != user["user_id"] and user.get("role") != "admin":
+            raise HTTPException(403, "You can only delete your own post.")
+
+        await db.feed_posts.delete_one({"post_id": post_id})
+        await db.feed_comments.delete_many({"post_id": post_id})
+        await db.feed_likes.delete_many({"post_id": post_id})
+        await db.feed_saves.delete_many({"post_id": post_id})
+
+        media_root = os.path.realpath(media_dir)
+        for item in post.get("media", []):
+            filename = os.path.basename(str(item.get("url") or "").split("?", 1)[0])
+            if not filename:
+                continue
+            path = os.path.realpath(os.path.join(media_root, filename))
+            if os.path.commonpath((media_root, path)) != media_root:
+                continue
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warning("Could not remove feed media %s: %s", filename, e)
+
+        try:
+            await emit_event("feed:post_deleted", {"post_id": post_id}, topic="feed")
+        except Exception as e:
+            logger.warning("Feed post deletion event failed for %s: %s", post_id, e)
+        return {"deleted": True, "post_id": post_id}
 
     # ---------------- like / save (toggles) ----------------
     async def _toggle(db_col, count_field: str, post_id: str, uid: str):

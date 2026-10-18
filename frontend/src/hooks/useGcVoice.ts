@@ -194,9 +194,19 @@ export function useGcVoice() {
     }).catch(() => {});
     return () => {
       mountedRef.current = false;
-      if (watchdogRef.current) clearInterval(watchdogRef.current);
+      if (watchdogRef.current) {
+        clearInterval(watchdogRef.current);
+        watchdogRef.current = null;
+      }
       try { ExpoSpeechRecognitionModule?.stop(); } catch {}
-      try { recorder.stop(); } catch {}
+      try {
+        if (!finishingRef.current && recorder.isRecording) {
+          void recorder.stop().catch((error) =>
+            console.warn("[voice] recorder cleanup failed:", error));
+        }
+      } catch (error) {
+        console.warn("[voice] recorder cleanup failed:", error);
+      }
     };
   }, [recorder]);
 

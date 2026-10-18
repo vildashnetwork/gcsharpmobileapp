@@ -31,14 +31,30 @@ const SUBJECT_SUGGESTIONS = [
 
 type PickedFile = { uri: string; name: string; mimeType?: string | null; size?: number };
 
+const FILE_MIME_TYPES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+  gif: "image/gif", mp4: "video/mp4", m4v: "video/mp4", "3gp": "video/3gpp",
+  mov: "video/quicktime", webm: "video/webm",
+};
+const MIME_FILE_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+  "image/gif": "gif", "video/mp4": "mp4", "video/quicktime": "mov",
+  "video/webm": "webm", "video/3gpp": "3gp",
+};
+
 /** Multipart upload to the feed media endpoint (api() only does JSON). */
 async function uploadMedia(postId: string, file: PickedFile): Promise<any> {
   const token = await readToken();
   const form = new FormData();
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  const declaredMime = file.mimeType?.toLowerCase();
+  const mimeType = declaredMime && declaredMime !== "application/octet-stream"
+    ? declaredMime
+    : FILE_MIME_TYPES[extension] || declaredMime || "application/octet-stream";
   form.append("file", {
     uri: file.uri,
     name: file.name,
-    type: file.mimeType || "application/octet-stream",
+    type: mimeType,
   } as any);
   const res = await fetch(`${API_BASE}/feed/posts/${postId}/media`, {
     method: "POST",
@@ -59,8 +75,11 @@ export default function ComposeScreen() {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const router = useRouter();
-  const params = useLocalSearchParams<{ paperScan?: string; mediaType?: string }>();
+  const params = useLocalSearchParams<{
+    paperScan?: string; mediaType?: string; postId?: string;
+  }>();
   const autoOpenedPaperPicker = useRef(false);
+  const postId = params.postId;
 
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -71,19 +90,38 @@ export default function ComposeScreen() {
   const [file, setFile] = useState<PickedFile | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [loadingPost, setLoadingPost] = useState(!!postId);
+  const [postLoadFailed, setPostLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const pickFile = useCallback(async (kind: "image" | "video" | "any" = "any") => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
-        type: kind === "image" ? ["image/*"] : kind === "video" ? ["video/*"] : ["image/*", "video/*"],
+        type: kind === "image"
+          ? ["image/jpeg", "image/png", "image/webp", "image/gif"]
+          : kind === "video"
+            ? ["video/*"]
+            : ["image/*", "video/*"],
         copyToCacheDirectory: true,
         multiple: false,
       });
       if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
       const size = (a as any).size ?? 0;
-      const isVideo = (a.mimeType || "").startsWith("video/");
+      const mimeType = (a.mimeType || "").toLowerCase();
+      const existingExtension = a.name.includes(".")
+        ? a.name.split(".").pop()?.toLowerCase() || ""
+        : "";
+      const extension = existingExtension || MIME_FILE_EXTENSIONS[mimeType] || "";
+      const isVideo = ["mp4", "m4v", "mov", "webm", "3gp"].includes(extension)
+        || mimeType.startsWith("video/");
+      const validVideo = ["mp4", "m4v", "mov", "webm", "3gp"].includes(extension);
+      const validImage = ["jpg", "jpeg", "png", "webp", "gif"].includes(extension);
+      if ((isVideo && !validVideo) || (!isVideo && !validImage)) {
+        Alert.alert("Unsupported file",
+          "Use JPG, PNG, WEBP, or GIF images, or MP4, MOV, M4V, WEBM, or 3GP videos.");
+        return;
+      }
       const cap = isVideo ? 25 * 1024 * 1024 : 8 * 1024 * 1024;
       if (size > cap) {
         Alert.alert("File too large",
@@ -91,8 +129,13 @@ export default function ComposeScreen() {
                   : "Images must be 8 MB or smaller.");
         return;
       }
-      setFile({ uri: a.uri, name: a.name || "media",
-        mimeType: a.mimeType, size });
+      const name = a.name?.includes(".") ? a.name : `${a.name || "media"}.${extension}`;
+      setFile({
+        uri: a.uri,
+        name,
+        mimeType: FILE_MIME_TYPES[extension] || a.mimeType,
+        size,
+      });
     } catch (e: any) {
       Alert.alert("Could not open picker", e?.message || "Please try again.");
     }
@@ -105,7 +148,35 @@ export default function ComposeScreen() {
     void pickFile(mediaType);
   }, [params.mediaType, params.paperScan, pickFile]);
 
+  useEffect(() => {
+    if (!postId) return;
+    let active = true;
+    api<{
+      title: string; body: string; subject: string; topic: string;
+      exam_level: string; question_type: string;
+    }>(`/feed/posts/${postId}`)
+      .then((post) => {
+        if (!active) return;
+        setTitle(post.title || "");
+        setBody(post.body || "");
+        setSubject(post.subject || "");
+        setTopic(post.topic || "");
+        setExamLevel(post.exam_level || "General");
+        setQuestionType(post.question_type || "question");
+      })
+      .catch((e: any) => {
+        if (!active) return;
+        setPostLoadFailed(true);
+        setError(e?.message || "Could not load this post to edit.");
+      })
+      .finally(() => {
+        if (active) setLoadingPost(false);
+      });
+    return () => { active = false; };
+  }, [postId]);
+
   const submit = async () => {
+    if (loadingPost || postLoadFailed) return;
     if (!title.trim() && !body.trim()) {
       setError("Add a title or some content before posting.");
       return;
@@ -113,21 +184,28 @@ export default function ComposeScreen() {
     setSubmitting(true);
     setError(null);
     try {
-      const post = await api<{ post_id: string }>("/feed/posts", {
-        method: "POST",
-        body: {
-          title: title.trim(), body: body.trim(),
-          subject: subject.trim() || "General",
-          topic: topic.trim(), exam_level: examLevel,
-          question_type: questionType,
-        },
-      });
-      if (file) {
+      const payload = {
+        title: title.trim(), body: body.trim(),
+        subject: subject.trim() || "General",
+        topic: topic.trim(), exam_level: examLevel,
+        question_type: questionType,
+      };
+      let targetPostId = postId;
+      if (postId) {
+        await api(`/feed/posts/${postId}`, { method: "PATCH", body: payload });
+      } else {
+        const post = await api<{ post_id: string }>("/feed/posts", {
+          method: "POST", body: payload,
+        });
+        targetPostId = post.post_id;
+      }
+      if (file && targetPostId) {
         setUploading(true);
         try {
-          await uploadMedia(post.post_id, file);
+          await uploadMedia(targetPostId, file);
         } catch (upErr: any) {
-          Alert.alert("Post created, but media failed",
+          Alert.alert(
+            postId ? "Post updated, but media failed" : "Post created, but media failed",
             upErr?.message || "Please retry the upload later.");
         }
       }
@@ -146,13 +224,15 @@ export default function ComposeScreen() {
         <Pressable onPress={() => router.back()} hitSlop={8}>
           <Ionicons name="arrow-back" size={24} color={t.onSurface} />
         </Pressable>
-        <Text style={styles.headerTitle}>New Post</Text>
+        <Text style={styles.headerTitle}>{postId ? "Edit Post" : "New Post"}</Text>
         <Pressable
-          style={[styles.postBtn, submitting && { opacity: 0.6 }]}
-          onPress={submit} disabled={submitting} testID="feed-submit">
-          {submitting
+          style={[styles.postBtn, (submitting || loadingPost) && { opacity: 0.6 }]}
+          onPress={submit} disabled={submitting || loadingPost} testID="feed-submit">
+          {submitting || loadingPost
             ? <ActivityIndicator size="small" color="#fff" />
-            : <Text style={styles.postBtnText}>{uploading ? "Uploading…" : "Post"}</Text>}
+            : <Text style={styles.postBtnText}>
+                {uploading ? "Uploading…" : postId ? "Save" : "Post"}
+              </Text>}
         </Pressable>
       </View>
 

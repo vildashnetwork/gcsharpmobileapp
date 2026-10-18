@@ -11,12 +11,13 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  View, Text, StyleSheet, FlatList, Pressable, RefreshControl,
+  View, Text, StyleSheet, FlatList, Pressable, RefreshControl, Alert,
   ActivityIndicator, Image, Linking, ScrollView, TextInput, useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useVideoPlayer, VideoView } from "expo-video";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, shadow1, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
@@ -268,18 +269,29 @@ function MediaBlock({ media, cardWidth }: { media: FeedMedia[]; cardWidth: numbe
         </View>
       )}
       {videos.map((m, i) => (
-        <Pressable key={`${m.url}-${i}`} style={styles.videoRow}
-          onPress={() => Linking.openURL(m.url).catch(() => { })}
-          accessibilityRole="button" accessibilityLabel="Play video">
-          <View style={styles.videoPlay}>
-            <Ionicons name="play" size={22} color="#fff" />
-          </View>
-          <Text style={styles.videoLabel} numberOfLines={1}>
-            {m.name || "Video walkthrough"}
-          </Text>
-        </Pressable>
+        <FeedVideo key={`${m.url}-${i}`} media={m} width={cardWidth} height={h} />
       ))}
     </>
+  );
+}
+
+function FeedVideo({ media, width, height }: {
+  media: FeedMedia; width: number; height: number;
+}) {
+  const player = useVideoPlayer(media.url, (videoPlayer) => {
+    videoPlayer.loop = false;
+  });
+  return (
+    <View style={{ width, height, overflow: "hidden", borderRadius: INNER_RADIUS }}>
+      <VideoView
+        player={player}
+        style={{ width, height }}
+        nativeControls
+        contentFit="contain"
+        fullscreenOptions={{ enable: true }}
+        accessibilityLabel={media.name || "Feed video"}
+      />
+    </View>
   );
 }
 
@@ -287,7 +299,7 @@ function MediaBlock({ media, cardWidth }: { media: FeedMedia[]; cardWidth: numbe
 // Post card
 // ------------------------------------------------------------
 function PostCard({ post, cardWidth, onToggleLike, onToggleSave, onShare,
-  onRetryAi, onOpen }: {
+  onRetryAi, onOpen, onEdit, onDelete, canManage }: {
     post: FeedPost;
     cardWidth: number;
     onToggleLike: (p: FeedPost) => void;
@@ -295,6 +307,9 @@ function PostCard({ post, cardWidth, onToggleLike, onToggleSave, onShare,
     onShare: (p: FeedPost) => void;
     onRetryAi: (postId: string) => void;
     onOpen: (p: FeedPost) => void;
+    onEdit: (p: FeedPost) => void;
+    onDelete: (p: FeedPost) => void;
+    canManage: boolean;
   }) {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
@@ -326,6 +341,23 @@ function PostCard({ post, cardWidth, onToggleLike, onToggleSave, onShare,
             <View style={styles.typeChip}>
               <Text style={styles.typeChipText}>{post.exam_level || post.question_type}</Text>
             </View>
+          )}
+          {canManage && (
+            <Pressable
+              style={styles.postMenuButton}
+              onPress={(event) => {
+                event.stopPropagation();
+                Alert.alert("Manage post", undefined, [
+                  { text: "Edit", onPress: () => onEdit(post) },
+                  { text: "Delete", style: "destructive", onPress: () => onDelete(post) },
+                  { text: "Cancel", style: "cancel" },
+                ]);
+              }}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Edit or delete post">
+              <Ionicons name="ellipsis-horizontal" size={20} color={t.onSurfaceMuted} />
+            </Pressable>
           )}
         </View>
 
@@ -397,6 +429,7 @@ export default function LearningFeedScreen() {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const router = useRouter();
+  const { user } = useAuth();
   const { width } = useWindowDimensions();
   // screen width minus list padding (both sides) minus card padding (both sides)
   const cardWidth = width - spacing.md * 2 - spacing.md * 2;
@@ -420,6 +453,7 @@ export default function LearningFeedScreen() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const loadRequestId = useRef(0);
+  const hasFocusedBefore = useRef(false);
 
   const load = useCallback(async (opts?: { refresh?: boolean }) => {
     const requestId = ++loadRequestId.current;
@@ -452,6 +486,10 @@ export default function LearningFeedScreen() {
     }
   }, [sort, subject, searchQuery, topicFilter, examLevelFilter,
     questionTypeFilter, cursor]);
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearchQuery(searchInput.trim()), 350);
@@ -465,6 +503,15 @@ export default function LearningFeedScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sort, subject, searchQuery, topicFilter, examLevelFilter,
     questionTypeFilter]);
+
+  useFocusEffect(useCallback(() => {
+    if (hasFocusedBefore.current) {
+      setCursor(null);
+      void loadRef.current({ refresh: true });
+    } else {
+      hasFocusedBefore.current = true;
+    }
+  }, []));
 
   // facets for the subject filter chips
   useEffect(() => {
@@ -485,7 +532,7 @@ export default function LearningFeedScreen() {
   // real-time: refresh when someone posts or comments
   const onSocketEvent = useCallback((e: any) => {
     if (["feed:new_post", "feed:new_comment", "feed:media_updated",
-      "ai_answer", "video_ready"].includes(e?.type)) {
+      "feed:post_updated", "feed:post_deleted", "ai_answer", "video_ready"].includes(e?.type)) {
       load({ refresh: true });
     }
   }, [load]);
@@ -552,14 +599,36 @@ export default function LearningFeedScreen() {
     }
   }, [load]);
 
+  const editPost = useCallback((post: FeedPost) => {
+    router.push({ pathname: "/feed/compose", params: { postId: post.post_id } });
+  }, [router]);
+
+  const deletePost = useCallback((post: FeedPost) => {
+    Alert.alert("Delete this post?", "This also removes its comments and attached media.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete", style: "destructive",
+        onPress: () => {
+          void api(`/feed/posts/${post.post_id}`, { method: "DELETE" })
+            .then(() => setPosts((current) =>
+              current.filter((item) => item.post_id !== post.post_id)))
+            .catch((e: any) => Alert.alert(
+              "Could not delete post", e?.message || "Please try again."));
+        },
+      },
+    ]);
+  }, []);
+
   const openCompose = useCallback(() => router.push("/feed/compose" as any), [router]);
 
   const renderItem = useCallback(({ item }: { item: FeedPost }) => (
     <PostCard post={item} cardWidth={cardWidth}
       onToggleLike={toggleLike} onToggleSave={toggleSave}
       onShare={sharePost} onRetryAi={retryAi}
+      canManage={item.author?.user_id === user?.user_id || user?.role === "admin"}
+      onEdit={editPost} onDelete={deletePost}
       onOpen={(p) => router.push(`/feed/${p.post_id}` as any)} />
-  ), [cardWidth, toggleLike, toggleSave, sharePost, retryAi, router]);
+  ), [cardWidth, toggleLike, toggleSave, sharePost, retryAi, router, user, editPost, deletePost]);
 
   const advancedFilterCount =
     (subject ? 1 : 0) + (topicFilter.trim() ? 1 : 0) + (questionTypeFilter ? 1 : 0) +
@@ -1029,6 +1098,10 @@ const createStyles = (t: Palette) => StyleSheet.create({
   retryText: { color: "#fff", fontSize: 13, fontWeight: "700" },
 
   // actions
+  postMenuButton: {
+    width: 32, height: 32, alignItems: "center", justifyContent: "center",
+    marginLeft: 2,
+  },
   actions: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 16 },
   action: {
     flexDirection: "row", alignItems: "center", gap: 6, minHeight: 36,

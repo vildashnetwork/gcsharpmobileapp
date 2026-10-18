@@ -191,6 +191,9 @@ class TestFeedValidation:
         assert gc_feed.classify_upload("image/png", "shot.png") == "image"
         assert gc_feed.classify_upload("video/mp4", "clip.mp4") == "video"
         assert gc_feed.classify_upload("video/quicktime", "clip.mov") == "video"
+        assert gc_feed.classify_upload("application/octet-stream", "clip.mp4") == "video"
+        assert gc_feed.classify_upload("", "clip.3gp") == "video"
+        assert gc_feed.classify_upload("video/mp4", "clip") == "video"
 
     def test_classify_upload_rejects_mismatches(self):
         import gc_feed
@@ -198,7 +201,7 @@ class TestFeedValidation:
         assert gc_feed.classify_upload("image/jpeg", "evil.exe") is None
         assert gc_feed.classify_upload("application/pdf", "doc.pdf") is None
         assert gc_feed.classify_upload("text/html", "page.jpg") is None
-        assert gc_feed.classify_upload("", "clip.mp4") is None
+        assert gc_feed.classify_upload("application/pdf", "clip.mp4") is None
 
     def test_magic_bytes_match_declared_types(self):
         import gc_feed
@@ -423,6 +426,14 @@ class TestAppWiring:
     def test_feed_routes_are_under_api_prefix(self, app_paths):
         feed = [p for p in app_paths if p.startswith("/api/feed/")]
         assert len(feed) >= 9
+
+    def test_feed_posts_support_edit_and_delete(self):
+        import server_sqlite_full_corrected as s
+        methods = set()
+        for route in s.app.routes:
+            if getattr(route, "path", "") == "/api/feed/posts/{post_id}":
+                methods.update(getattr(route, "methods", set()))
+        assert {"GET", "PATCH", "DELETE"}.issubset(methods)
 
     def test_push_token_endpoint_rejects_non_expo_tokens(self):
         from pydantic import ValidationError
