@@ -1129,10 +1129,8 @@ async def call_llm(prompt: str, system: Optional[str] = None,
             return clean_markdown(text), f"openrouter:{model}"
 
     return (
-        "I could not reach my learning services right now. Please try again in a "
-        "moment - I am learning from every question students ask, so I may already "
-        "know this one next time. Meanwhile, you can browse the Lessons and Past "
-        "Questions tabs for related material.",
+        "GC AI is temporarily unavailable. Please try again shortly. You can "
+        "browse Lessons and Past Questions for related material in the meantime.",
         "none",
     )
 

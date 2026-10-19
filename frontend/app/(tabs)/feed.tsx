@@ -17,13 +17,14 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useVideoPlayer, VideoView } from "expo-video";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, shadow1, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { useLearningSocket } from "@/src/hooks/useLearningSocket";
 import { useAuth } from "@/src/auth";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
+import { MediaBlock } from "@/src/components/FeedMediaBlock";
+import { timeAgo } from "@/src/lib/timeAgo";
 
 export type FeedMedia = { type: "image" | "video"; url: string; name?: string };
 export type FeedAuthor = {
@@ -61,19 +62,6 @@ const EXAM_LEVELS = [
   { label: "HND", value: "HND" },
   { label: "Concours", value: "Concours" },
 ];
-
-function timeAgo(iso?: string): string {
-  if (!iso) return "";
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
 
 function hostOf(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; }
@@ -229,68 +217,6 @@ function AiAnswerBlock({ post, onRetry }: {
           ))}
         </ScrollView>
       )}
-    </View>
-  );
-}
-
-// ------------------------------------------------------------
-// Media
-// ------------------------------------------------------------
-function MediaBlock({ media, cardWidth }: { media: FeedMedia[]; cardWidth: number }) {
-  const t = useTheme();
-  const styles = useMemo(() => createStyles(t), [t]);
-  const [index, setIndex] = useState(0);
-  const images = media.filter((m) => m.type === "image");
-  const videos = media.filter((m) => m.type === "video");
-  const h = cardWidth * 0.6;
-
-  return (
-    <>
-      {images.length === 1 && (
-        <Image source={{ uri: images[0].url }}
-          style={[styles.mediaSingle, { width: cardWidth, height: h }]}
-          resizeMode="cover" accessibilityLabel={images[0].name || "Attached image"} />
-      )}
-      {images.length > 1 && (
-        <View>
-          <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}
-            style={styles.mediaScroll}
-            onMomentumScrollEnd={(e) =>
-              setIndex(Math.round(e.nativeEvent.contentOffset.x / cardWidth))}>
-            {images.map((m, i) => (
-              <Image key={`${m.url}-${i}`} source={{ uri: m.url }}
-                style={{ width: cardWidth, height: h }}
-                resizeMode="cover" accessibilityLabel={m.name || `Image ${i + 1}`} />
-            ))}
-          </ScrollView>
-          <View style={styles.mediaCounter}>
-            <Text style={styles.mediaCounterText}>{index + 1}/{images.length}</Text>
-          </View>
-        </View>
-      )}
-      {videos.map((m, i) => (
-        <FeedVideo key={`${m.url}-${i}`} media={m} width={cardWidth} height={h} />
-      ))}
-    </>
-  );
-}
-
-function FeedVideo({ media, width, height }: {
-  media: FeedMedia; width: number; height: number;
-}) {
-  const player = useVideoPlayer(media.url, (videoPlayer) => {
-    videoPlayer.loop = false;
-  });
-  return (
-    <View style={{ width, height, overflow: "hidden", borderRadius: INNER_RADIUS }}>
-      <VideoView
-        player={player}
-        style={{ width, height }}
-        nativeControls
-        contentFit="contain"
-        fullscreenOptions={{ enable: true }}
-        accessibilityLabel={media.name || "Feed video"}
-      />
     </View>
   );
 }
@@ -884,8 +810,7 @@ export default function LearningFeedScreen() {
         testID="feed-compose"
         accessibilityRole="button"
         accessibilityLabel="Create a learning post">
-        <Ionicons name="add" size={22} color="#fff" />
-        <Text style={styles.fabText}>Ask</Text>
+        <Ionicons name="add" size={28} color="#fff" />
       </Pressable>
     </SafeAreaView>
   );
@@ -994,9 +919,8 @@ const createStyles = (t: Palette) => StyleSheet.create({
 
   // fab
   fab: {
-    position: "absolute", right: 18, bottom: 20, height: 52,
-    flexDirection: "row", alignItems: "center", gap: 6,
-    paddingLeft: 16, paddingRight: 20, borderRadius: 26,
+    position: "absolute", right: 18, bottom: 20, width: 56, height: 56,
+    alignItems: "center", justifyContent: "center", borderRadius: 28,
     backgroundColor: t.brandPrimary, ...shadow1,
   },
   fabText: { color: "#fff", fontSize: 15, fontWeight: "800" },
@@ -1044,6 +968,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
     width: 56, height: 56, borderRadius: 28, backgroundColor: t.brandPrimary,
     alignItems: "center", justifyContent: "center", paddingLeft: 3,
   },
+  videoShade: { ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.28)" },
   videoLabel: { color: "#fff", fontSize: 13, fontWeight: "600", maxWidth: "80%" },
 
   // tags

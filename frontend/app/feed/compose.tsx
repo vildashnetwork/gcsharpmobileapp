@@ -16,8 +16,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
-import { File as ExpoFile } from "expo-file-system";
-import { fetch as expoFetch } from "expo/fetch";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
@@ -72,8 +70,13 @@ type FeedPostWriteResult = {
 type CancelHandle = { cancel: () => void };
 
 /**
- * Native uploads use Expo's fetch implementation so picker URIs remain
- * readable without staging/copying. Web uses the browser fetch implementation.
+ * Uploads to Cloudinary with real progress.
+ *
+ * Native: React Native's own networking layer reads the file straight from the
+ * picker URI (file:// or content://), so no expo-file-system File object (and
+ * no READ permission) is involved. XMLHttpRequest is used because fetch()
+ * cannot report upload progress.
+ * Web: plain fetch (no percentage).
  */
 async function uploadMediaToCloudinary(
   file: PickedFile,
@@ -95,28 +98,59 @@ async function uploadMediaToCloudinary(
     throw new Error(data?.error?.message || `Upload failed (${status}).`);
   };
 
-  const controller = new AbortController();
-  cancelRef.current = { cancel: () => controller.abort() };
-  try {
-    const form = new FormData();
-    form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-    if (Platform.OS === "web") {
+  const form = new FormData();
+  form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+
+  if (Platform.OS === "web") {
+    const controller = new AbortController();
+    cancelRef.current = { cancel: () => controller.abort() };
+    try {
       const blob = await (await fetch(file.uri, { signal: controller.signal })).blob();
       form.append("file", blob, file.name);
-    } else {
-      form.append("file", new ExpoFile(file.uri), file.name);
+      const res = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
+      return parse(res.status, await res.text());
+    } catch (e) {
+      if (controller.signal.aborted) throw new UploadCancelled();
+      throw e;
+    } finally {
+      cancelRef.current = null;
     }
-
-    const response = Platform.OS === "web"
-      ? await fetch(endpoint, { method: "POST", body: form, signal: controller.signal })
-      : await expoFetch(endpoint, { method: "POST", body: form, signal: controller.signal });
-    return parse(response.status, await response.text());
-  } catch (e) {
-    if (controller.signal.aborted) throw new UploadCancelled();
-    throw e;
-  } finally {
-    cancelRef.current = null;
   }
+
+  // some pickers return a bare path; React Native needs a scheme
+  const uri = file.uri.startsWith("/") ? `file://${file.uri}` : file.uri;
+  form.append("file", { uri, name: file.name, type: mimeType } as any);
+
+  return new Promise<UploadedMedia>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    cancelRef.current = { cancel: () => xhr.abort() };
+    xhr.open("POST", endpoint);
+    xhr.timeout = 5 * 60 * 1000;
+    // Do not set Content-Type: the multipart boundary is added automatically.
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+      }
+    };
+    xhr.onload = () => {
+      cancelRef.current = null;
+      try { resolve(parse(xhr.status, xhr.responseText)); } catch (err) { reject(err); }
+    };
+    xhr.onerror = () => {
+      cancelRef.current = null;
+      reject(new Error("Could not send the file. Check your connection and try again."));
+    };
+    xhr.ontimeout = () => {
+      cancelRef.current = null;
+      reject(new Error("The upload took too long. Try a smaller file or a better connection."));
+    };
+    xhr.onabort = () => {
+      cancelRef.current = null;
+      reject(new UploadCancelled());
+    };
+    xhr.send(form);
+  });
 }
 
 function formatSize(bytes?: number): string {
@@ -290,6 +324,7 @@ export default function ComposeScreen() {
         setUploadedMedia(media);
         setUploading(false);
       }
+      // after a failed attempt that already created the post, update it instead of duplicating
       const existingPostId = postId || createdPostIdRef.current;
       if (existingPostId) {
         const updated = await api<FeedPostWriteResult>(`/feed/posts/${existingPostId}`, {

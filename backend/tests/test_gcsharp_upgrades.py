@@ -720,6 +720,14 @@ class TestAppWiring:
         assert status["available"] is True
         assert status["providers"]["search_provider"] == "google_custom_search"
 
+    def test_provider_failure_message_uses_gc_ai_branding(self):
+        import server_sqlite_full_corrected as s
+        detail = s._ai_unavailable_to_http(
+            RuntimeError("Gemini and OpenRouter are unavailable")).detail
+        assert "GC AI" in detail
+        assert "Gemini" not in detail
+        assert "OpenRouter" not in detail
+
     def test_json_generation_helper_uses_shared_provider_engine(self, monkeypatch):
         import asyncio
         import server_sqlite_full_corrected as s

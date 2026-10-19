@@ -2512,7 +2512,7 @@ async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current
             "success": False,
             "error": detail,
             "retryable": True,
-            "suggestion": "Gemini and OpenRouter are unavailable right now - please retry shortly."
+            "suggestion": "GC AI is temporarily unavailable. Please try again shortly."
         }
     except Exception as e:
         logger.error(f"Solve endpoint error: {e}")
@@ -3151,8 +3151,7 @@ async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
             source = outcome.get("source") or "ai"
             learned = bool(outcome.get("learned"))
             if source == "provider_unavailable":
-                full = ("Gemini and OpenRouter are unavailable right now, so I "
-                        "could not generate an answer. Please tap retry in a moment.")
+                full = ("GC AI is temporarily unavailable. Please try again shortly.")
             elif not full:
                 full = ("I could not generate a complete answer just now. Please try "
                         "rephrasing the question or ask again in a moment.")
@@ -3278,7 +3277,7 @@ async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
     )
     if outcome.get("source") == "provider_unavailable":
         raise HTTPException(503, outcome.get("error") or
-                            "Gemini and OpenRouter are unavailable. Please retry.")
+                            "GC AI is temporarily unavailable. Please try again shortly.")
     return {
         "answer": outcome["answer"],
         "source": outcome["source"],
@@ -4308,7 +4307,7 @@ def _ai_unavailable_to_http(e: Exception) -> HTTPException:
     logger.error("Gemini/OpenRouter unavailable: %s", str(e)[:300])
     return HTTPException(
         503,
-        "Gemini and OpenRouter are unavailable right now. Please retry shortly.",
+        "GC AI is temporarily unavailable. Please try again shortly.",
     )
 
 
@@ -5233,8 +5232,7 @@ async def _reply_group_ai(group: dict, trigger_msg: dict, asker: dict) -> dict:
         await _broadcast_group(group["group_id"], {"type": "ai_typing", "typing": False})
     if outcome.get("source") == "provider_unavailable":
         outcome = {
-            "answer": ("Gemini and OpenRouter are unavailable right now, so I can't "
-                       "generate a new answer. Please try again in a moment."),
+            "answer": "GC AI is temporarily unavailable. Please try again shortly.",
             "source": "provider_unavailable", "learned": False,
         }
     ai_msg = await _store_group_message(

@@ -165,6 +165,7 @@ export type MediaManifestEntry = {
 type MediaManifest = Record<string, MediaManifestEntry>;
 
 const MANIFEST_FILE = "media_manifest.json";
+const mediaCacheDownloads = new Map<string, Promise<string | null>>();
 
 function mediaKey(url: string): string {
   // Stable, filesystem-safe key for a remote URL.
@@ -234,36 +235,53 @@ export async function cacheMediaBytes(
   kind: MediaKind
 ): Promise<string | null> {
   if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return null;
-  ensureStorageReady();
   const key = mediaKey(remoteUrl);
+  const downloadKey = `${kind}:${key}`;
+  const inFlight = mediaCacheDownloads.get(downloadKey);
+  if (inFlight) return inFlight;
 
-  const manifest = await readManifest();
-  const existing = manifest[key];
-  if (existing) {
+  const download = (async (): Promise<string | null> => {
+    ensureStorageReady();
+
+    const manifest = await readManifest();
+    const existing = manifest[key];
+    if (existing) {
+      try {
+        const f = new File(existing.localUri);
+        if (f.exists) return existing.localUri;
+      } catch { }
+    }
+
     try {
-      const f = new File(existing.localUri);
-      if (f.exists) return existing.localUri;
-    } catch { }
-  }
+      const dest = new File(MEDIA_DIR, `${key}.${extFor(kind, remoteUrl)}`);
+      const downloaded = await File.downloadFileAsync(remoteUrl, dest, {
+        idempotent: true,
+      });
+      // File objects expose .size on this SDK; fall back to 0 if absent.
+      const bytes = (downloaded as any).size ?? 0;
+      const m = await readManifest();
+      m[key] = {
+        remoteUrl,
+        localUri: downloaded.uri,
+        kind,
+        cachedAt: Date.now(),
+        bytes,
+      };
+      writeManifest(m);
+      return downloaded.uri;
+    } catch (err) {
+      console.log(`cacheMediaBytes failed (${kind}):`, err);
+      return null;
+    }
+  })();
 
+  mediaCacheDownloads.set(downloadKey, download);
   try {
-    const dest = new File(MEDIA_DIR, `${key}.${extFor(kind, remoteUrl)}`);
-    const downloaded = await File.downloadFileAsync(remoteUrl, dest);
-    // File objects expose .size on this SDK; fall back to 0 if absent.
-    const bytes = (downloaded as any).size ?? 0;
-    const m = await readManifest();
-    m[key] = {
-      remoteUrl,
-      localUri: downloaded.uri,
-      kind,
-      cachedAt: Date.now(),
-      bytes,
-    };
-    writeManifest(m);
-    return downloaded.uri;
-  } catch (err) {
-    console.log(`cacheMediaBytes failed (${kind}):`, err);
-    return null;
+    return await download;
+  } finally {
+    if (mediaCacheDownloads.get(downloadKey) === download) {
+      mediaCacheDownloads.delete(downloadKey);
+    }
   }
 }
 

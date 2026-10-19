@@ -334,11 +334,11 @@ async def _generate_ai_answer(db, post: Dict[str, Any],
 
     answer = (outcome.get("answer") or "").strip()
     if not answer:
-        logger.error("GCSharp returned an empty answer for post %s", post_id)
+        logger.error("GC AI returned an empty answer for post %s", post_id)
         await db.feed_posts.update_one(
             {"post_id": post_id},
             {"$set": {"ai_status": "error",
-                      "ai_error": "GCSharp returned an empty explanation.",
+                      "ai_error": "GC AI returned an empty explanation.",
                       "updated_at": datetime.utcnow().isoformat()}})
         if emit_event:
             await emit_event("ai_answer", {"post_id": post_id,

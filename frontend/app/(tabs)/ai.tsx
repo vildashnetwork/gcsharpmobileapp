@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -30,6 +30,10 @@ import { useAuth } from "@/src/auth";
 import { humanize } from "@/src/format";
 import { useGcVoice } from "@/src/hooks/useGcVoice";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
+import {
+  GC_AI_UNAVAILABLE_MESSAGE, gcAiErrorMessage, isGcAiProviderFailure,
+  presentGcAiMessage,
+} from "@/src/lib/gcAiMessage";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const DRAWER_WIDTH = Math.min(SCREEN_WIDTH * 0.75, 300);
@@ -415,14 +419,19 @@ export default function AITutor() {
                 receivedContent = true;
                 setAiStatus("Writing your answer");
                 fullReply += data.delta;
+                const providerFailure = isGcAiProviderFailure(fullReply);
                 // Speak each finished sentence as it arrives (very fast reply).
-                if (streamVoiceRef.current) voice.speakStreamChunk(data.delta);
+                if (streamVoiceRef.current && !providerFailure) {
+                  voice.speakStreamChunk(data.delta);
+                }
                 // Update assistant message in real-time
                 setMsgs((m) => {
                   const last = m[m.length - 1];
                   if (last && last.role === "assistant") {
                     const updated = [...m];
-                    updated[updated.length - 1] = { ...last, content: fullReply };
+                    updated[updated.length - 1] = {
+                      ...last, content: presentGcAiMessage(fullReply),
+                    };
                     return updated;
                   }
                   return m;
@@ -432,8 +441,11 @@ export default function AITutor() {
                 // Flush the final partial sentence so the answer is read out fully.
                 // If nothing was voiced yet (reply arrived in one piece) the
                 // full text is spoken instead.
-                voice.speakStreamEnd(fullReply);
-                spokeThisReplyRef.current = fullReply;
+                const speechReply = isGcAiProviderFailure(fullReply)
+                  ? GC_AI_UNAVAILABLE_MESSAGE
+                  : fullReply;
+                voice.speakStreamEnd(speechReply);
+                spokeThisReplyRef.current = speechReply;
                 streamVoiceRef.current = false;
               }
               if (data.done && data.session_id) {
@@ -443,7 +455,7 @@ export default function AITutor() {
                   setCurrentSessionId(receivedSessionId);
                 }
                 // Tag the reply with where the knowledge came from
-                if (data.source && fullReply) {
+                if (data.source && fullReply && !isGcAiProviderFailure(fullReply)) {
                   const tags: Record<string, string> = {
                     knowledge_base: "📚 Answered from GC AI's learned knowledge",
                     web: "🌐 Verified with web research",
@@ -491,7 +503,8 @@ export default function AITutor() {
         });
         if (fallbackRes.ok) {
           const data = await fallbackRes.json();
-          let reply = data.reply || data.answer || "I couldn't generate a response.";
+          let reply = presentGcAiMessage(
+            data.reply || data.answer || "GC AI couldn't generate a response.");
           if (typeof reply === "object") reply = JSON.stringify(reply);
           if (reply.includes("User Safety: safe")) {
             throw new Error("Please rephrase your question.");
@@ -535,9 +548,12 @@ export default function AITutor() {
     } catch (e: any) {
       console.error("Chat error:", e);
       // GC AI should never present a hard failure - offer graceful guidance.
-      let errorMsg = "I could not complete that answer just now. Please try again in a moment, or rephrase your question.";
+      let errorMsg = gcAiErrorMessage(
+        e, "GC AI could not complete that answer just now. Please try again shortly.");
       if (e.message?.includes("401") || e.message?.includes("Authentication")) {
         errorMsg = "Your session has expired. Please log in again.";
+      } else if (isGcAiProviderFailure(e.message || "")) {
+        errorMsg = GC_AI_UNAVAILABLE_MESSAGE;
       }
       setMsgs((m) => {
         const last = m[m.length - 1];
@@ -552,7 +568,10 @@ export default function AITutor() {
       // If the stream ended before the terminal event, still flush the
       // sentence being spoken so the answer is never cut off mid-way.
       if (streamVoiceRef.current) {
-        voice.speakStreamEnd(fullReply);
+        const speechReply = isGcAiProviderFailure(fullReply)
+          ? GC_AI_UNAVAILABLE_MESSAGE
+          : fullReply;
+        voice.speakStreamEnd(speechReply);
         streamVoiceRef.current = false;
       }
       if (spokeThisReplyRef.current) {
@@ -1401,11 +1420,6 @@ let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => {
   styles = createStyles(getPaletteSnapshot());
 });
-
-
-
-
-
 
 
 

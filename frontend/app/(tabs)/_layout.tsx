@@ -1,12 +1,13 @@
-
+import React, { useEffect, useState } from "react";
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { View, Text, StyleSheet, Pressable, Image } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { theme, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { useLanguage } from "@/src/i18n";
+import { useAuth } from "@/src/auth";
 
 // Metadata for each tab — labels resolve from the active language dictionary
 // at render time; the actual rendering order comes from the Tabs.Screen order.
@@ -19,6 +20,51 @@ function useTabItems() {
     { name: "lessons", label: t.tabs.lessons, icon: "play-outline", iconActive: "play" },
     { name: "profile", label: t.tabs.profile, icon: "person-outline", iconActive: "person" },
   ];
+}
+
+// The signed-in user's photo (or their initial) in place of the profile icon.
+function ProfileTabIcon({ focused }: { focused: boolean }) {
+  const t = useTheme();
+  const { user } = useAuth();
+  const uri = user?.local_photo_uri || user?.profile_photo;
+  const initial = (user?.full_name || "").trim().charAt(0).toUpperCase();
+  const [failed, setFailed] = useState(false);
+
+  // try again whenever the photo changes (e.g. after uploading a new one)
+  useEffect(() => { setFailed(false); }, [uri]);
+
+  // not signed in yet: keep the regular icon
+  if (!user) {
+    return (
+      <Ionicons
+        name={focused ? "person" : "person-outline"}
+        size={22}
+        color={focused ? t.brandPrimary : t.onSurfaceMuted}
+      />
+    );
+  }
+
+  return (
+    <View
+      style={[
+        styles.avatarRing,
+        { borderColor: focused ? t.brandPrimary : t.divider },
+      ]}
+    >
+      {uri && !failed ? (
+        <Image
+          source={{ uri }}
+          style={styles.avatarImage}
+          onError={() => setFailed(true)}
+          accessibilityIgnoresInvertColors
+        />
+      ) : (
+        <View style={[styles.avatarImage, styles.avatarFallback, { backgroundColor: t.brandPrimary }]}>
+          <Text style={styles.avatarInitial}>{initial || "?"}</Text>
+        </View>
+      )}
+    </View>
+  );
 }
 
 function CustomTabBar({ state, descriptors, navigation }: any) {
@@ -71,12 +117,23 @@ function CustomTabBar({ state, descriptors, navigation }: any) {
             }
 
             return (
-              <Pressable key={route.key} onPress={onPress} style={styles.item}>
-                <Ionicons
-                  name={(focused ? meta.iconActive : meta.icon) as any}
-                  size={22}
-                  color={focused ? theme.brandPrimary : theme.onSurfaceMuted}
-                />
+              <Pressable
+                key={route.key}
+                onPress={onPress}
+                style={styles.item}
+                accessibilityRole="button"
+                accessibilityLabel={meta.label}
+                accessibilityState={{ selected: focused }}
+              >
+                {meta.name === "profile" ? (
+                  <ProfileTabIcon focused={focused} />
+                ) : (
+                  <Ionicons
+                    name={(focused ? meta.iconActive : meta.icon) as any}
+                    size={22}
+                    color={focused ? theme.brandPrimary : theme.onSurfaceMuted}
+                  />
+                )}
                 <Text style={[styles.label, focused && styles.labelActive]}>{meta.label}</Text>
               </Pressable>
             );
@@ -135,6 +192,19 @@ const createStyles = (t: Palette) => StyleSheet.create({
   labelActive: {
     color: t.brandPrimary,
   },
+  // profile photo in the tab bar
+  avatarRing: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  avatarImage: { width: 22, height: 22, borderRadius: 11 },
+  avatarFallback: { alignItems: "center", justifyContent: "center" },
+  avatarInitial: { color: "#fff", fontSize: 11, fontWeight: "800" },
   centerSlot: {
     flex: 1,
     alignItems: "center",

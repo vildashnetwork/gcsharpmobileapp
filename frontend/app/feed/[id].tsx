@@ -13,18 +13,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, shadow1, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
+import { timeAgo } from "@/src/lib/timeAgo";
 import type { FeedComment, FeedPost } from "../(tabs)/feed";
-
-function timeAgo(iso?: string): string {
-  if (!iso) return "";
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return new Date(iso).toLocaleDateString();
-}
 
 function CommentItem({ c, isReply, onReply, onDelete }: {
   c: FeedComment; isReply?: boolean;
@@ -229,7 +219,7 @@ export default function PostDetailScreen() {
               ) : post.ai_status === "unavailable" || post.ai_status === "error" ? (
                 <View style={styles.aiBox}>
                   <Ionicons name="cloud-offline-outline" size={18} color={t.warning} />
-                  <Text style={styles.aiMuted}>The GCSharp model is unavailable right now.</Text>
+                  <Text style={styles.aiMuted}>GC AI is temporarily unavailable. Please try again shortly.</Text>
                   <Pressable style={styles.retryBtn} onPress={retryAi}>
                     <Ionicons name="refresh" size={14} color="#fff" />
                     <Text style={styles.retryText}>Retry</Text>
@@ -374,4 +364,3 @@ const createStyles = (t: Palette) => StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
 });
-
