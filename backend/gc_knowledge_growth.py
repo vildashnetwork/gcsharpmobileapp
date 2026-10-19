@@ -8,7 +8,7 @@ An automated, bounded, restartable background pipeline that:
   2. Searches trustworthy sources using gc_ai_engine.google_search /
      _rank_result / research_context.
   3. Scores each source for quality, relevance and reliability.
-  4. Passes ONLY the vetted evidence to the GCSharp model (gc_model).
+  4. Passes ONLY the vetted evidence to a configured Gemini/OpenRouter model.
   5. Stores the model's final explanation in MongoDB `ai_knowledge` with full
      provenance metadata so retrieval can use it IMMEDIATELY (no retraining).
 
@@ -17,8 +17,8 @@ evidence reference, verification status, quality score, content version and a
 dedupe hash. Nothing unverified is marked authoritative, and conflicting
 sources are recorded rather than silently overwritten.
 
-This module NEVER calls an external LLM. If the GCSharp model is down, the
-topic is skipped (and retried on a later pass) - the pipeline never fabricates.
+If neither external model provider is available, the topic is skipped (and
+retried on a later pass) - the pipeline never fabricates.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import gc_ai_engine as gc_ai
-from gc_model import GCModelUnavailableError, get_gc_model
 
 logger = logging.getLogger("gc_knowledge_growth")
 
@@ -346,8 +345,7 @@ async def ingest_topic(db, topic_info: Dict[str, str]) -> Dict[str, Any]:
         result["reason"] = "no_quality_sources"
         return result
 
-    # Compose the final explanation with the GCSharp model ONLY.
-    model = get_gc_model()
+    # Compose the final explanation with the configured Gemini/OpenRouter model.
     system = (
         "You are GC AI, the built-in teacher model of GC Sharp. Write a clear, "
         "accurate, exam-focused explanation for the topic using ONLY the supplied "
@@ -362,12 +360,12 @@ async def ingest_topic(db, topic_info: Dict[str, str]) -> Dict[str, Any]:
         "End with 'Final answer:' summarising the key takeaway in one line."
     )
     try:
-        answer = await model.generate(prompt, system=system, max_tokens=900,
-                                      temperature=0.2, timeout=90.0)
-    except GCModelUnavailableError as e:
-        # Skip now; the topic stays eligible for a later pass. No external LLM.
-        logger.warning("ingest_topic skipped (model unavailable): %s", str(e)[:120])
-        result["reason"] = "model_unavailable"
+        answer, provider = await gc_ai.generate_text(
+            prompt, system=system, max_tokens=900, timeout=90.0)
+    except gc_ai.AIProvidersUnavailableError as e:
+        logger.warning("ingest_topic skipped (AI providers unavailable): %s",
+                       str(e)[:120])
+        result["reason"] = "providers_unavailable"
         return result
 
     if not answer or len(answer.strip()) < 60:
@@ -391,7 +389,8 @@ async def ingest_topic(db, topic_info: Dict[str, str]) -> Dict[str, Any]:
     result.update(stored=bool(entry_id), entry_id=entry_id,
                   quality=quality, verification_status=status,
                   sources=len(vetted),
-                  elapsed_ms=int((time.monotonic() - started) * 1000))
+                  elapsed_ms=int((time.monotonic() - started) * 1000),
+                  provider=provider)
     return result
 
 

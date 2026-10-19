@@ -493,18 +493,21 @@ class TestCitationsAndEngine:
             "url": "https://openstax.org/books/physics",
         }]
 
-    def test_answer_question_without_model_flags_unavailable(self, monkeypatch):
-        """GC-model path must flag unavailability, not use an external LLM."""
+    def test_answer_question_uses_external_provider(self, monkeypatch):
+        """Tutor synthesis must use Gemini/OpenRouter rather than require GGUF."""
         import asyncio
-        _fresh_gc_model(monkeypatch, url="", path="")
         import gc_ai_engine as gc_ai
         from types import SimpleNamespace
+        monkeypatch.setattr(
+            gc_ai, "call_llm",
+            lambda *args, **kwargs: asyncio.sleep(
+                0, result=("A sourced tutor answer.", "google-gemini")))
 
         class _AsyncFind:
             async def create_index(self, *a, **k):
                 return None
 
-            async def find(self, *a, **k):
+            def find(self, *a, **k):
                 return self
 
             async def to_list(self, n):
@@ -517,13 +520,117 @@ class TestCitationsAndEngine:
         outcome = asyncio.run(gc_ai.answer_question(
             fake_db, "Why is the sky blue Rayleigh scattering?",
             allow_web_learning=False, use_gc_model=True))
-        # No model configured -> strict unavailable signal (not a fake answer).
-        assert outcome["source"] == "gc_model_unavailable"
+        assert outcome["source"] == "google-gemini"
+        assert outcome["answer"] == "A sourced tutor answer."
+
+    def test_answer_question_reports_provider_unavailable(self, monkeypatch):
+        import asyncio
+        import gc_ai_engine as gc_ai
+        from types import SimpleNamespace
+        monkeypatch.setattr(
+            gc_ai, "call_llm",
+            lambda *args, **kwargs: asyncio.sleep(
+                0, result=("Providers unavailable.", "none")))
+
+        class _AsyncFind:
+            async def create_index(self, *a, **k):
+                return None
+
+            def find(self, *a, **k):
+                return self
+
+            async def to_list(self, n):
+                return []
+
+            async def find_one(self, *a, **k):
+                return None
+
+        fake_db = SimpleNamespace(ai_knowledge=_AsyncFind())
+        outcome = asyncio.run(gc_ai.answer_question(
+            fake_db, "Why is the sky blue Rayleigh scattering?",
+            allow_web_learning=False))
+        assert outcome["source"] == "provider_unavailable"
         assert outcome["answer"] == ""
-        assert outcome.get("error")
-        # Must not have silently used an external provider.
-        assert outcome["source"] not in ("openrouter", "google-gemini",
-                                         "pollinations", "none")
+        assert outcome["error"] == "Providers unavailable."
+
+    def test_gemini_precedes_bounded_openrouter_fallbacks(self, monkeypatch):
+        import asyncio
+        import gc_ai_engine as gc_ai
+        calls = []
+        monkeypatch.setattr(gc_ai, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(gc_ai, "OPENROUTER_API_KEY", "test-key")
+        monkeypatch.setattr(gc_ai, "OPENROUTER_MODEL", "preferred/model")
+        monkeypatch.setattr(gc_ai, "OPENROUTER_MODEL_FALLBACKS",
+                            ["fallback/one", "fallback/two"])
+        monkeypatch.setattr(gc_ai, "OPENROUTER_CHAIN",
+                            ["fallback/three", "fallback/four"])
+
+        async def gemini(*args, **kwargs):
+            calls.append("gemini")
+            return None
+
+        async def openrouter(model, *args, **kwargs):
+            calls.append(model)
+            return "OpenRouter answer" if model == "fallback/one" else None
+
+        monkeypatch.setattr(gc_ai, "_call_gemini", gemini)
+        monkeypatch.setattr(gc_ai, "_call_openrouter", openrouter)
+        answer, provider = asyncio.run(gc_ai.call_llm("prompt"))
+        assert answer == "OpenRouter answer"
+        assert provider == "openrouter:fallback/one"
+        assert calls == ["gemini", "preferred/model", "fallback/one"]
+
+    def test_generate_json_uses_provider_output(self, monkeypatch):
+        import asyncio
+        import gc_ai_engine as gc_ai
+        monkeypatch.setattr(
+            gc_ai, "call_llm",
+            lambda *args, **kwargs: asyncio.sleep(
+                0, result=('{"scenes": [{"heading": "Intro"}]}', "google-gemini")))
+        parsed, provider = asyncio.run(
+            gc_ai.generate_json("prompt", "scenes"))
+        assert parsed["scenes"][0]["heading"] == "Intro"
+        assert provider == "google-gemini"
+
+    def test_google_search_skips_fallback_after_google_hits(self, monkeypatch):
+        import asyncio
+        import gc_ai_engine as gc_ai
+        monkeypatch.setattr(gc_ai, "GOOGLE_SEARCH_API_KEY", "test-key")
+        monkeypatch.setattr(gc_ai, "GOOGLE_SEARCH_CX", "test-cx")
+        calls = []
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {"items": [{
+                    "title": "Khan Academy",
+                    "snippet": "An educational explanation.",
+                    "link": "https://www.khanacademy.org/science",
+                }]}
+
+        class _Client:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def get(self, *args, **kwargs):
+                calls.append("google")
+                return _Response()
+
+            async def post(self, *args, **kwargs):
+                calls.append("fallback")
+                raise AssertionError("fallback should not run when Google has hits")
+
+        monkeypatch.setattr(gc_ai.httpx, "AsyncClient", _Client)
+        results = asyncio.run(gc_ai.google_search("science topic"))
+        assert results[0]["link"] == "https://www.khanacademy.org/science"
+        assert calls == ["google"]
 
 
 # ------------------------------------------------------------
@@ -597,10 +704,28 @@ class TestAppWiring:
         with pytest.raises(ValidationError):
             PushTokenRequest(token="not-a-push-token")
 
-    def test_no_external_llm_generation_helpers_are_reachable(self):
-        """_ask_ai_for_json must be hard-blocked (Phase 2 strict rule)."""
+    def test_provider_status_reports_external_configuration(self, monkeypatch):
         import asyncio
         import server_sqlite_full_corrected as s
-        with pytest.raises(Exception) as exc:
-            asyncio.run(s._ask_ai_for_json(None, "prompt", "scenes"))
-        assert "External LLM generation is disabled" in str(exc.value)
+        monkeypatch.setattr(s.gc_ai, "provider_status", lambda: {
+            "gemini_configured": True,
+            "gemini_model": "gemini-2.5-flash",
+            "openrouter_configured": False,
+            "openrouter_models": [],
+            "search_provider": "google_custom_search",
+            "google_search_configured": True,
+        })
+        status = asyncio.run(s.gc_model_status())
+        assert status["configured"] is True
+        assert status["available"] is True
+        assert status["providers"]["search_provider"] == "google_custom_search"
+
+    def test_json_generation_helper_uses_shared_provider_engine(self, monkeypatch):
+        import asyncio
+        import server_sqlite_full_corrected as s
+        monkeypatch.setattr(
+            s.gc_ai, "generate_json",
+            lambda *args, **kwargs: asyncio.sleep(
+                0, result=({"scenes": [{"heading": "Intro"}]}, "google-gemini")))
+        parsed = asyncio.run(s._ask_ai_for_json(None, "prompt", "scenes"))
+        assert parsed["scenes"][0]["heading"] == "Intro"

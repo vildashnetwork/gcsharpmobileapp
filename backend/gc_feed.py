@@ -11,8 +11,8 @@ Design notes:
   * All content is validated; uploads are size/type restricted and stored on
     disk under /api/feed/media. Endpoints enforce authorization and per-user
     rate limits to deter abuse.
-  * AI explanations come from the GCSharp personal model (Phase 2) with real
-    source citations; there is no external-LLM fallback.
+  * AI explanations use Gemini/OpenRouter with citations from real web
+    research; verified knowledge-base answers retain their saved citations.
 
 Collections: feed_posts, feed_comments, feed_likes, feed_saves.
 """
@@ -288,11 +288,11 @@ async def serialize_post(db, doc: Dict[str, Any], viewer_id: str,
 async def _generate_ai_answer(db, post: Dict[str, Any],
                               emit_event=None,
                               create_notification=None) -> None:
-    """Attach a GCSharp-model explanation + citations to a post (Phase 2).
+    """Attach a Gemini/OpenRouter explanation + search citations to a post.
 
     Runs the post body/question through the tutor brain (KB -> research ->
-    GCSharp model). No external LLM. On model-unavailable the post is marked
-    so the app can offer a Retry without fabricating an answer.
+    external model). On provider-unavailable the post is marked so the app can
+    offer a Retry without fabricating an answer.
     """
     import gc_ai_engine as gc_ai
 
@@ -321,7 +321,7 @@ async def _generate_ai_answer(db, post: Dict[str, Any],
                                            "status": "error"}, topic="feed")
         return
 
-    if outcome.get("source") == "gc_model_unavailable":
+    if outcome.get("source") == "provider_unavailable":
         await db.feed_posts.update_one(
             {"post_id": post_id},
             {"$set": {"ai_status": "unavailable",

@@ -1,16 +1,43 @@
-# Deploying the GCSharp Personal Model
+# Configuring GCSharp AI Providers
 
-GC Sharp generates **all** educational content with its own model at runtime:
-tutor answers, highlight explanations, exam-question generation, and the
-scripts for PDF-to-video / text-to-video lessons. **No external LLM
-(OpenRouter, Gemini, Pollinations, Claude) is used on these paths** — if the
-GCSharp model is down, the API returns a clear HTTP 503 with a Retry message
-instead of silently switching providers.
+GC Sharp uses **Gemini first** and **OpenRouter as a bounded fallback** for
+tutor answers, feed answers, worked solutions, question generation, and
+text/PDF-to-video scripts. AI-backed tutor responses use Google Custom Search
+when configured and include citations from the evidence actually retrieved.
+DuckDuckGo remains a keyless search fallback. The local GCSharp model options
+below are retained for a future self-hosted runtime; they are not required for
+current generation.
 
-## 1. Choose an inference backend
+## 1. Configure runtime generation and search
+
+Set at least one generation provider in the backend service environment:
+
+```text
+GEMINI_API_KEY=<your Gemini API key>
+GEMINI_MODEL=gemini-2.5-flash
+OPENROUTER_API_KEY=<your OpenRouter API key>
+OPENROUTER_MODEL=<your preferred OpenRouter model id>
+OPENROUTER_MODEL_FALLBACKS=<optional,comma-separated model ids>
+```
+
+Gemini is tried first, then at most three configured OpenRouter model IDs.
+Provide Google Programmable Search credentials to prefer Google evidence:
+
+```text
+GOOGLE_SEARCH_API_KEY=<your Google Custom Search API key>
+GOOGLE_SEARCH_CX=<your Programmable Search Engine id>
+```
+
+When Google returns usable results, no fallback search request is made. If
+Google credentials are absent or return no usable results, the service uses
+the existing keyless DuckDuckGo fallback. Keep all keys in the deployment
+provider's secret environment settings; do not commit them to `.env.example`.
+
+## 2. Optional future self-hosted inference backend
 
 The adapter (`backend/gc_model.py`) supports two inference backends and a
-convenience workflow for downloading GGUF weights. Configure either
+convenience workflow for downloading GGUF weights. These settings are not
+needed by the current runtime. If you are preparing a future migration, configure either
 `GC_MODEL_URL`, `GC_MODEL_PATH`, or both `GC_MODEL_REPO_ID` and
 `GC_MODEL_FILE` in `backend/.env`:
 
@@ -97,10 +124,17 @@ The model loader verifies `GC_MODEL_SHA256` before loading and writes an
 incomplete download to a temporary file so it is not mistaken for a valid
 model. `GC_MODEL_PATH`, when set, takes precedence over the download settings.
 
-## 2. Environment variables
+## 3. Environment variables
 
 | Variable | Meaning | Default |
 |---|---|---|
+| `GEMINI_API_KEY` | Gemini API key (preferred generation provider) | unset |
+| `GEMINI_MODEL` | Gemini model id | `gemini-2.5-flash` |
+| `OPENROUTER_API_KEY` | OpenRouter API key (fallback provider) | unset |
+| `OPENROUTER_MODEL` | Preferred OpenRouter model id | unset |
+| `OPENROUTER_MODEL_FALLBACKS` | Comma-separated fallback model ids | unset |
+| `GOOGLE_SEARCH_API_KEY` | Google Custom Search API key | unset |
+| `GOOGLE_SEARCH_CX` | Google Programmable Search Engine id | unset |
 | `GC_MODEL_URL` | OpenAI-compatible base URL | unset |
 | `GC_MODEL_PATH` | Local GGUF weights path | unset |
 | `GC_MODEL_REPO_ID` | Hugging Face repository for a public GGUF download | unset |
@@ -120,20 +154,23 @@ model. `GC_MODEL_PATH`, when set, takes precedence over the download settings.
 | `TR_BACKEND` | `prepare_only` or `hf`/`custom` | `prepare_only` |
 | `GC_TRAIN_CMD` | External fine-tune command (Phase 4) | unset |
 
-## 3. Verify the model is serving
+## 4. Verify provider configuration
 
 ```bash
-curl https://<backend-host>/api/ai/model/status          # config + stats
-curl https://<backend-host>/api/ai/model/status?probe=1  # live inference probe
+curl https://<backend-host>/api/ai/model/status          # configured providers
+curl https://<backend-host>/api/ai/model/status?probe=1  # small live generation probe
 ```
 
-The app's AI features show a **Retry** button when the model is unavailable.
+The response reports which providers and search service are configured. The
+probe identifies the provider that answered. If neither generation provider
+is configured or available, AI endpoints return HTTP 503 so the app can offer
+a retry rather than showing a fabricated answer.
 
-## 4. Background jobs
+## 5. Background jobs
 
 | Job | Schedule | Purpose |
 |---|---|---|
-| Knowledge growth | every `KG_INTERVAL_HOURS` | mines student questions / syllabus topics, searches trustworthy sources (`google_search`, `score_source`), asks the **GCSharp model** for the explanation, stores it in `ai_knowledge` with full provenance (subject, topic, level, source URL/title, retrieved_at, evidence, verification_status, quality_score, content_version, dedupe_hash). New knowledge is retrievable **immediately** — no retraining. |
+| Knowledge growth | every `KG_INTERVAL_HOURS` | mines student questions / syllabus topics, searches trustworthy sources (`google_search`, `score_source`), asks Gemini/OpenRouter for an explanation grounded in vetted evidence, and stores it in `ai_knowledge` with full provenance (subject, topic, level, source URL/title, retrieved_at, evidence, verification_status, quality_score, content_version, dedupe_hash). New knowledge is retrievable **immediately** — no retraining. |
 | Daily reminders | hourly | existing streak/study reminders |
 
 Manual triggers (teachers/admins):
@@ -145,11 +182,12 @@ POST /api/ai/training/run            # controlled training run (Phase 4)
 GET  /api/ai/training/status         # honest capability report
 ```
 
-## 5. Training vs. knowledge (important separation)
+## 6. Training vs. knowledge (important separation)
 
 * **Knowledge ingestion** (Phase 3) writes verified content to MongoDB; the
   retriever picks it up instantly. This is how GC AI gets smarter daily.
-* **Weight training** (Phase 4) is a *separate, manual* pipeline. With the
+* **Evaluation** uses the configured Gemini/OpenRouter production providers.
+* **Weight training** (Phase 4) remains a *separate, manual* pipeline. With the
   default `TR_BACKEND=prepare_only`, it prepares a curated dataset (verified
   knowledge + reviewed teacher feedback only — never unreviewed student posts
   or unverified search results), validates it, evaluates teaching quality, and
@@ -157,23 +195,27 @@ GET  /api/ai/training/status         # honest capability report
   `TR_BACKEND=hf` and `GC_TRAIN_CMD` to your trainer; the run appends the
   JSONL dataset path and records checkpoints under `training_runs/`.
 
-## 6. What runs where
+## 7. What runs where
 
 ```
 student request ──► FastAPI (server_sqlite_full_corrected.py)
                       │  /api/ai/*, /api/feed/*, /api/papers/*
                       ▼
-              gc_model.GCSharpModel  ◄── GC_MODEL_URL or GC_MODEL_PATH
-                      │ (503 + Retry if down; never another provider)
+               Gemini ──► OpenRouter fallback
+                      │
+             Google Custom Search (or DuckDuckGo fallback)
+                      │ source-grounded answers + citations
                       ▼
               MongoDB ai_knowledge (retrieval + provenance)
                       ▲
-APScheduler ──► gc_knowledge_growth.run_once (search → vet → model → store)
+APScheduler ──► gc_knowledge_growth.run_once (search → vet → provider → store)
 ```
 
-## 7. Feeding GC Sharp its own weights (bootstrap path)
+## 8. Future self-hosting and training
 
-Until your fine-tuned weights exist, any strong open-weight instruction model
-works through the same adapter (Qwen, Llama, Gemma GGUFs). External providers
-may be used **offline only** — e.g. to distil a seed dataset with
-`gc_training`'s dataset export — never on the live request path.
+The controlled training pipeline remains separate from serving. Knowledge
+growth adds verified, cited material to MongoDB for immediate retrieval;
+fine-tuning does not run on each question or knowledge-ingestion cycle.
+When GCSharp-hosted weights and an inference service are ready, the adapter
+and runtime provider selection can be deliberately changed and tested before
+moving production traffic.

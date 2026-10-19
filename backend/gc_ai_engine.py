@@ -25,21 +25,30 @@ import logging
 import unicodedata
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 
 import httpx
+from dotenv import load_dotenv
 
-# GCSharp personal model. Imported lazily inside functions that need it so
-# this module stays importable even if the adapter's optional deps change.
-# The GC model is the ONLY synthesiser used when use_gc_model=True; there is
-# deliberately no external-LLM fallback on that path.
+load_dotenv(Path(__file__).parent / ".env")
+
+# Runtime generation uses configured Gemini/OpenRouter providers. The
+# use_gc_model argument remains accepted for older callers.
 
 logger = logging.getLogger("gc_ai_engine")
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "").strip()
+OPENROUTER_MODEL_FALLBACKS = [
+    model.strip()
+    for model in os.environ.get("OPENROUTER_MODEL_FALLBACKS", "").split(",")
+    if model.strip()
+]
 GOOGLE_SEARCH_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY", "")
 GOOGLE_SEARCH_CX = os.environ.get("GOOGLE_SEARCH_CX", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -53,28 +62,40 @@ FALLBACK_SYSTEM = (
 )
 
 OPENROUTER_CHAIN = [
-    # Verified live with YOUR key on Sep 20, 2026 (HTTP 200 + real content).
+    # Fast fallback models; callers can choose a preferred model and fallbacks
+    # via OPENROUTER_MODEL / OPENROUTER_MODEL_FALLBACKS.
     "nex-agi/nex-n2.5-mini:free",
     "dots-studio/dots-3-note-preview:free",
     "liquid/lfm-2.5-2.6b:free",
-    "cohere/north-mini-code:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    # Also reachable but rate-limited at probe time; kept as depth so a
-    # retry minutes later can still land: qwen, gemini-4 pair, nemotron
-    # super/ultra, poolside pair, nex pro, inclusionai trio.
-    "qwen/qwen3.8-27b:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "poolside/laguna-xs-2.1:free",
-    "poolside/laguna-s-2.1:free",
-    "nex-agi/nex-n2.5-pro:free",
-    "inclusionai/ling-3.0-flash-vl:free",
-    "inclusionai/ling-3.0-flash-sante:free",
-    "inclusionai/ling-3.0-flash-fin:free",
-    "deepseek/deepseek-v4-flash-0731:free",
 ]
+
+OPENROUTER_MAX_ATTEMPTS = 3
+
+
+class AIProvidersUnavailableError(RuntimeError):
+    """Raised when neither configured external generation provider can answer."""
+
+
+def _openrouter_models() -> List[str]:
+    """Return a short, ordered provider list instead of probing many models."""
+    candidates = ([OPENROUTER_MODEL] if OPENROUTER_MODEL else [])
+    candidates.extend(OPENROUTER_MODEL_FALLBACKS)
+    candidates.extend(OPENROUTER_CHAIN)
+    models = list(dict.fromkeys(model for model in candidates if model))
+    return models[:OPENROUTER_MAX_ATTEMPTS]
+
+
+def provider_status() -> Dict[str, object]:
+    """Report configured generation and search providers without probing them."""
+    google_configured = bool(GOOGLE_SEARCH_API_KEY and GOOGLE_SEARCH_CX)
+    return {
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "gemini_model": GEMINI_MODEL if GEMINI_API_KEY else None,
+        "openrouter_configured": bool(OPENROUTER_API_KEY),
+        "openrouter_models": _openrouter_models() if OPENROUTER_API_KEY else [],
+        "search_provider": "google_custom_search" if google_configured else "duckduckgo_fallback",
+        "google_search_configured": google_configured,
+    }
 
 # ------------------------------------------------------------
 # 1. NLP PIPELINE (pure Python)
@@ -439,12 +460,23 @@ def _rank_result(r: Dict) -> int:
     return 2
 
 
+def _rank_search_results(results: List[Dict], question: str,
+                         limit: int) -> List[Dict]:
+    good = [r for r in results
+            if (r.get("title") or r.get("snippet"))
+            and not _is_junk_result(r.get("title", ""), r.get("link", ""),
+                                    question)]
+    good.sort(key=_rank_result)
+    return good[:max(1, limit)]
+
+
 async def google_search(query: str, num_results: int = 5,
                         question: str = "") -> List[Dict]:
-    """Google Custom Search JSON API when configured, else keyless DuckDuckGo.
+    """Use Google Custom Search first; fall back to keyless DuckDuckGo.
 
     Junk results (talk pages, dictionaries, lyrics, entertainment) are
-    filtered and trusted study sources are ranked first.
+    filtered and trusted study sources are ranked first. Do not make the slower
+    fallback request when Google already returned usable results.
     """
     results: List[Dict] = []
 
@@ -457,7 +489,7 @@ async def google_search(query: str, num_results: int = 5,
                         "key": GOOGLE_SEARCH_API_KEY,
                         "cx": GOOGLE_SEARCH_CX,
                         "q": query,
-                        "num": 10,
+                        "num": min(10, max(1, num_results)),
                     },
                 )
                 if resp.status_code == 200:
@@ -471,6 +503,10 @@ async def google_search(query: str, num_results: int = 5,
                     logger.warning(f"Google CSE failed: {resp.status_code}")
         except Exception as e:
             logger.warning(f"Google CSE error: {e}")
+
+        ranked = _rank_search_results(results, question or query, num_results)
+        if ranked:
+            return ranked
 
     # Keyless fallback: DuckDuckGo HTML endpoint
     try:
@@ -501,13 +537,7 @@ async def google_search(query: str, num_results: int = 5,
     except Exception as e:
         logger.warning(f"DuckDuckGo search error: {e}")
 
-    # Filter junk, trust-rank study sources, then keep the best.
-    good = [r for r in results
-            if (r.get("title") or r.get("snippet"))
-            and not _is_junk_result(r.get("title", ""), r.get("link", ""),
-                                    question)]
-    good.sort(key=_rank_result)
-    return good[:num_results]
+    return _rank_search_results(results, question or query, num_results)
 
 
 async def research_context(question: str) -> Tuple[str, bool]:
@@ -1014,31 +1044,17 @@ async def _call_pollinations(prompt: str, system: str,
 
 async def _call_gemini(prompt: str, system: str,
                        max_tokens: int, timeout: float) -> Optional[str]:
-    """Direct Google Gemini call - fully independent of OpenRouter."""
+    """Try the configured Gemini model; discover alternatives only after a 404."""
     if not GEMINI_API_KEY:
         return None
-    # Your GEMINI_MODEL=gemini-2.0-flash is retired (Google 404). Probe the
-    # live model list with your key and use the newest working flash model.
-    models = [os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")]
-    try:
-        async with httpx.AsyncClient(timeout=12.0) as hc:
-            lst = await hc.get(
-                f"{GEMINI_BASE}/models", params={"key": GEMINI_API_KEY})
-            if lst.status_code == 200:
-                names = [m.get("name", "").split("/")[-1]
-                         for m in lst.json().get("models", [])]
-                flashed = [n for n in names if "flash" in n.lower()
-                           and "generateContent" in str(
-                               next((mm.get("supportedGenerationMethods", [])
-                                     for mm in lst.json().get("models", [])
-                                     if mm.get("name", "").endswith(n)), []))]
-                if flashed:
-                    models = flashed[:3] + models
-    except Exception as e:
-        logger.warning(f"Gemini model list failed: {e}")
+    models = [GEMINI_MODEL]
+    discovered_models = False
     try:
         async with httpx.AsyncClient(timeout=timeout) as hc:
-            for model in models:
+            model_index = 0
+            while model_index < len(models):
+                model = models[model_index]
+                model_index += 1
                 try:
                     resp = await hc.post(
                         f"{GEMINI_BASE}/models/{model}:generateContent",
@@ -1050,52 +1066,67 @@ async def _call_gemini(prompt: str, system: str,
                                                  "maxOutputTokens": max_tokens},
                         },
                     )
-                except Exception as e:
-                    logger.warning(f"Gemini {model} error: {e}")
-                    continue
+                except httpx.HTTPError as e:
+                    logger.warning("Gemini %s request failed: %s", model, e)
+                    return None
                 if resp.status_code == 200:
                     try:
                         parts = resp.json()["candidates"][0]["content"]["parts"]
                         text = "".join(p.get("text", "") for p in parts)
                         if text.strip():
                             return text
-                    except Exception:
-                        logger.warning(f"Gemini {model} -> 200 unparseable")
-                        continue
-                logger.warning(f"Gemini {model} -> {resp.status_code}")
-    except Exception as e:
-        logger.warning(f"Gemini error: {e}")
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        logger.warning("Gemini %s returned an unreadable response", model)
+                    return None
+
+                logger.warning("Gemini %s -> %s", model, resp.status_code)
+                if resp.status_code != 404 or discovered_models:
+                    return None
+
+                discovered_models = True
+                try:
+                    model_list = await hc.get(
+                        f"{GEMINI_BASE}/models", params={"key": GEMINI_API_KEY})
+                    if model_list.status_code != 200:
+                        logger.warning("Gemini model discovery -> %s",
+                                       model_list.status_code)
+                        return None
+                    discovered = []
+                    for item in model_list.json().get("models", []):
+                        name = str(item.get("name", "")).split("/")[-1]
+                        methods = item.get("supportedGenerationMethods", [])
+                        if "flash" in name.lower() and "generateContent" in methods:
+                            discovered.append(name)
+                    models.extend(name for name in discovered[:2] if name not in models)
+                except (httpx.HTTPError, ValueError, TypeError) as e:
+                    logger.warning("Gemini model discovery failed: %s", e)
+                    return None
+    except httpx.HTTPError as e:
+        logger.warning("Gemini request failed: %s", e)
     return None
 
 
 async def call_llm(prompt: str, system: Optional[str] = None,
                    max_tokens: int = 900, timeout: float = 30.0) -> Tuple[str, str]:
-    """Try every provider until one answers. Returns (text, provider).
+    """Try Gemini, then a short OpenRouter fallback list.
 
-    Never raises and never returns an empty string - if every provider
-    fails we return a graceful message so the app shows no hard error.
+    Returns (text, provider); provider is "none" when both configured
+    providers fail. Gemini is attempted first to avoid cycling through a long
+    OpenRouter model list on every request.
     """
     sys = system or FALLBACK_SYSTEM
 
-    # Provider 1: your OpenRouter key first - every other AI feature uses it.
-    for model in OPENROUTER_CHAIN:
-        text = await _call_openrouter(model, prompt, sys, max_tokens, timeout)
-        if text:
-            return clean_markdown(text), f"openrouter:{model}"
-
-    # Provider 2: Google Gemini (independent of OpenRouter)
+    # Provider 1: direct Gemini. The model list is queried only if configured
+    # model returns 404, rather than on every request.
     text = await _call_gemini(prompt, sys, max_tokens, timeout)
     if text:
         return clean_markdown(text), "google-gemini"
 
-    # Provider 3: keyless Pollinations - last-resort safety net, no API key.
-    text = await _call_pollinations(prompt, sys, max_tokens, timeout)
-    if text:
-        low = text.strip().lower()
-        if ("doesn" in low or "does not" in low) and "credit" in low:
-            logger.warning("Pollinations returned a billing notice; ignoring")
-        else:
-            return clean_markdown(text), "pollinations"
+    # Provider 2: configured OpenRouter model with a small, bounded fallback.
+    for model in _openrouter_models():
+        text = await _call_openrouter(model, prompt, sys, max_tokens, timeout)
+        if text:
+            return clean_markdown(text), f"openrouter:{model}"
 
     return (
         "I could not reach my learning services right now. Please try again in a "
@@ -1103,6 +1134,91 @@ async def call_llm(prompt: str, system: Optional[str] = None,
         "know this one next time. Meanwhile, you can browse the Lessons and Past "
         "Questions tabs for related material.",
         "none",
+    )
+
+
+def _extract_json_object(text: str) -> Optional[Dict]:
+    """Parse a JSON object from a provider response, including fenced output."""
+    candidate = (text or "").strip()
+    fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, re.I | re.S)
+    if fence:
+        candidate = fence.group(1)
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    start = candidate.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(candidate)):
+        char = candidate[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(candidate[start:index + 1])
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+async def generate_text(prompt: str, *, system: Optional[str] = None,
+                        max_tokens: int = 900,
+                        timeout: float = 30.0) -> Tuple[str, str]:
+    """Generate through configured external providers or raise clearly."""
+    text, provider = await call_llm(
+        prompt, system=system, max_tokens=max_tokens, timeout=timeout)
+    if provider == "none":
+        raise AIProvidersUnavailableError(text)
+    return text, provider
+
+
+async def generate_json(prompt: str, required_key: str, *,
+                        system: Optional[str] = None,
+                        max_tokens: int = 1800,
+                        timeout: float = 60.0,
+                        retries: int = 1) -> Tuple[Dict, str]:
+    """Generate strict JSON through Gemini/OpenRouter and validate its key."""
+    json_system = (system or FALLBACK_SYSTEM) + (
+        "\nReturn a single valid JSON object only. Do not include Markdown "
+        "fences or any text outside the JSON object."
+    )
+    last_provider = "none"
+    for attempt in range(max(1, retries + 1)):
+        retry_prompt = prompt
+        if attempt:
+            retry_prompt += (
+                f"\n\nYour previous response was not valid JSON containing "
+                f"the key {required_key!r}. Return only the complete JSON object."
+            )
+        text, provider = await generate_text(
+            retry_prompt, system=json_system, max_tokens=max_tokens,
+            timeout=timeout)
+        last_provider = provider
+        parsed = _extract_json_object(text)
+        if parsed is not None and required_key in parsed:
+            return parsed, provider
+    raise ValueError(
+        f"AI provider {last_provider} did not return valid JSON with key "
+        f"{required_key!r}."
     )
 
 
@@ -1319,10 +1435,9 @@ async def answer_question(db, question: str, subject: str = "General",
     2. Knowledge base lookup - instant, learned from before.
     3. Web research (Google/DuckDuckGo) + synthesis - learns and stores.
 
-    When use_gc_model=True, step 3 synthesises with the GCSharp personal model
-    ONLY (no external-LLM fallback); if that model is unavailable a clear
-    GCModelUnavailableError-typed dict is returned so the API layer can surface
-    a retryable 503. Otherwise step 3 uses the legacy multi-provider chain.
+    All generated answers use the configured Gemini/OpenRouter providers.
+    `use_gc_model` remains accepted for compatibility with older callers but
+    no longer disables external providers.
 
     Returns {"answer", "source", "learned", "citations"}.
     """
@@ -1389,26 +1504,6 @@ async def answer_question(db, question: str, subject: str = "General",
     prompt = (history_context + "\n" if history_context else "") + \
         "Current question:\n" + question
 
-    # --- Step 3a: GCSharp personal model (STRICT, no external fallback) ---
-    if use_gc_model:
-        from gc_model import get_gc_model, GCModelUnavailableError  # local import
-        model = get_gc_model()
-        try:
-            answer = await model.generate(prompt, system=system, max_tokens=1000)
-        except GCModelUnavailableError as e:
-            # Surface a precise, retryable failure instead of silently using a
-            # third-party LLM or inventing an answer.
-            result.update(answer="", source="gc_model_unavailable",
-                          error=str(e))
-            return result
-        answer = clean_markdown(answer)
-        result.update(answer=answer, source="gc_model")
-        if found and answer:
-            stored = await kb.store(question, answer, source="gc_model+web",
-                                    subject=subject)
-            result["learned"] = bool(stored)
-        return result
-
     answer, provider = await call_llm(prompt, system=system, max_tokens=1000)
     result.update(answer=answer, source=provider)
 
@@ -1423,6 +1518,10 @@ async def answer_question(db, question: str, subject: str = "General",
                                 subject=subject)
         result.update(answer=answer, source="web-solved")
         result["learned"] = bool(stored)
+
+    if provider == "none" and not found:
+        result.update(answer="", source="provider_unavailable", error=answer)
+        return result
 
     # --- Step 4: learn! store in the knowledge base ----------
     # "none" is handled by the web-solved path above; everything else with

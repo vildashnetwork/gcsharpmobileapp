@@ -29,7 +29,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from gc_model import GCModelUnavailableError, get_gc_model
+import gc_ai_engine as gc_ai
 
 logger = logging.getLogger("gc_training")
 
@@ -161,14 +161,13 @@ def validate_dataset(examples: List[Dict[str, str]]) -> Dict[str, Any]:
 # ------------------------------------------------------------
 
 async def evaluate_model(db, sample: int = TR_EVAL_SAMPLE) -> Dict[str, Any]:
-    """Score the GCSharp model's current teaching quality on KB questions.
+    """Score the configured production AI providers on KB questions.
 
     For a sample of verified knowledge entries, ask the model to answer the
     question WITHOUT the reference answer, then compare. We report a simple
     lexical-overlap score (not a claim of human-level judgement) plus any
     failures. This gives a before/after signal for training runs.
     """
-    model = get_gc_model()
     entries = await db.ai_knowledge.find(
         {"verification_status": "verified"},
         {"question": 1, "answer": 1, "subject": 1}
@@ -176,28 +175,33 @@ async def evaluate_model(db, sample: int = TR_EVAL_SAMPLE) -> Dict[str, Any]:
     if not entries:
         return {"scored": 0, "avg_overlap": None,
                 "note": "No verified knowledge entries to evaluate against."}
-    if not model.configured:
+    provider_status = gc_ai.provider_status()
+    if not (provider_status["gemini_configured"]
+            or provider_status["openrouter_configured"]):
         return {"scored": 0, "avg_overlap": None,
-                "note": "GCSharp model not configured; cannot evaluate."}
+                "note": "Gemini/OpenRouter not configured; cannot evaluate."}
 
     overlaps: List[float] = []
     failures = 0
+    provider_unavailable = False
     for e in entries:
         q = (e.get("question") or "").strip()
         ref = (e.get("answer") or "").strip()
         if not q or not ref:
             continue
         try:
-            out = await model.generate(
+            out, _provider = await gc_ai.generate_text(
                 f"Answer this student question in 60-120 words: {q}",
-                max_tokens=400, temperature=0.1, timeout=60.0)
-        except GCModelUnavailableError:
+                max_tokens=400, timeout=60.0)
+        except gc_ai.AIProvidersUnavailableError:
             failures += 1
-            continue
+            provider_unavailable = True
+            break
         overlaps.append(_lexical_overlap(ref, out))
     avg = round(sum(overlaps) / len(overlaps), 4) if overlaps else None
     return {"scored": len(overlaps), "avg_overlap": avg, "failures": failures,
-            "sample_size": len(entries)}
+            "sample_size": len(entries),
+            "provider_unavailable": provider_unavailable}
 
 
 def _lexical_overlap(a: str, b: str) -> float:
