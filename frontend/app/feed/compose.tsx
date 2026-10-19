@@ -16,7 +16,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
-import * as LegacyFS from "expo-file-system/legacy";
+import { File as ExpoFile } from "expo-file-system";
+import { fetch as expoFetch } from "expo/fetch";
 import { useTheme } from "@/src/theme-context";
 import { radii, spacing, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
@@ -71,9 +72,8 @@ type FeedPostWriteResult = {
 type CancelHandle = { cancel: () => void };
 
 /**
- * Native: expo-file-system's multipart upload task. It streams the file from
- * disk natively (no FormData / File objects), reports real progress and can be
- * cancelled. Web: plain fetch.
+ * Native uploads use Expo's fetch implementation so picker URIs remain
+ * readable without staging/copying. Web uses the browser fetch implementation.
  */
 async function uploadMediaToCloudinary(
   file: PickedFile,
@@ -95,50 +95,24 @@ async function uploadMediaToCloudinary(
     throw new Error(data?.error?.message || `Upload failed (${status}).`);
   };
 
-  if (Platform.OS === "web") {
-    const controller = new AbortController();
-    cancelRef.current = { cancel: () => controller.abort() };
-    try {
-      const form = new FormData();
-      form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+  const controller = new AbortController();
+  cancelRef.current = { cancel: () => controller.abort() };
+  try {
+    const form = new FormData();
+    form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+    if (Platform.OS === "web") {
       const blob = await (await fetch(file.uri, { signal: controller.signal })).blob();
       form.append("file", blob, file.name);
-      const res = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
-      return parse(res.status, await res.text());
-    } catch (e) {
-      if (controller.signal.aborted) throw new UploadCancelled();
-      throw e;
-    } finally {
-      cancelRef.current = null;
+    } else {
+      form.append("file", new ExpoFile(file.uri), file.name);
     }
-  }
 
-  let cancelled = false;
-  const task = LegacyFS.createUploadTask(
-    endpoint,
-    file.uri,
-    {
-      httpMethod: "POST",
-      uploadType: LegacyFS.FileSystemUploadType.MULTIPART,
-      fieldName: "file",
-      mimeType,
-      parameters: { upload_preset: CLOUDINARY_UPLOAD_PRESET },
-    },
-    (p) => {
-      if (p.totalBytesExpectedToSend > 0) {
-        onProgress(Math.min(99, Math.round((p.totalBytesSent / p.totalBytesExpectedToSend) * 100)));
-      }
-    },
-  );
-  cancelRef.current = {
-    cancel: () => { cancelled = true; task.cancelAsync().catch(() => { }); },
-  };
-  try {
-    const result = await task.uploadAsync();
-    if (cancelled || !result) throw new UploadCancelled();
-    return parse(result.status, result.body);
+    const response = Platform.OS === "web"
+      ? await fetch(endpoint, { method: "POST", body: form, signal: controller.signal })
+      : await expoFetch(endpoint, { method: "POST", body: form, signal: controller.signal });
+    return parse(response.status, await response.text());
   } catch (e) {
-    if (cancelled) throw new UploadCancelled();
+    if (controller.signal.aborted) throw new UploadCancelled();
     throw e;
   } finally {
     cancelRef.current = null;
@@ -619,7 +593,7 @@ const createStyles = (s: Palette) => StyleSheet.create({
   },
   previewBarText: { color: "#fff", fontSize: 12, fontWeight: "700", flexShrink: 1 },
   uploadOverlay: {
-    ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.65)",
+    ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.65)",
     alignItems: "center", justifyContent: "center", gap: 10, paddingHorizontal: 32,
   },
   uploadPercent: { color: "#fff", fontSize: 40, fontWeight: "800", letterSpacing: -1 },
