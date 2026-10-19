@@ -25,7 +25,8 @@ import re
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -55,9 +56,16 @@ VIDEO_MIME_EXTENSIONS = {
     "video/webm": ".webm",
     "video/3gpp": ".3gp",
 }
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "qsmemy5r")
 
 VALID_QUESTION_TYPES = {"question", "concept", "past_paper", "discussion", "note"}
 VALID_EXAM_LEVELS = {"GCE O Level", "GCE A Level", "HND", "Concours", "General"}
+
+
+class FeedMediaIn(BaseModel):
+    type: Literal["image", "video"]
+    url: str = Field(..., min_length=1, max_length=2048)
+    name: str = Field(default="Media", max_length=120)
 
 
 class FeedPostIn(BaseModel):
@@ -67,6 +75,7 @@ class FeedPostIn(BaseModel):
     topic: str = Field(default="", max_length=120)
     exam_level: str = Field(default="General", max_length=40)
     question_type: str = Field(default="question", max_length=30)
+    media: List[FeedMediaIn] = Field(default_factory=list, max_length=MAX_MEDIA_PER_POST)
 
 
 class FeedPostUpdate(BaseModel):
@@ -76,6 +85,7 @@ class FeedPostUpdate(BaseModel):
     topic: Optional[str] = Field(default=None, max_length=120)
     exam_level: Optional[str] = Field(default=None, max_length=40)
     question_type: Optional[str] = Field(default=None, max_length=30)
+    media: Optional[List[FeedMediaIn]] = Field(default=None, max_length=MAX_MEDIA_PER_POST)
 
 
 class FeedCommentIn(BaseModel):
@@ -94,6 +104,26 @@ def _clean_text(s: Optional[str], limit: int) -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def _validated_cloudinary_media(items: List[FeedMediaIn]) -> List[Dict[str, str]]:
+    """Accept only secure URLs for this app's configured Cloudinary account."""
+    media: List[Dict[str, str]] = []
+    for item in items:
+        parsed = urlsplit(item.url)
+        expected_path = f"/{CLOUDINARY_CLOUD_NAME}/{item.type}/upload/"
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "res.cloudinary.com"
+            or not parsed.path.startswith(expected_path)
+        ):
+            raise HTTPException(422, "Feed media must be uploaded to GCSharp Cloudinary first.")
+        media.append({
+            "type": item.type,
+            "url": item.url,
+            "name": _clean_text(item.name, 120) or "Media",
+        })
+    return media
 
 
 
@@ -357,6 +387,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         body = _clean_text(payload.body, MAX_TEXT_LEN)
         if not title and not body:
             raise HTTPException(400, "A post needs a title or some content.")
+        media = _validated_cloudinary_media(payload.media)
         qtype = payload.question_type if payload.question_type in VALID_QUESTION_TYPES else "question"
         level = payload.exam_level if payload.exam_level in VALID_EXAM_LEVELS else "General"
         now = datetime.utcnow().isoformat()
@@ -368,7 +399,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             "subject": _clean_text(payload.subject, 80) or "General",
             "topic": _clean_text(payload.topic, 120),
             "exam_level": level, "question_type": qtype,
-            "media": [], "like_count": 0, "comment_count": 0,
+            "media": media, "like_count": 0, "comment_count": 0,
             "share_count": 0, "view_count": 0,
             "ai_answer": None, "ai_citations": [], "ai_status": "pending",
             "created_at": now, "updated_at": now,
@@ -495,9 +526,10 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         if post.get("author_id") != user["user_id"] and user.get("role") != "admin":
             raise HTTPException(403, "You can only edit your own post.")
 
-        supplied = payload.dict(exclude_unset=True)
+        supplied = payload.model_dump(exclude_unset=True)
         if not supplied:
             raise HTTPException(400, "Provide at least one field to update.")
+        media_input = supplied.pop("media", None)
         if "question_type" in supplied and supplied["question_type"] not in VALID_QUESTION_TYPES:
             raise HTTPException(422, "Invalid question type.")
         if "exam_level" in supplied and supplied["exam_level"] not in VALID_EXAM_LEVELS:
@@ -507,10 +539,17 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             "title": MAX_TITLE_LEN, "body": MAX_TEXT_LEN, "subject": 80,
             "topic": 120, "exam_level": 40, "question_type": 30,
         }
-        updates = {
+        updates: Dict[str, Any] = {
             key: _clean_text(value, limits[key]) if value is not None else ""
             for key, value in supplied.items()
         }
+        if media_input is not None:
+            added_media = _validated_cloudinary_media(payload.media or [])
+            combined_media = list(post.get("media", [])) + added_media
+            if len(combined_media) > MAX_MEDIA_PER_POST:
+                raise HTTPException(
+                    409, f"A post can have at most {MAX_MEDIA_PER_POST} media files.")
+            updates["media"] = combined_media
         resulting_title = updates.get("title", post.get("title", ""))
         resulting_body = updates.get("body", post.get("body", ""))
         if not resulting_title and not resulting_body:
@@ -560,7 +599,10 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
 
         media_root = os.path.realpath(media_dir)
         for item in post.get("media", []):
-            filename = os.path.basename(str(item.get("url") or "").split("?", 1)[0])
+            media_url = str(item.get("url") or "")
+            if not media_url.startswith(media_base_url.rstrip("/") + "/"):
+                continue
+            filename = os.path.basename(urlsplit(media_url).path)
             if not filename:
                 continue
             path = os.path.realpath(os.path.join(media_root, filename))

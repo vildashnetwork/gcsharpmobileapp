@@ -1,20 +1,25 @@
 /**
- * Compose a Learning Feed post (Phase 1 + 7).
- * Text + optional image/short-video upload; created post triggers the
- * GCSharp-model explanation in the background.
+ * Compose / edit a Learning Feed post — redesigned.
+ *
+ * - Media first: two big tiles (photo / video) with size hints.
+ * - Real upload progress (XMLHttpRequest) with percentage, cancel and retry.
+ * - Sticky bottom Post button that shows upload progress inside it.
+ * - Keyboard-safe layout, discard confirmation, character counter.
+ * - Post records are only saved after Cloudinary returns a secure URL.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, TextInput, Pressable, ScrollView,
-  ActivityIndicator, Alert, Image,
+  ActivityIndicator, Alert, Image, Platform, KeyboardAvoidingView,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as DocumentPicker from "expo-document-picker";
+import * as LegacyFS from "expo-file-system/legacy";
 import { useTheme } from "@/src/theme-context";
-import { radii, spacing, shadow1, type Palette } from "@/src/theme";
-import { api, API_BASE, readToken } from "@/src/api";
+import { radii, spacing, type Palette } from "@/src/theme";
+import { api } from "@/src/api";
 
 const QUESTION_TYPES = [
   { key: "question", label: "Question" },
@@ -29,7 +34,18 @@ const SUBJECT_SUGGESTIONS = [
   "Biology", "Economics", "Geography", "History", "English", "Literature",
 ];
 
+const CLOUDINARY_CLOUD_NAME =
+  process.env.EXPO_PUBLIC_CLOUDINARY_CLOUD_NAME || "qsmemy5r";
+const CLOUDINARY_UPLOAD_PRESET =
+  process.env.EXPO_PUBLIC_CLOUDINARY_UPLOAD_PRESET || "gcsharp";
+
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
+const VIDEO_EXTENSIONS = ["mp4", "m4v", "mov", "webm", "3gp"];
+const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"];
+
 type PickedFile = { uri: string; name: string; mimeType?: string | null; size?: number };
+type UploadedMedia = { type: "image" | "video"; url: string; name: string };
 
 const FILE_MIME_TYPES: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
@@ -42,33 +58,97 @@ const MIME_FILE_EXTENSIONS: Record<string, string> = {
   "video/webm": "webm", "video/3gpp": "3gp",
 };
 
-/** Multipart upload to the feed media endpoint (api() only does JSON). */
-async function uploadMedia(postId: string, file: PickedFile): Promise<any> {
-  const token = await readToken();
-  const form = new FormData();
+class UploadCancelled extends Error {
+  constructor() { super("Upload cancelled"); this.name = "UploadCancelled"; }
+}
+
+type FeedPostWriteResult = {
+  post_id?: string;
+  media?: UploadedMedia[];
+  __offlineQueued?: boolean;
+};
+
+type CancelHandle = { cancel: () => void };
+
+/**
+ * Native: expo-file-system's multipart upload task. It streams the file from
+ * disk natively (no FormData / File objects), reports real progress and can be
+ * cancelled. Web: plain fetch.
+ */
+async function uploadMediaToCloudinary(
+  file: PickedFile,
+  onProgress: (percent: number) => void,
+  cancelRef: React.MutableRefObject<CancelHandle | null>,
+): Promise<UploadedMedia> {
   const extension = file.name.split(".").pop()?.toLowerCase() || "";
-  const declaredMime = file.mimeType?.toLowerCase();
-  const mimeType = declaredMime && declaredMime !== "application/octet-stream"
-    ? declaredMime
-    : FILE_MIME_TYPES[extension] || declaredMime || "application/octet-stream";
-  form.append("file", {
-    uri: file.uri,
-    name: file.name,
-    type: mimeType,
-  } as any);
-  const res = await fetch(`${API_BASE}/feed/posts/${postId}/media`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: form,
-  });
-  const text = await res.text();
-  let data: any = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) {
-    const msg = (data && (data.detail || data.message)) || `Upload failed (${res.status})`;
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  const mimeType = FILE_MIME_TYPES[extension] || file.mimeType || "application/octet-stream";
+  const type: UploadedMedia["type"] = mimeType.startsWith("video/") ? "video" : "image";
+  const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/${type}/upload`;
+
+  const parse = (status: number, text: string): UploadedMedia => {
+    let data: any = null;
+    try { data = JSON.parse(text); } catch { }
+    if (status >= 200 && status < 300 && typeof data?.secure_url === "string") {
+      onProgress(100);
+      return { type, url: data.secure_url, name: file.name };
+    }
+    throw new Error(data?.error?.message || `Upload failed (${status}).`);
+  };
+
+  if (Platform.OS === "web") {
+    const controller = new AbortController();
+    cancelRef.current = { cancel: () => controller.abort() };
+    try {
+      const form = new FormData();
+      form.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+      const blob = await (await fetch(file.uri, { signal: controller.signal })).blob();
+      form.append("file", blob, file.name);
+      const res = await fetch(endpoint, { method: "POST", body: form, signal: controller.signal });
+      return parse(res.status, await res.text());
+    } catch (e) {
+      if (controller.signal.aborted) throw new UploadCancelled();
+      throw e;
+    } finally {
+      cancelRef.current = null;
+    }
   }
-  return data;
+
+  let cancelled = false;
+  const task = LegacyFS.createUploadTask(
+    endpoint,
+    file.uri,
+    {
+      httpMethod: "POST",
+      uploadType: LegacyFS.FileSystemUploadType.MULTIPART,
+      fieldName: "file",
+      mimeType,
+      parameters: { upload_preset: CLOUDINARY_UPLOAD_PRESET },
+    },
+    (p) => {
+      if (p.totalBytesExpectedToSend > 0) {
+        onProgress(Math.min(99, Math.round((p.totalBytesSent / p.totalBytesExpectedToSend) * 100)));
+      }
+    },
+  );
+  cancelRef.current = {
+    cancel: () => { cancelled = true; task.cancelAsync().catch(() => { }); },
+  };
+  try {
+    const result = await task.uploadAsync();
+    if (cancelled || !result) throw new UploadCancelled();
+    return parse(result.status, result.body);
+  } catch (e) {
+    if (cancelled) throw new UploadCancelled();
+    throw e;
+  } finally {
+    cancelRef.current = null;
+  }
+}
+
+function formatSize(bytes?: number): string {
+  if (!bytes) return "";
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 export default function ComposeScreen() {
@@ -78,7 +158,9 @@ export default function ComposeScreen() {
   const params = useLocalSearchParams<{
     paperScan?: string; mediaType?: string; postId?: string;
   }>();
-  const autoOpenedPaperPicker = useRef(false);
+  const autoOpenedPicker = useRef(false);
+  const cancelRef = useRef<CancelHandle | null>(null);
+  const createdPostIdRef = useRef<string | null>(null);
   const postId = params.postId;
 
   const [title, setTitle] = useState("");
@@ -86,13 +168,21 @@ export default function ComposeScreen() {
   const [subject, setSubject] = useState("");
   const [topic, setTopic] = useState("");
   const [examLevel, setExamLevel] = useState("General");
-  const [questionType, setQuestionType] = useState(params.paperScan === "true" ? "past_paper" : "question");
+  const [questionType, setQuestionType] = useState(
+    params.paperScan === "true" ? "past_paper" : "question");
   const [file, setFile] = useState<PickedFile | null>(null);
+  const [uploadedMedia, setUploadedMedia] = useState<UploadedMedia | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
   const [loadingPost, setLoadingPost] = useState(!!postId);
   const [postLoadFailed, setPostLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const busy = submitting || loadingPost;
+  const isVideo = !!file && (file.mimeType?.startsWith("video/") ?? false);
+  const hasContent = !!(title.trim() || body.trim() || file);
+  const canPost = !busy && !postLoadFailed && !!(title.trim() || body.trim());
 
   const pickFile = useCallback(async (kind: "image" | "video" | "any" = "any") => {
     try {
@@ -113,41 +203,41 @@ export default function ComposeScreen() {
         ? a.name.split(".").pop()?.toLowerCase() || ""
         : "";
       const extension = existingExtension || MIME_FILE_EXTENSIONS[mimeType] || "";
-      const isVideo = ["mp4", "m4v", "mov", "webm", "3gp"].includes(extension)
-        || mimeType.startsWith("video/");
-      const validVideo = ["mp4", "m4v", "mov", "webm", "3gp"].includes(extension);
-      const validImage = ["jpg", "jpeg", "png", "webp", "gif"].includes(extension);
-      if ((isVideo && !validVideo) || (!isVideo && !validImage)) {
+      const video = VIDEO_EXTENSIONS.includes(extension) || mimeType.startsWith("video/");
+      const validVideo = VIDEO_EXTENSIONS.includes(extension);
+      const validImage = IMAGE_EXTENSIONS.includes(extension);
+      if ((video && !validVideo) || (!video && !validImage)) {
         Alert.alert("Unsupported file",
-          "Use JPG, PNG, WEBP, or GIF images, or MP4, MOV, M4V, WEBM, or 3GP videos.");
+          "Use a JPG, PNG, WEBP or GIF image, or an MP4, MOV, M4V, WEBM or 3GP video.");
         return;
       }
-      const cap = isVideo ? 25 * 1024 * 1024 : 8 * 1024 * 1024;
-      if (size > cap) {
+      if (size > (video ? MAX_VIDEO_BYTES : MAX_IMAGE_BYTES)) {
         Alert.alert("File too large",
-          isVideo ? "Videos must be 25 MB or smaller."
-                  : "Images must be 8 MB or smaller.");
+          video ? "Videos must be 25 MB or smaller." : "Images must be 8 MB or smaller.");
         return;
       }
       const name = a.name?.includes(".") ? a.name : `${a.name || "media"}.${extension}`;
       setFile({
-        uri: a.uri,
-        name,
-        mimeType: FILE_MIME_TYPES[extension] || a.mimeType,
-        size,
+        uri: a.uri, name,
+        mimeType: FILE_MIME_TYPES[extension] || a.mimeType, size,
       });
+      setUploadedMedia(null);
+      setProgress(0);
+      setError(null);
     } catch (e: any) {
-      Alert.alert("Could not open picker", e?.message || "Please try again.");
+      Alert.alert("Could not open the picker", e?.message || "Please try again.");
     }
   }, []);
 
+  // open the picker straight away when arriving from "Snap paper" / "Video"
   useEffect(() => {
     const mediaType = params.paperScan === "true" ? "image" : params.mediaType;
-    if ((mediaType !== "image" && mediaType !== "video") || autoOpenedPaperPicker.current) return;
-    autoOpenedPaperPicker.current = true;
+    if ((mediaType !== "image" && mediaType !== "video") || autoOpenedPicker.current) return;
+    autoOpenedPicker.current = true;
     void pickFile(mediaType);
   }, [params.mediaType, params.paperScan, pickFile]);
 
+  // load the post when editing
   useEffect(() => {
     if (!postId) return;
     let active = true;
@@ -169,16 +259,44 @@ export default function ComposeScreen() {
         setPostLoadFailed(true);
         setError(e?.message || "Could not load this post to edit.");
       })
-      .finally(() => {
-        if (active) setLoadingPost(false);
-      });
+      .finally(() => { if (active) setLoadingPost(false); });
     return () => { active = false; };
   }, [postId]);
 
+  // abort any running upload if the screen closes
+  useEffect(() => () => { cancelRef.current?.cancel(); }, []);
+
+  const removeFile = () => {
+    setFile(null);
+    setUploadedMedia(null);
+    setProgress(0);
+  };
+
+  const cancelUpload = () => { cancelRef.current?.cancel(); };
+
+  const close = () => {
+    if (submitting && uploading) {
+      Alert.alert("Cancel upload?", "Your upload is still in progress.", [
+        { text: "Keep uploading", style: "cancel" },
+        { text: "Cancel upload", style: "destructive", onPress: () => { cancelUpload(); router.back(); } },
+      ]);
+      return;
+    }
+    if (!postId && hasContent) {
+      Alert.alert("Discard this post?", "What you wrote will be lost.", [
+        { text: "Keep editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: () => router.back() },
+      ]);
+      return;
+    }
+    router.back();
+  };
+
   const submit = async () => {
-    if (loadingPost || postLoadFailed) return;
-    if (!title.trim() && !body.trim()) {
-      setError("Add a title or some content before posting.");
+    if (!canPost) {
+      if (!loadingPost && !postLoadFailed) {
+        setError("Add a title or some details before posting.");
+      }
       return;
     }
     setSubmitting(true);
@@ -190,206 +308,400 @@ export default function ComposeScreen() {
         topic: topic.trim(), exam_level: examLevel,
         question_type: questionType,
       };
-      let targetPostId = postId;
-      if (postId) {
-        await api(`/feed/posts/${postId}`, { method: "PATCH", body: payload });
-      } else {
-        const post = await api<{ post_id: string }>("/feed/posts", {
-          method: "POST", body: payload,
-        });
-        targetPostId = post.post_id;
-      }
-      if (file && targetPostId) {
+      let media = uploadedMedia || undefined;
+      if (!media && file) {
         setUploading(true);
-        try {
-          await uploadMedia(targetPostId, file);
-        } catch (upErr: any) {
-          Alert.alert(
-            postId ? "Post updated, but media failed" : "Post created, but media failed",
-            upErr?.message || "Please retry the upload later.");
+        setProgress(0);
+        media = await uploadMediaToCloudinary(file, setProgress, cancelRef);
+        setUploadedMedia(media);
+        setUploading(false);
+      }
+      const existingPostId = postId || createdPostIdRef.current;
+      if (existingPostId) {
+        const updated = await api<FeedPostWriteResult>(`/feed/posts/${existingPostId}`, {
+          method: "PATCH",
+          body: { ...payload, ...(media ? { media: [media] } : {}) },
+        });
+        if (media && !updated.__offlineQueued
+          && !updated.media?.some((item) => item.url === media?.url)) {
+          throw new Error(
+            "Your file uploaded, but the feed API did not return it with the post. " +
+            "Deploy the latest feed backend before retrying.");
+        }
+      } else {
+        const created = await api<FeedPostWriteResult>("/feed/posts", {
+          method: "POST",
+          body: { ...payload, media: media ? [media] : [] },
+        });
+        if (created.post_id) createdPostIdRef.current = created.post_id;
+        if (media && !created.__offlineQueued
+          && !created.media?.some((item) => item.url === media?.url)) {
+          throw new Error(
+            "Your file uploaded, but the feed API did not save it with the post. " +
+            "The post may exist without its attachment; deploy the latest feed backend before retrying.");
         }
       }
       router.back();
     } catch (e: any) {
-      setError(e?.message || "Could not create the post. Please retry.");
+      if (e?.name === "UploadCancelled") {
+        setProgress(0);
+      } else {
+        setError(e?.message || "Could not upload media or save the post. Please try again.");
+      }
     } finally {
       setSubmitting(false);
       setUploading(false);
     }
   };
 
+  const buttonLabel = uploading
+    ? (progress >= 100 ? "Processing…" : progress > 0 ? `Uploading ${progress}%` : "Uploading…")
+    : submitting ? "Posting…"
+      : postId ? "Save changes" : "Post question";
+
   return (
-    <SafeAreaView style={styles.container} edges={["top"]}>
+    <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} hitSlop={8}>
-          <Ionicons name="arrow-back" size={24} color={t.onSurface} />
+        <Pressable onPress={close} hitSlop={10} style={styles.closeBtn}
+          accessibilityRole="button" accessibilityLabel="Close">
+          <Ionicons name="close" size={24} color={t.onSurface} />
         </Pressable>
-        <Text style={styles.headerTitle}>{postId ? "Edit Post" : "New Post"}</Text>
-        <Pressable
-          style={[styles.postBtn, (submitting || loadingPost) && { opacity: 0.6 }]}
-          onPress={submit} disabled={submitting || loadingPost} testID="feed-submit">
-          {submitting || loadingPost
-            ? <ActivityIndicator size="small" color="#fff" />
-            : <Text style={styles.postBtnText}>
-                {uploading ? "Uploading…" : postId ? "Save" : "Post"}
-              </Text>}
-        </Pressable>
+        <Text style={styles.headerTitle}>{postId ? "Edit post" : "Ask a question"}</Text>
+        <View style={styles.closeBtn} />
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: spacing.md, gap: 14, paddingBottom: 60 }}>
-        <TextInput
-          style={styles.titleInput} placeholder="Title (e.g. Help with quadratics)"
-          placeholderTextColor={t.onSurfaceMuted} value={title}
-          onChangeText={setTitle} maxLength={160} testID="feed-title" />
-        <TextInput
-          style={styles.bodyInput}
-          placeholder="Ask your question or explain the concept…"
-          placeholderTextColor={t.onSurfaceMuted} value={body}
-          onChangeText={setBody} multiline maxLength={4000} testID="feed-body" />
+      <KeyboardAvoidingView style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}>
 
-        {/* media picker */}
-        {file ? (
-          <View style={styles.fileRow}>
-            {file.mimeType?.startsWith("image/") ? (
-              <Image source={{ uri: file.uri }} style={styles.filePreview} />
-            ) : (
-              <View style={[styles.filePreview, styles.fileVideoFallback]}>
-                <Ionicons name="videocam" size={26} color="#fff" />
-              </View>
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={styles.fileName} numberOfLines={1}>{file.name}</Text>
-              <Text style={styles.fileMeta}>
-                {file.mimeType?.startsWith("video/") ? "Short video" : "Image"}
-                {file.size ? ` · ${(file.size / (1024 * 1024)).toFixed(1)} MB` : ""}
-              </Text>
+          {loadingPost && (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator size="small" color={t.brandPrimary} />
+              <Text style={styles.loadingText}>Loading your post…</Text>
             </View>
-            <Pressable onPress={() => setFile(null)} hitSlop={8}>
-              <Ionicons name="close-circle" size={22} color={t.onSurfaceMuted} />
-            </Pressable>
+          )}
+
+          {/* 1. media */}
+          {file ? (
+            <View style={styles.preview}>
+              {isVideo ? (
+                <View style={[styles.previewMedia, styles.previewVideo]}>
+                  <View style={styles.playCircle}>
+                    <Ionicons name="play" size={26} color="#fff" />
+                  </View>
+                  <Text style={styles.previewVideoName} numberOfLines={1}>{file.name}</Text>
+                </View>
+              ) : (
+                <Image source={{ uri: file.uri }} style={styles.previewMedia} resizeMode="cover" />
+              )}
+
+              {/* top-right remove */}
+              {!submitting && (
+                <Pressable style={styles.removeBtn} onPress={removeFile} hitSlop={8}
+                  accessibilityRole="button" accessibilityLabel="Remove attachment">
+                  <Ionicons name="close" size={18} color="#fff" />
+                </Pressable>
+              )}
+
+              {/* uploading overlay */}
+              {uploading && (
+                <View style={styles.uploadOverlay}>
+                  {progress > 0
+                    ? <Text style={styles.uploadPercent}>{progress}%</Text>
+                    : <ActivityIndicator size="large" color="#fff" />}
+                  <View style={styles.uploadTrack}>
+                    <View style={[styles.uploadFill, { width: `${progress}%` }]} />
+                  </View>
+                  <Text style={styles.uploadHint}>
+                    {progress >= 100 ? "Processing your file…" : "Uploading…"}
+                  </Text>
+                  <Pressable style={styles.cancelBtn} onPress={cancelUpload}
+                    accessibilityRole="button">
+                    <Text style={styles.cancelBtnText}>Cancel</Text>
+                  </Pressable>
+                </View>
+              )}
+
+              {/* bottom info bar */}
+              {!uploading && (
+                <View style={styles.previewBar}>
+                  <Ionicons
+                    name={uploadedMedia ? "checkmark-circle" : isVideo ? "videocam" : "image"}
+                    size={16} color="#fff" />
+                  <Text style={styles.previewBarText} numberOfLines={1}>
+                    {uploadedMedia ? "Uploaded · " : ""}
+                    {isVideo ? "Video" : "Photo"}
+                    {file.size ? ` · ${formatSize(file.size)}` : ""}
+                  </Text>
+                </View>
+              )}
+            </View>
+          ) : (
+            <View style={styles.tiles}>
+              <Pressable style={styles.tile} onPress={() => pickFile("image")}
+                testID="feed-pick-image" accessibilityRole="button">
+                <View style={styles.tileIcon}>
+                  <Ionicons name="image" size={24} color={t.brandPrimary} />
+                </View>
+                <Text style={styles.tileTitle}>Add photo</Text>
+                <Text style={styles.tileHint}>JPG, PNG · up to 8 MB</Text>
+              </Pressable>
+              <Pressable style={styles.tile} onPress={() => pickFile("video")}
+                testID="feed-pick-video" accessibilityRole="button">
+                <View style={styles.tileIcon}>
+                  <Ionicons name="videocam" size={24} color={t.brandPrimary} />
+                </View>
+                <Text style={styles.tileTitle}>Add video</Text>
+                <Text style={styles.tileHint}>MP4, MOV · up to 25 MB</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {/* 2. question */}
+          <View style={styles.card}>
+            <TextInput
+              style={styles.titleInput}
+              placeholder="What do you need help with?"
+              placeholderTextColor={t.onSurfaceMuted}
+              value={title} onChangeText={setTitle} maxLength={160}
+              editable={!submitting} testID="feed-title"
+              returnKeyType="next" />
+            <View style={styles.divider} />
+            <TextInput
+              style={styles.bodyInput}
+              placeholder="Add details: what you tried, where you got stuck…"
+              placeholderTextColor={t.onSurfaceMuted}
+              value={body} onChangeText={setBody} multiline maxLength={4000}
+              editable={!submitting} testID="feed-body" />
+            <Text style={styles.counter}>{body.length}/4000</Text>
           </View>
-        ) : (
-          <View style={styles.mediaButtons}>
-            <Pressable style={styles.mediaBtn} onPress={() => pickFile()} testID="feed-pick-media">
-              <Ionicons name="image-outline" size={18} color={t.brandPrimary} />
-              <Text style={styles.mediaBtnText}>Image / Video</Text>
-            </Pressable>
+
+          {/* 3. subject */}
+          <Text style={styles.label}>Subject</Text>
+          <TextInput
+            style={styles.input} placeholder="e.g. Pure Mathematics"
+            placeholderTextColor={t.onSurfaceMuted} value={subject}
+            onChangeText={setSubject} maxLength={80} editable={!submitting} />
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={styles.suggestRow}>
+            {SUBJECT_SUGGESTIONS.map((s) => {
+              const active = subject === s;
+              return (
+                <Pressable key={s}
+                  style={[styles.suggest, active && styles.suggestActive]}
+                  onPress={() => setSubject(active ? "" : s)}>
+                  <Text style={[styles.suggestText, active && styles.suggestTextActive]}>{s}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+
+          <Text style={styles.label}>Topic <Text style={styles.optional}>(optional)</Text></Text>
+          <TextInput
+            style={styles.input} placeholder="e.g. Quadratic equations"
+            placeholderTextColor={t.onSurfaceMuted} value={topic}
+            onChangeText={setTopic} maxLength={120} editable={!submitting} />
+
+          {/* 4. level + type */}
+          <Text style={styles.label}>Exam level</Text>
+          <View style={styles.chipWrap}>
+            {EXAM_LEVELS.map((lv) => (
+              <Pressable key={lv}
+                style={[styles.chip, examLevel === lv && styles.chipActive]}
+                onPress={() => setExamLevel(lv)}>
+                <Text style={[styles.chipText, examLevel === lv && styles.chipTextActive]}>
+                  {lv}
+                </Text>
+              </Pressable>
+            ))}
           </View>
-        )}
 
-        <TextInput
-          style={styles.input} placeholder="Subject (e.g. Pure Mathematics)"
-          placeholderTextColor={t.onSurfaceMuted} value={subject}
-          onChangeText={setSubject} maxLength={80} />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ gap: 8 }}>
-          {SUBJECT_SUGGESTIONS.map((s) => (
-            <Pressable key={s} style={styles.miniChip} onPress={() => setSubject(s)}>
-              <Text style={styles.miniChipText}>{s}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-        <TextInput
-          style={styles.input} placeholder="Topic (optional, e.g. Quadratic equations)"
-          placeholderTextColor={t.onSurfaceMuted} value={topic}
-          onChangeText={setTopic} maxLength={120} />
-
-        <Text style={styles.label}>Exam level</Text>
-        <View style={styles.chipWrap}>
-          {EXAM_LEVELS.map((lv) => (
-            <Pressable key={lv}
-              style={[styles.chip, examLevel === lv && styles.chipActive]}
-              onPress={() => setExamLevel(lv)}>
-              <Text style={[styles.chipText, examLevel === lv && styles.chipTextActive]}>
-                {lv}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Text style={styles.label}>Type</Text>
-        <View style={styles.chipWrap}>
-          {QUESTION_TYPES.map((q) => (
-            <Pressable key={q.key}
-              style={[styles.chip, questionType === q.key && styles.chipActive]}
-              onPress={() => setQuestionType(q.key)}>
-              <Text style={[styles.chipText,
+          <Text style={styles.label}>Post type</Text>
+          <View style={styles.chipWrap}>
+            {QUESTION_TYPES.map((q) => (
+              <Pressable key={q.key}
+                style={[styles.chip, questionType === q.key && styles.chipActive]}
+                onPress={() => setQuestionType(q.key)}>
+                <Text style={[styles.chipText,
                 questionType === q.key && styles.chipTextActive]}>{q.label}</Text>
-            </Pressable>
-          ))}
-        </View>
+              </Pressable>
+            ))}
+          </View>
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-        <Text style={styles.hint}>
-          GC AI will attach an explanation with sources after you post.
-        </Text>
-      </ScrollView>
+          {!!error && (
+            <View style={styles.errorBox}>
+              <Ionicons name="alert-circle" size={18} color={t.error} />
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
+
+          <View style={styles.aiNote}>
+            <Ionicons name="sparkles" size={16} color={t.brandPrimary} />
+            <Text style={styles.aiNoteText}>
+              GCSharp AI will add an explanation with sources after you post.
+            </Text>
+          </View>
+        </ScrollView>
+
+        {/* sticky post button */}
+        <View style={styles.footer}>
+          <Pressable
+            style={[styles.postBtn, !canPost && !submitting && styles.postBtnDisabled]}
+            onPress={submit} disabled={busy} testID="feed-submit"
+            accessibilityRole="button" accessibilityLabel={buttonLabel}>
+            {uploading && (
+              <View style={[styles.postFill, { width: `${progress}%` }]} />
+            )}
+            <View style={styles.postContent}>
+              {(submitting && !uploading) || loadingPost ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : null}
+              <Text style={styles.postBtnText}>{buttonLabel}</Text>
+            </View>
+          </Pressable>
+        </View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
-
 
 const createStyles = (s: Palette) => StyleSheet.create({
   container: { flex: 1, backgroundColor: s.surface },
   header: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
-    borderBottomWidth: 1, borderBottomColor: s.divider,
+    paddingHorizontal: spacing.sm, height: 52,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: s.divider,
   },
+  closeBtn: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   headerTitle: { fontSize: 17, fontWeight: "800", color: s.onSurface },
-  postBtn: {
-    backgroundColor: s.brandPrimary, paddingHorizontal: 16, paddingVertical: 8,
-    borderRadius: radii.pill, minWidth: 64, alignItems: "center", ...shadow1,
+
+  scroll: { padding: spacing.md, gap: 12, paddingBottom: 32 },
+  loadingRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  loadingText: { fontSize: 13, color: s.onSurfaceMuted },
+
+  // media tiles
+  tiles: { flexDirection: "row", gap: 12 },
+  tile: {
+    flex: 1, alignItems: "center", gap: 6, paddingVertical: 20, paddingHorizontal: 10,
+    borderRadius: 20, backgroundColor: s.surfaceSecondary,
+    borderWidth: 1.5, borderColor: s.border, borderStyle: "dashed",
   },
-  postBtnText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  tileIcon: {
+    width: 52, height: 52, borderRadius: 26, backgroundColor: s.brandTertiary,
+    alignItems: "center", justifyContent: "center", marginBottom: 4,
+  },
+  tileTitle: { fontSize: 15, fontWeight: "800", color: s.onSurface },
+  tileHint: { fontSize: 12, color: s.onSurfaceMuted },
+
+  // media preview
+  preview: { borderRadius: 20, overflow: "hidden", backgroundColor: s.surfaceTertiary },
+  previewMedia: { width: "100%", height: 220 },
+  previewVideo: {
+    backgroundColor: "#1E293B", alignItems: "center", justifyContent: "center", gap: 10,
+  },
+  playCircle: {
+    width: 60, height: 60, borderRadius: 30, backgroundColor: s.brandPrimary,
+    alignItems: "center", justifyContent: "center", paddingLeft: 3,
+  },
+  previewVideoName: { color: "#fff", fontSize: 13, fontWeight: "600", maxWidth: "80%" },
+  removeBtn: {
+    position: "absolute", top: 10, right: 10, width: 32, height: 32, borderRadius: 16,
+    backgroundColor: "rgba(0,0,0,0.6)", alignItems: "center", justifyContent: "center",
+  },
+  previewBar: {
+    position: "absolute", left: 10, bottom: 10, flexDirection: "row",
+    alignItems: "center", gap: 6, paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: radii.pill, backgroundColor: "rgba(0,0,0,0.6)", maxWidth: "80%",
+  },
+  previewBarText: { color: "#fff", fontSize: 12, fontWeight: "700", flexShrink: 1 },
+  uploadOverlay: {
+    ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.65)",
+    alignItems: "center", justifyContent: "center", gap: 10, paddingHorizontal: 32,
+  },
+  uploadPercent: { color: "#fff", fontSize: 40, fontWeight: "800", letterSpacing: -1 },
+  uploadTrack: {
+    alignSelf: "stretch", height: 8, borderRadius: 4,
+    backgroundColor: "rgba(255,255,255,0.25)", overflow: "hidden",
+  },
+  uploadFill: { height: 8, borderRadius: 4, backgroundColor: "#fff" },
+  uploadHint: { color: "#fff", fontSize: 13, opacity: 0.9 },
+  cancelBtn: {
+    marginTop: 4, paddingHorizontal: 18, paddingVertical: 8, borderRadius: radii.pill,
+    borderWidth: 1, borderColor: "rgba(255,255,255,0.6)",
+  },
+  cancelBtnText: { color: "#fff", fontSize: 13, fontWeight: "700" },
+
+  // question card
+  card: {
+    borderRadius: 20, backgroundColor: s.surfaceSecondary,
+    borderWidth: 1, borderColor: s.border, padding: spacing.md,
+  },
   titleInput: {
-    backgroundColor: s.surfaceSecondary, borderRadius: radii.md,
-    padding: spacing.md, fontSize: 16, fontWeight: "700", color: s.onSurface,
-    borderWidth: 1, borderColor: s.border,
+    fontSize: 18, fontWeight: "800", color: s.onSurface, paddingVertical: 6,
+    letterSpacing: -0.2,
   },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: s.divider, marginVertical: 8 },
   bodyInput: {
-    backgroundColor: s.surfaceSecondary, borderRadius: radii.md,
-    padding: spacing.md, fontSize: 15, color: s.onSurface, minHeight: 130,
-    textAlignVertical: "top", borderWidth: 1, borderColor: s.border,
+    fontSize: 15, color: s.onSurface, minHeight: 110, lineHeight: 22,
+    textAlignVertical: "top", paddingVertical: 4,
   },
+  counter: { alignSelf: "flex-end", fontSize: 11, color: s.onSurfaceMuted, marginTop: 4 },
+
+  // details
+  label: { fontSize: 13, fontWeight: "700", color: s.onSurface, marginTop: 8 },
+  optional: { fontWeight: "500", color: s.onSurfaceMuted },
   input: {
-    backgroundColor: s.surfaceSecondary, borderRadius: radii.md,
-    padding: spacing.md, fontSize: 14, color: s.onSurface,
+    minHeight: 48, paddingHorizontal: 14, borderRadius: 14, fontSize: 15,
+    color: s.onSurface, backgroundColor: s.surfaceSecondary,
     borderWidth: 1, borderColor: s.border,
   },
-  label: { fontSize: 13, fontWeight: "700", color: s.onSurfaceMuted },
+  suggestRow: { gap: 8, paddingRight: 8 },
+  suggest: {
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill,
+    backgroundColor: s.brandTertiary,
+  },
+  suggestActive: { backgroundColor: s.brandPrimary },
+  suggestText: { fontSize: 12, fontWeight: "600", color: s.onBrandTertiary },
+  suggestTextActive: { color: "#fff" },
   chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
-    paddingHorizontal: 12, paddingVertical: 7, borderRadius: radii.pill,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: radii.pill,
     backgroundColor: s.surfaceSecondary, borderWidth: 1, borderColor: s.border,
   },
   chipActive: { backgroundColor: s.brandPrimary, borderColor: s.brandPrimary },
-  chipText: { fontSize: 12, color: s.onSurfaceMuted },
+  chipText: { fontSize: 13, color: s.onSurface, fontWeight: "600" },
   chipTextActive: { color: "#fff", fontWeight: "700" },
-  miniChip: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: radii.pill,
-    backgroundColor: s.brandTertiary,
+
+  errorBox: {
+    flexDirection: "row", alignItems: "flex-start", gap: 8, padding: 12,
+    borderRadius: 14, backgroundColor: s.surfaceTertiary, marginTop: 4,
   },
-  miniChipText: { fontSize: 11, color: s.onBrandTertiary },
-  mediaButtons: { flexDirection: "row", gap: 10 },
-  mediaBtn: {
-    flexDirection: "row", alignItems: "center", gap: 6,
-    backgroundColor: s.surfaceSecondary, borderWidth: 1, borderColor: s.border,
-    borderStyle: "dashed", paddingHorizontal: 14, paddingVertical: 10,
-    borderRadius: radii.md,
+  errorText: { flex: 1, fontSize: 13, color: s.error, lineHeight: 18 },
+  aiNote: {
+    flexDirection: "row", alignItems: "center", gap: 8, padding: 12,
+    borderRadius: 14, backgroundColor: s.brandTertiary, marginTop: 4,
   },
-  mediaBtnText: { fontSize: 13, color: s.brandPrimary, fontWeight: "600" },
-  fileRow: {
-    flexDirection: "row", alignItems: "center", gap: 10,
-    backgroundColor: s.surfaceSecondary, borderRadius: radii.md,
-    padding: spacing.sm, borderWidth: 1, borderColor: s.border,
+  aiNoteText: { flex: 1, fontSize: 13, color: s.onBrandTertiary, lineHeight: 18 },
+
+  // sticky footer
+  footer: {
+    paddingHorizontal: spacing.md, paddingTop: 10, paddingBottom: 10,
+    backgroundColor: s.surface,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: s.divider,
   },
-  filePreview: { width: 56, height: 56, borderRadius: radii.sm },
-  fileVideoFallback: {
-    backgroundColor: s.brandSecondary, alignItems: "center", justifyContent: "center",
+  postBtn: {
+    height: 54, borderRadius: 27, overflow: "hidden",
+    alignItems: "center", justifyContent: "center", backgroundColor: s.brandPrimary,
   },
-  fileName: { fontSize: 13, fontWeight: "600", color: s.onSurface },
-  fileMeta: { fontSize: 11, color: s.onSurfaceMuted, marginTop: 2 },
-  error: { fontSize: 13, color: s.error },
-  hint: { fontSize: 11, color: s.onSurfaceMuted, textAlign: "center", marginTop: 4 },
+  postBtnDisabled: { opacity: 0.45 },
+  postFill: {
+    position: "absolute", left: 0, top: 0, bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.22)",
+  },
+  postContent: { flexDirection: "row", alignItems: "center", gap: 10 },
+  postBtnText: { color: "#fff", fontSize: 16, fontWeight: "800" },
 });

@@ -203,6 +203,42 @@ class TestFeedValidation:
         assert gc_feed.classify_upload("text/html", "page.jpg") is None
         assert gc_feed.classify_upload("application/pdf", "clip.mp4") is None
 
+    def test_feed_media_must_be_from_gcsharp_cloudinary(self):
+        import gc_feed
+        image = gc_feed.FeedMediaIn(
+            type="image",
+            url=f"https://res.cloudinary.com/{gc_feed.CLOUDINARY_CLOUD_NAME}/image/upload/v1/photo.jpg",
+            name="photo.jpg",
+        )
+        assert gc_feed._validated_cloudinary_media([image])[0]["type"] == "image"
+
+        with pytest.raises(gc_feed.HTTPException) as error:
+            gc_feed._validated_cloudinary_media([
+                gc_feed.FeedMediaIn(
+                    type="video", url="https://example.com/video.mp4", name="video.mp4")
+            ])
+        assert error.value.status_code == 422
+
+    def test_feed_post_models_accept_media_and_patch_omission_preserves_it(self):
+        import gc_feed
+        media = {
+            "type": "image",
+            "url": (
+                f"https://res.cloudinary.com/{gc_feed.CLOUDINARY_CLOUD_NAME}"
+                "/image/upload/v1/photo.jpg"
+            ),
+            "name": "photo.jpg",
+        }
+
+        create_payload = gc_feed.FeedPostIn(body="Question", media=[media])
+        assert create_payload.model_dump()["media"] == [media]
+
+        edit_without_media = gc_feed.FeedPostUpdate(body="Edited question")
+        assert "media" not in edit_without_media.model_dump(exclude_unset=True)
+
+        edit_with_media = gc_feed.FeedPostUpdate(media=[media])
+        assert edit_with_media.model_dump(exclude_unset=True)["media"] == [media]
+
     def test_magic_bytes_match_declared_types(self):
         import gc_feed
         assert gc_feed._magic_ok("image", b"\xff\xd8\xff\xe0rest") is True      # JPEG
