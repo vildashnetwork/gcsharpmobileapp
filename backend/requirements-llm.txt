@@ -1,0 +1,2 @@
+# Optional runtime for in-process GGUF inference. Install only when enabling it.
+llama-cpp-python>=0.3.8,<0.4

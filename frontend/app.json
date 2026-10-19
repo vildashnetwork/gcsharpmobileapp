@@ -2,42 +2,66 @@
   "expo": {
     "name": "GCSHARP",
     "slug": "GCSHARP",
-    "version": "1.0.0",
+    "version": "2.5.7",
+    "android": {
+      "versionCode": 21,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/gcsharp.png",
+        "backgroundColor": "#ffffff"
+      },
+      "softwareKeyboardLayoutMode": "pan",
+      "package": "com.gcsharp",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA"
+      ]
+    },
     "orientation": "portrait",
-    "icon": "./assets/images/gcsharp.gif",
-    "scheme": "GCSHARP",
+    "icon": "./assets/images/gcsharp.png",
+    "scheme": "gcsharp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "url": "https://u.expo.dev/4ea50a82-7983-4ca0-bb9a-b22297bb304d"
+    },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.elearningai.z1288g"
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/images/gcsharp.gif",
-        "backgroundColor": "#000000"
-      },
-      "edgeToEdgeEnabled": true,
-      "softwareKeyboardLayoutMode": "pan",
-      "package": "com.emergent.elearningai.z1288g"
+      "bundleIdentifier": "com.gcsharp"
     },
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/images/gcsharp.gif"
+      "favicon": "./assets/images/gcsharp.png"
     },
     "plugins": [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/gcsharp.gif",
+          "image": "./assets/images/gcsharp.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000000"
+          "backgroundColor": "#ffffff"
         }
       ],
-      "expo-video"
+      "expo-video",
+      "expo-audio",
+      "expo-asset",
+      "expo-font",
+      "expo-image",
+      "expo-notifications",
+      "expo-secure-store",
+      "expo-status-bar",
+      "expo-web-browser",
+      [
+        "./plugins/withRemoveReadMedia.js"
+      ],
+      "expo-speech-recognition"
     ],
     "experiments": {
       "typedRoutes": true
@@ -45,8 +69,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "12f1d71b-9d81-4716-a43c-12e55ed105e2"
+        "projectId": "4ea50a82-7983-4ca0-bb9a-b22297bb304d"
       }
-    }
+    },
+    "owner": "gcsharp8"
   }
 }
