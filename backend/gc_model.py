@@ -23,15 +23,26 @@ See backend/DEPLOY_GCSHARP_MODEL.md for exact startup commands.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib
 import json
 import logging
 import os
 import re
+import tempfile
+import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, NoReturn, Optional
 
 import httpx
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 
 logger = logging.getLogger("gc_model")
 
@@ -41,6 +52,15 @@ logger = logging.getLogger("gc_model")
 
 GC_MODEL_URL = os.environ.get("GC_MODEL_URL", "").strip()
 GC_MODEL_PATH = os.environ.get("GC_MODEL_PATH", "").strip()
+GC_MODEL_REPO_ID = os.environ.get("GC_MODEL_REPO_ID", "").strip()
+GC_MODEL_FILE = os.environ.get("GC_MODEL_FILE", "").strip()
+GC_MODEL_REVISION = os.environ.get("GC_MODEL_REVISION", "main").strip()
+GC_MODEL_SHA256 = os.environ.get("GC_MODEL_SHA256", "").strip().lower()
+GC_MODEL_CACHE_DIR = Path(
+    os.environ.get("GC_MODEL_CACHE_DIR")
+    or str(Path(tempfile.gettempdir()) / "gcsharp-models")
+)
+GC_MODEL_DOWNLOAD_TIMEOUT = float(os.environ.get("GC_MODEL_DOWNLOAD_TIMEOUT", "600"))
 GC_MODEL_NAME = os.environ.get("GC_MODEL_NAME", "gcsharp").strip()
 GC_MODEL_API_KEY = os.environ.get("GC_MODEL_API_KEY", "").strip()
 GC_MODEL_TIMEOUT = float(os.environ.get("GC_MODEL_TIMEOUT", "120"))
@@ -104,15 +124,26 @@ class GCSharpModel:
 
     def __init__(self):
         self._llm: Any = None
+        self._gguf_lock = threading.Lock()
+        gguf_configured = bool(
+            GC_MODEL_PATH or (GC_MODEL_REPO_ID and GC_MODEL_FILE)
+        )
         self._status = GCModelStatus(
-            configured=bool(GC_MODEL_URL or GC_MODEL_PATH),
-            backend=("http" if GC_MODEL_URL else ("gguf" if GC_MODEL_PATH else None)),
-            endpoint=GC_MODEL_URL or GC_MODEL_PATH or None,
+            configured=bool(GC_MODEL_URL or gguf_configured),
+            backend=("http" if GC_MODEL_URL else ("gguf" if gguf_configured else None)),
+            endpoint=GC_MODEL_URL or GC_MODEL_PATH or (
+                f"{GC_MODEL_REPO_ID}/{GC_MODEL_FILE}@{GC_MODEL_REVISION}"
+                if gguf_configured else None
+            ),
         )
 
     @property
     def configured(self) -> bool:
-        return bool(GC_MODEL_URL or GC_MODEL_PATH)
+        return bool(
+            GC_MODEL_URL
+            or GC_MODEL_PATH
+            or (GC_MODEL_REPO_ID and GC_MODEL_FILE)
+        )
 
     def status(self) -> Dict[str, Any]:
         return self._status.as_dict()
@@ -126,22 +157,148 @@ class GCSharpModel:
         if GC_MODEL_PATH:
             return (
                 f"GCSharp model weights at {GC_MODEL_PATH} could not be loaded. "
-                "Verify GC_MODEL_PATH points at a valid .gguf file and that "
-                "llama-cpp-python is installed (pip install llama-cpp-python), then retry."
+                "Verify GC_MODEL_PATH points at a valid .gguf file and install "
+                "the optional backend/requirements-llm.txt dependencies, then retry."
+            )
+        if GC_MODEL_REPO_ID and GC_MODEL_FILE:
+            return (
+                f"GCSharp GGUF model {GC_MODEL_REPO_ID}/{GC_MODEL_FILE} could not "
+                "be loaded. Check the repository, revision, checksum, available "
+                "disk/RAM, and the optional backend/requirements-llm.txt dependency."
             )
         return (
             "GCSharp model is not configured. Set GC_MODEL_URL (self-hosted "
-            "OpenAI-compatible server) or GC_MODEL_PATH (local GGUF weights) in "
-            "backend/.env and restart the server. See backend/DEPLOY_GCSHARP_MODEL.md."
+            "OpenAI-compatible server), GC_MODEL_PATH (local GGUF weights), or "
+            "GC_MODEL_REPO_ID plus GC_MODEL_FILE in backend/.env and restart the "
+            "server. See backend/DEPLOY_GCSHARP_MODEL.md."
         )
 
-    def _raise_unavailable(self, detail: Optional[str] = None) -> None:
+    def _raise_unavailable(self, detail: Optional[str] = None) -> NoReturn:
         msg = detail or self.unavailable_reason()
         self._status.last_error = msg
         raise GCModelUnavailableError(msg, configured=self.configured)
 
     # ---------------- local GGUF loading ---------------------------
 
+    def _gguf_path(self) -> Optional[Path]:
+        if GC_MODEL_PATH:
+            return Path(GC_MODEL_PATH).expanduser()
+        if GC_MODEL_REPO_ID and GC_MODEL_FILE:
+            repo_dir = GC_MODEL_REPO_ID.replace("/", "--")
+            return GC_MODEL_CACHE_DIR / repo_dir / Path(GC_MODEL_FILE).name
+        return None
+
+    def _download_gguf(self, model_path: Path) -> None:
+        quoted_repo = urllib.parse.quote(GC_MODEL_REPO_ID, safe="/")
+        quoted_file = urllib.parse.quote(GC_MODEL_FILE, safe="/")
+        quoted_revision = urllib.parse.quote(GC_MODEL_REVISION, safe="")
+        url = (
+            f"https://huggingface.co/{quoted_repo}/resolve/"
+            f"{quoted_revision}/{quoted_file}?download=true"
+        )
+        partial_path = model_path.with_name(model_path.name + ".download")
+        digest = hashlib.sha256()
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Downloading GCSharp GGUF model %s/%s at revision %s",
+            GC_MODEL_REPO_ID, GC_MODEL_FILE, GC_MODEL_REVISION,
+        )
+
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "GCSharp/1.0 model-loader"}
+            )
+            with urllib.request.urlopen(
+                request, timeout=GC_MODEL_DOWNLOAD_TIMEOUT
+            ) as response, partial_path.open("wb") as output:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+            if GC_MODEL_SHA256 and digest.hexdigest() != GC_MODEL_SHA256:
+                raise ValueError(
+                    "downloaded GGUF SHA-256 does not match GC_MODEL_SHA256"
+                )
+            os.replace(partial_path, model_path)
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            try:
+                partial_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove incomplete GGUF download %s", partial_path)
+            self._raise_unavailable(
+                f"Could not download GCSharp GGUF model from Hugging Face: {exc}. "
+                "Check GC_MODEL_REPO_ID, GC_MODEL_FILE, GC_MODEL_REVISION, "
+                "GC_MODEL_SHA256, network access, and available disk space."
+            )
+
+    def _verify_cached_gguf(self, model_path: Path) -> None:
+        digest = hashlib.sha256()
+        try:
+            with model_path.open("rb") as model_file:
+                while chunk := model_file.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError as exc:
+            self._raise_unavailable(
+                f"Could not verify cached GCSharp GGUF model at {model_path}: {exc}."
+            )
+        if digest.hexdigest() != GC_MODEL_SHA256:
+            self._raise_unavailable(
+                f"Cached GCSharp GGUF model at {model_path} does not match "
+                "GC_MODEL_SHA256. Remove the invalid cache file and retry."
+            )
+
+    def _ensure_gguf(self) -> Any:
+        if self._llm is not None:
+            return self._llm
+
+        with self._gguf_lock:
+            if self._llm is not None:
+                return self._llm
+
+            model_path = self._gguf_path()
+            if model_path is None:
+                self._raise_unavailable()
+            if GC_MODEL_PATH and not model_path.is_file():
+                self._raise_unavailable(
+                    f"GCSharp GGUF model file does not exist: {model_path}. "
+                    "Check GC_MODEL_PATH."
+                )
+            if model_path.is_file() and GC_MODEL_SHA256:
+                self._verify_cached_gguf(model_path)
+
+            try:
+                llama_cpp = importlib.import_module("llama_cpp")
+            except ImportError:
+                self._raise_unavailable(
+                    "The local GGUF backend requires llama-cpp-python. Install "
+                    "the optional backend/requirements-llm.txt dependencies and "
+                    "restart the server."
+                )
+
+            llama = getattr(llama_cpp, "Llama", None)
+            if llama is None:
+                self._raise_unavailable(
+                    "The installed llama-cpp-python package does not expose "
+                    "llama_cpp.Llama. Reinstall backend/requirements-llm.txt "
+                    "and restart the server."
+                )
+
+            if not model_path.is_file():
+                self._download_gguf(model_path)
+
+            try:
+                self._llm = llama(
+                    model_path=str(model_path),
+                    n_ctx=GC_MODEL_CTX,
+                    n_threads=GC_MODEL_N_THREADS,
+                    verbose=False,
+                )
+            except Exception as exc:
+                self._raise_unavailable(
+                    f"Could not load GCSharp GGUF model at {model_path}: {exc}. "
+                    "The Render service may not have enough memory; try a smaller "
+                    "model/context or a service with more RAM."
+                )
+            return self._llm
 
     # ---------------- HTTP backend ----------------------------------
 
@@ -213,36 +370,19 @@ class GCSharpModel:
     def _generate_gguf_blocking(self, messages: List[Dict[str, str]],
                                 max_tokens: int, temperature: float) -> str:
         llm = self._ensure_gguf()
-        prompt = self._apply_chat_template(llm, messages)
-        out = llm(
-            prompt,
+        out = llm.create_chat_completion(
+            messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
-            stop=["</s>", "[INST]", "USER:", "ASSISTANT:"],
+            stop=["</s>", "<|im_end|>"],
         )
         try:
-            text = out["choices"][0]["text"]
+            text = out["choices"][0]["message"]["content"]
         except Exception:
             self._raise_unavailable("GCSharp GGUF model returned no text. Retry.")
         if not isinstance(text, str) or not text.strip():
             self._raise_unavailable("GCSharp GGUF model returned an empty response. Retry.")
         return text
-
-    @staticmethod
-    def _apply_chat_template(llm: Any, messages: List[Dict[str, str]]) -> str:
-        try:
-            tokenizer = getattr(llm, "tokenizer", None)
-            if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
-                return tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            pass
-        parts = []
-        for m in messages:
-            role = m.get("role", "user").upper()
-            parts.append(f"{role}: {m.get('content', '')}")
-        parts.append("ASSISTANT:")
-        return "\n".join(parts)
 
     # ---------------- public API ------------------------------------
 
@@ -325,10 +465,6 @@ class GCSharpModel:
         started = time.monotonic()
         try:
             if self._status.backend == "gguf":
-                if self._llm is None:
-                    self._status.healthy = True
-                    self._status.detail = "gguf_configured_not_loaded"
-                    return self.status()
                 await asyncio.to_thread(self._generate_gguf_blocking,
                                         [{"role": "user", "content": "Reply with OK"}],
                                         8, 0.0)
@@ -402,5 +538,3 @@ def get_gc_model() -> GCSharpModel:
                 "GCSharp model NOT configured - generation features will return "
                 "HTTP 503 until GC_MODEL_URL or GC_MODEL_PATH is set.")
     return _singleton
-
-

@@ -11,10 +11,13 @@ These tests are intentionally OFFLINE:
 """
 
 import importlib
+import hashlib
+import io
 import json
 import os
 import sys
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -77,11 +80,29 @@ def mock_model_server():
     server.shutdown()
 
 
-def _fresh_gc_model(monkeypatch, url: str = "", path: str = ""):
+def _fresh_gc_model(monkeypatch, url: str = "", path: str = "", extra_env=None):
     """Reload gc_model with fresh env so config is picked up."""
+    defaults = {
+        "GC_MODEL_REPO_ID": "",
+        "GC_MODEL_FILE": "",
+        "GC_MODEL_REVISION": "main",
+        "GC_MODEL_SHA256": "",
+        "GC_MODEL_CACHE_DIR": "",
+        "GC_MODEL_DOWNLOAD_TIMEOUT": "600",
+        "GC_MODEL_NAME": "gcsharp",
+        "GC_MODEL_API_KEY": "",
+        "GC_MODEL_MAX_TOKENS": "2048",
+        "GC_MODEL_TEMPERATURE": "0.2",
+        "GC_MODEL_CTX": "4096",
+        "GC_MODEL_N_THREADS": "4",
+    }
+    for name, value in defaults.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("GC_MODEL_URL", url)
     monkeypatch.setenv("GC_MODEL_PATH", path)
     monkeypatch.setenv("GC_MODEL_TIMEOUT", "10")
+    for name, value in (extra_env or {}).items():
+        monkeypatch.setenv(name, value)
     import gc_model
     importlib.reload(gc_model)
     return gc_model
@@ -170,6 +191,104 @@ class TestGCModelAdapter:
         with pytest.raises(gm.GCModelUnavailableError) as exc:
             asyncio.run(model.generate("hi"))
         assert "does not exist" in str(exc.value) or "gguf" in str(exc.value).lower()
+
+    def test_gguf_generation_uses_local_chat_completion(self, monkeypatch, tmp_path):
+        model_path = tmp_path / "model.gguf"
+        model_path.write_bytes(b"fake gguf")
+        calls = {}
+
+        class FakeLlama:
+            def __init__(self, **kwargs):
+                calls["init"] = kwargs
+
+            def create_chat_completion(self, **kwargs):
+                calls["completion"] = kwargs
+                return {"choices": [{"message": {"content": "Local model answer"}}]}
+
+        fake_module = types.ModuleType("llama_cpp")
+        setattr(fake_module, "Llama", FakeLlama)
+        monkeypatch.setitem(sys.modules, "llama_cpp", fake_module)
+
+        gm = _fresh_gc_model(monkeypatch, path=str(model_path))
+        model = gm.get_gc_model()
+        import asyncio
+        answer = asyncio.run(model.generate("Explain current"))
+
+        assert answer == "Local model answer"
+        assert calls["init"]["model_path"] == str(model_path)
+        assert calls["completion"]["messages"][-1]["content"] == "Explain current"
+        assert model.status()["healthy"] is True
+
+    def test_gguf_without_optional_runtime_is_actionable(self, monkeypatch, tmp_path):
+        model_path = tmp_path / "model.gguf"
+        model_path.write_bytes(b"fake gguf")
+        monkeypatch.setitem(sys.modules, "llama_cpp", None)
+
+        gm = _fresh_gc_model(monkeypatch, path=str(model_path))
+        model = gm.get_gc_model()
+        import asyncio
+        with pytest.raises(gm.GCModelUnavailableError) as exc:
+            asyncio.run(model.generate("Test missing runtime"))
+
+        assert "requirements-llm.txt" in str(exc.value)
+
+    def test_gguf_cached_checksum_mismatch_is_rejected(self, monkeypatch, tmp_path):
+        model_path = tmp_path / "model.gguf"
+        model_path.write_bytes(b"not the expected model")
+        env = {"GC_MODEL_SHA256": "0" * 64}
+        gm = _fresh_gc_model(monkeypatch, path=str(model_path), extra_env=env)
+        model = gm.get_gc_model()
+
+        import asyncio
+        with pytest.raises(gm.GCModelUnavailableError) as exc:
+            asyncio.run(model.generate("Test checksum"))
+
+        assert "does not match GC_MODEL_SHA256" in str(exc.value)
+
+    def test_gguf_download_is_pinned_verified_and_cached(
+        self, monkeypatch, tmp_path
+    ):
+        payload = b"small test model"
+        env = {
+            "GC_MODEL_REPO_ID": "example/gc-model",
+            "GC_MODEL_FILE": "model.gguf",
+            "GC_MODEL_REVISION": "abc123",
+            "GC_MODEL_SHA256": hashlib.sha256(payload).hexdigest(),
+            "GC_MODEL_CACHE_DIR": str(tmp_path),
+        }
+        calls = {}
+
+        def fake_urlopen(request, timeout):
+            calls["url"] = request.full_url
+            calls["timeout"] = timeout
+            return io.BytesIO(payload)
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        class FakeLlama:
+            def __init__(self, **kwargs):
+                calls["model_path"] = kwargs["model_path"]
+
+            def create_chat_completion(self, **kwargs):
+                return {"choices": [{"message": {"content": "Downloaded model"}}]}
+
+        fake_module = types.ModuleType("llama_cpp")
+        setattr(fake_module, "Llama", FakeLlama)
+        monkeypatch.setitem(sys.modules, "llama_cpp", fake_module)
+
+        gm = _fresh_gc_model(monkeypatch, extra_env=env)
+        model = gm.get_gc_model()
+        import asyncio
+        answer = asyncio.run(model.generate("Test download"))
+
+        expected_path = tmp_path / "example--gc-model" / "model.gguf"
+        assert answer == "Downloaded model"
+        assert calls["url"] == (
+            "https://huggingface.co/example/gc-model/resolve/abc123/"
+            "model.gguf?download=true"
+        )
+        assert expected_path.read_bytes() == payload
+        assert calls["model_path"] == str(expected_path)
 
 
 # ------------------------------------------------------------
