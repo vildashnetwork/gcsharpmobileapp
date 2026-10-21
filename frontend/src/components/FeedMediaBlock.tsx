@@ -13,6 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, Pressable, ScrollView, FlatList, Modal, StyleSheet,
+  ActivityIndicator,
   useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -24,10 +25,14 @@ import {
 import Animated, {
   runOnJS, useAnimatedStyle, useSharedValue, withDecay, withSpring, withTiming,
 } from "react-native-reanimated";
+import { WebView } from "react-native-webview";
 import { useTheme } from "@/src/theme-context";
 import { radii, type Palette } from "@/src/theme";
+import { API_BASE } from "@/src/api";
+import { PDFJS_RUNTIME, PDFJS_WORKER } from "@/src/generated/pdfjsRuntime";
+import { pdfHtml } from "@/src/pdf-html";
 
-export type MediaItem = { type: "image" | "video"; url: string; name?: string };
+export type MediaItem = { type: "image" | "video" | "pdf"; url: string; name?: string };
 
 const INNER_RADIUS = 14;
 const MAX_SCALE = 5;
@@ -334,6 +339,72 @@ function InlineVideo({ media, width, height, styles }: {
   );
 }
 
+function PdfPreview({ media, width, styles }: {
+  media: MediaItem; width: number; styles: ReturnType<typeof createStyles>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [pageCount, setPageCount] = useState<number | null>(null);
+  const html = useMemo(() => pdfHtml(media.url, 1, {
+    pdfjsRuntime: PDFJS_RUNTIME,
+    pdfjsWorker: PDFJS_WORKER,
+    interactive: false,
+  }), [media.url]);
+  const baseUrl = API_BASE.replace(/\/api\/?$/, "");
+
+  return (
+    <View style={[styles.pdfCard, { width }]}>
+      <Pressable style={styles.pdfHeader} onPress={() => setExpanded((value) => !value)}
+        accessibilityRole="button" accessibilityLabel={expanded
+          ? "Collapse PDF preview" : "Preview attached PDF"}>
+        <View style={styles.pdfIcon}>
+          <Ionicons name="document-text" size={22} color="#fff" />
+        </View>
+        <View style={styles.pdfDescription}>
+          <Text style={styles.pdfTitle}>PDF document</Text>
+          <Text style={styles.pdfSubtitle}>
+            {expanded
+              ? pageCount ? `${pageCount} pages · Scroll to read` : "Loading pages…"
+              : "Tap to preview and scroll through pages"}
+          </Text>
+        </View>
+        <Ionicons name={expanded ? "chevron-up" : "chevron-down"}
+          size={20} color={styles.pdfChevron.color} />
+      </Pressable>
+      {expanded && (
+        <View style={styles.pdfViewer}>
+          <WebView
+            source={{ html, baseUrl }}
+            originWhitelist={["*"]}
+            javaScriptEnabled
+            domStorageEnabled
+            nestedScrollEnabled
+            scrollEnabled
+            onLoadEnd={() => setLoading(false)}
+            onMessage={(event) => {
+              try {
+                const message = JSON.parse(event.nativeEvent.data);
+                if (message.type === "meta" && Number.isInteger(message.pages)) {
+                  setPageCount(message.pages);
+                }
+              } catch {
+                setPageCount(null);
+              }
+            }}
+            style={styles.pdfWebView}
+          />
+          {loading && (
+            <View style={styles.pdfLoading}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.pdfLoadingText}>Loading PDF preview…</Text>
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 // ------------------------------------------------------------
 // Post media
 // ------------------------------------------------------------
@@ -346,8 +417,10 @@ export function MediaBlock({ media, cardWidth, inlineVideos = false }: {
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const images = media.filter((m) => m.type === "image");
   const videos = media.filter((m) => m.type === "video");
+  const pdfs = media.filter((m) => m.type === "pdf");
+  const visualMedia = media.filter((m) => m.type !== "pdf");
   const h = cardWidth * 0.6;
-  const open = (item: MediaItem) => setViewerIndex(Math.max(0, media.indexOf(item)));
+  const open = (item: MediaItem) => setViewerIndex(Math.max(0, visualMedia.indexOf(item)));
   const closeViewer = useCallback(() => setViewerIndex(null), []);
 
   return (
@@ -389,9 +462,12 @@ export function MediaBlock({ media, cardWidth, inlineVideos = false }: {
             onPress={() => open(m)} styles={styles} />
         )
       ))}
+      {pdfs.map((m, i) => (
+        <PdfPreview key={`${m.url}-${i}`} media={m} width={cardWidth} styles={styles} />
+      ))}
 
       {viewerIndex !== null && (
-        <MediaViewer media={media} startIndex={viewerIndex} onClose={closeViewer} />
+        <MediaViewer media={visualMedia} startIndex={viewerIndex} onClose={closeViewer} />
       )}
     </>
   );
@@ -424,6 +500,29 @@ const createStyles = (t: Palette) => StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.6)",
   },
   videoBadgeText: { color: "#fff", fontSize: 12, fontWeight: "700", flexShrink: 1 },
+  pdfCard: {
+    marginTop: 10, borderRadius: INNER_RADIUS, overflow: "hidden",
+    backgroundColor: t.surfaceTertiary,
+  },
+  pdfHeader: {
+    minHeight: 68, flexDirection: "row", alignItems: "center", gap: 12, padding: 12,
+    backgroundColor: t.surfaceSecondary,
+  },
+  pdfIcon: {
+    width: 40, height: 40, borderRadius: 12, alignItems: "center",
+    justifyContent: "center", backgroundColor: t.brandPrimary,
+  },
+  pdfDescription: { flex: 1, gap: 4 },
+  pdfTitle: { fontSize: 14, fontWeight: "800", color: t.onSurface },
+  pdfSubtitle: { fontSize: 12, color: t.onSurfaceMuted },
+  pdfChevron: { color: t.onSurfaceMuted },
+  pdfViewer: { height: 480, backgroundColor: "#F3F4F6" },
+  pdfWebView: { flex: 1, backgroundColor: "transparent" },
+  pdfLoading: {
+    ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center",
+    gap: 8, backgroundColor: "rgba(15, 23, 42, 0.76)",
+  },
+  pdfLoadingText: { color: "#fff", fontSize: 13, fontWeight: "600" },
 });
 
 const viewer = StyleSheet.create({

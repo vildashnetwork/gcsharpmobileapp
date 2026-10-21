@@ -40,21 +40,22 @@ const CLOUDINARY_UPLOAD_PRESET =
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 25 * 1024 * 1024;
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
 const VIDEO_EXTENSIONS = ["mp4", "m4v", "mov", "webm", "3gp"];
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "webp", "gif"];
 
 type PickedFile = { uri: string; name: string; mimeType?: string | null; size?: number };
-type UploadedMedia = { type: "image" | "video"; url: string; name: string };
+type UploadedMedia = { type: "image" | "video" | "pdf"; url: string; name: string };
 
 const FILE_MIME_TYPES: Record<string, string> = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
   gif: "image/gif", mp4: "video/mp4", m4v: "video/mp4", "3gp": "video/3gpp",
-  mov: "video/quicktime", webm: "video/webm",
+  mov: "video/quicktime", webm: "video/webm", pdf: "application/pdf",
 };
 const MIME_FILE_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
   "image/gif": "gif", "video/mp4": "mp4", "video/quicktime": "mov",
-  "video/webm": "webm", "video/3gpp": "3gp",
+  "video/webm": "webm", "video/3gpp": "3gp", "application/pdf": "pdf",
 };
 
 class UploadCancelled extends Error {
@@ -85,8 +86,10 @@ async function uploadMediaToCloudinary(
 ): Promise<UploadedMedia> {
   const extension = file.name.split(".").pop()?.toLowerCase() || "";
   const mimeType = FILE_MIME_TYPES[extension] || file.mimeType || "application/octet-stream";
-  const type: UploadedMedia["type"] = mimeType.startsWith("video/") ? "video" : "image";
-  const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/${type}/upload`;
+  const type: UploadedMedia["type"] = extension === "pdf" || mimeType === "application/pdf"
+    ? "pdf" : mimeType.startsWith("video/") ? "video" : "image";
+  const resourceType = type === "pdf" ? "raw" : type;
+  const endpoint = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/${resourceType}/upload`;
 
   const parse = (status: number, text: string): UploadedMedia => {
     let data: any = null;
@@ -180,6 +183,8 @@ export default function ComposeScreen() {
     params.paperScan === "true" ? "past_paper" : "question");
   const [file, setFile] = useState<PickedFile | null>(null);
   const [uploadedMedia, setUploadedMedia] = useState<UploadedMedia | null>(null);
+  const [pdfFile, setPdfFile] = useState<PickedFile | null>(null);
+  const [uploadedPdfMedia, setUploadedPdfMedia] = useState<UploadedMedia | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -189,7 +194,7 @@ export default function ComposeScreen() {
 
   const busy = submitting || loadingPost;
   const isVideo = !!file && (file.mimeType?.startsWith("video/") ?? false);
-  const hasContent = !!(title.trim() || body.trim() || file);
+  const hasContent = !!(title.trim() || body.trim() || file || pdfFile);
   const canPost = !busy && !postLoadFailed &&
     !!(title.trim() || body.trim() || (file && !isVideo));
 
@@ -231,6 +236,38 @@ export default function ComposeScreen() {
         mimeType: FILE_MIME_TYPES[extension] || a.mimeType, size,
       });
       setUploadedMedia(null);
+      setProgress(0);
+      setError(null);
+    } catch (e: any) {
+      Alert.alert("Could not open the picker", e?.message || "Please try again.");
+    }
+  }, []);
+
+  const pickPdf = useCallback(async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (res.canceled || !res.assets?.length) return;
+      const asset = res.assets[0];
+      const extension = asset.name.split(".").pop()?.toLowerCase() || "";
+      const mimeType = (asset.mimeType || "").toLowerCase();
+      if (extension !== "pdf" && mimeType !== "application/pdf") {
+        Alert.alert("Unsupported file", "Choose a PDF document.");
+        return;
+      }
+      if (asset.size && asset.size > MAX_PDF_BYTES) {
+        Alert.alert("File too large", "PDF documents must be 20 MB or smaller.");
+        return;
+      }
+      const name = asset.name.toLowerCase().endsWith(".pdf")
+        ? asset.name : `${asset.name || "document"}.pdf`;
+      setPdfFile({
+        uri: asset.uri, name, mimeType: "application/pdf", size: asset.size,
+      });
+      setUploadedPdfMedia(null);
       setProgress(0);
       setError(null);
     } catch (e: any) {
@@ -281,6 +318,12 @@ export default function ComposeScreen() {
     setProgress(0);
   };
 
+  const removePdf = () => {
+    setPdfFile(null);
+    setUploadedPdfMedia(null);
+    setProgress(0);
+  };
+
   const cancelUpload = () => { cancelRef.current?.cancel(); };
 
   const close = () => {
@@ -317,23 +360,39 @@ export default function ComposeScreen() {
         topic: topic.trim(), exam_level: examLevel,
         question_type: questionType,
       };
-      let media = uploadedMedia || undefined;
-      if (!media && file) {
-        setUploading(true);
-        setProgress(0);
-        media = await uploadMediaToCloudinary(file, setProgress, cancelRef);
-        setUploadedMedia(media);
-        setUploading(false);
+      const media: UploadedMedia[] = [];
+      if (file) {
+        if (uploadedMedia) {
+          media.push(uploadedMedia);
+        } else {
+          setUploading(true);
+          setProgress(0);
+          const uploaded = await uploadMediaToCloudinary(file, setProgress, cancelRef);
+          setUploadedMedia(uploaded);
+          media.push(uploaded);
+        }
       }
+      if (pdfFile) {
+        if (uploadedPdfMedia) {
+          media.push(uploadedPdfMedia);
+        } else {
+          setUploading(true);
+          setProgress(0);
+          const uploaded = await uploadMediaToCloudinary(pdfFile, setProgress, cancelRef);
+          setUploadedPdfMedia(uploaded);
+          media.push(uploaded);
+        }
+      }
+      setUploading(false);
       // after a failed attempt that already created the post, update it instead of duplicating
       const existingPostId = postId || createdPostIdRef.current;
       if (existingPostId) {
         const updated = await api<FeedPostWriteResult>(`/feed/posts/${existingPostId}`, {
           method: "PATCH",
-          body: { ...payload, ...(media ? { media: [media] } : {}) },
+          body: { ...payload, ...(media.length ? { media } : {}) },
         });
-        if (media && !updated.__offlineQueued
-          && !updated.media?.some((item) => item.url === media?.url)) {
+        if (media.length && !updated.__offlineQueued
+          && media.some((uploaded) => !updated.media?.some((item) => item.url === uploaded.url))) {
           throw new Error(
             "Your file uploaded, but the feed API did not return it with the post. " +
             "Deploy the latest feed backend before retrying.");
@@ -341,11 +400,11 @@ export default function ComposeScreen() {
       } else {
         const created = await api<FeedPostWriteResult>("/feed/posts", {
           method: "POST",
-          body: { ...payload, media: media ? [media] : [] },
+          body: { ...payload, media },
         });
         if (created.post_id) createdPostIdRef.current = created.post_id;
-        if (media && !created.__offlineQueued
-          && !created.media?.some((item) => item.url === media?.url)) {
+        if (media.length && !created.__offlineQueued
+          && media.some((uploaded) => !created.media?.some((item) => item.url === uploaded.url))) {
           throw new Error(
             "Your file uploaded, but the feed API did not save it with the post. " +
             "The post may exist without its attachment; deploy the latest feed backend before retrying.");
@@ -468,6 +527,47 @@ export default function ComposeScreen() {
                 <Text style={styles.tileHint}>MP4, MOV · up to 25 MB</Text>
               </Pressable>
             </View>
+          )}
+          {pdfFile ? (
+            <View style={styles.pdfAttachment}>
+              <View style={styles.pdfIcon}>
+                <Ionicons name="document-text" size={24} color={t.brandPrimary} />
+              </View>
+              <View style={styles.pdfDetails}>
+                <Text style={styles.pdfName} numberOfLines={1}>{pdfFile.name}</Text>
+                <Text style={styles.pdfHint}>
+                  {uploading && !file
+                    ? `Uploading PDF${progress > 0 ? ` · ${progress}%` : "…"}`
+                    : `${uploadedPdfMedia ? "Uploaded · " : ""}PDF${pdfFile.size
+                      ? ` · ${formatSize(pdfFile.size)}` : ""}`}
+                </Text>
+              </View>
+              {!submitting && (
+                <Pressable onPress={removePdf} hitSlop={8}
+                  accessibilityRole="button" accessibilityLabel="Remove PDF attachment">
+                  <Ionicons name="close-circle" size={24} color={t.onSurfaceMuted} />
+                </Pressable>
+              )}
+              {uploading && !file && (
+                <View style={styles.pdfProgressTrack}>
+                  <View style={[styles.pdfProgressFill, { width: `${progress}%` }]} />
+                </View>
+              )}
+            </View>
+          ) : (
+            <Pressable style={styles.pdfPickTile} onPress={pickPdf}
+              testID="feed-pick-pdf" accessibilityRole="button">
+              <View style={styles.pdfPickIcon}>
+                <Ionicons name="document-attach-outline" size={21} color={t.brandPrimary} />
+              </View>
+              <View style={styles.pdfDetails}>
+                <Text style={styles.pdfName}>Attach a PDF</Text>
+                <Text style={styles.pdfHint}>
+                  Preview and scroll through pages · add question text for GC AI · up to 20 MB
+                </Text>
+              </View>
+              <Ionicons name="add-circle-outline" size={23} color={t.brandPrimary} />
+            </Pressable>
           )}
           {file && !isVideo && (
             <View style={styles.ocrHint}>
@@ -614,6 +714,32 @@ const createStyles = (s: Palette) => StyleSheet.create({
   },
   tileTitle: { fontSize: 15, fontWeight: "800", color: s.onSurface },
   tileHint: { fontSize: 12, color: s.onSurfaceMuted },
+  pdfPickTile: {
+    flexDirection: "row", alignItems: "center", gap: 12, padding: 12,
+    borderRadius: 16, backgroundColor: s.surfaceSecondary,
+    borderWidth: 1.5, borderColor: s.border, borderStyle: "dashed",
+  },
+  pdfPickIcon: {
+    width: 42, height: 42, borderRadius: 13, backgroundColor: s.brandTertiary,
+    alignItems: "center", justifyContent: "center",
+  },
+  pdfAttachment: {
+    minHeight: 68, flexDirection: "row", alignItems: "center", gap: 12,
+    padding: 12, borderRadius: 16, backgroundColor: s.surfaceSecondary,
+    borderWidth: 1, borderColor: s.border, overflow: "hidden",
+  },
+  pdfIcon: {
+    width: 42, height: 42, borderRadius: 13, backgroundColor: s.brandTertiary,
+    alignItems: "center", justifyContent: "center",
+  },
+  pdfDetails: { flex: 1, gap: 4 },
+  pdfName: { fontSize: 14, fontWeight: "700", color: s.onSurface },
+  pdfHint: { fontSize: 12, color: s.onSurfaceMuted },
+  pdfProgressTrack: {
+    position: "absolute", left: 0, right: 0, bottom: 0, height: 3,
+    backgroundColor: s.surfaceTertiary,
+  },
+  pdfProgressFill: { height: "100%", backgroundColor: s.brandPrimary },
 
   // media preview
   preview: { borderRadius: 20, overflow: "hidden", backgroundColor: s.surfaceTertiary },

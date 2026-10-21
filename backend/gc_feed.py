@@ -44,10 +44,12 @@ MAX_TEXT_LEN = 4000
 MAX_TITLE_LEN = 160
 MAX_IMAGE_BYTES = 8 * 1024 * 1024           # 8 MB for images
 MAX_VIDEO_BYTES = 25 * 1024 * 1024          # 25 MB for short videos
+MAX_PDF_BYTES = 20 * 1024 * 1024            # 20 MB for feed PDFs
 MAX_MEDIA_PER_POST = 4
 
 ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".3gp"}
+ALLOWED_PDF_EXT = {".pdf"}
 ALLOWED_IMAGE_MIME_PREFIX = "image/"
 ALLOWED_VIDEO_MIME_PREFIX = "video/"
 GENERIC_UPLOAD_MIMES = {"", "application/octet-stream", "binary/octet-stream"}
@@ -64,7 +66,7 @@ VALID_EXAM_LEVELS = {"GCE O Level", "GCE A Level", "HND", "Concours", "General"}
 
 
 class FeedMediaIn(BaseModel):
-    type: Literal["image", "video"]
+    type: Literal["image", "video", "pdf"]
     url: str = Field(..., min_length=1, max_length=2048)
     name: str = Field(default="Media", max_length=120)
 
@@ -112,7 +114,8 @@ def _validated_cloudinary_media(items: List[FeedMediaIn]) -> List[Dict[str, str]
     media: List[Dict[str, str]] = []
     for item in items:
         parsed = urlsplit(item.url)
-        expected_path = f"/{CLOUDINARY_CLOUD_NAME}/{item.type}/upload/"
+        resource_type = "raw" if item.type == "pdf" else item.type
+        expected_path = f"/{CLOUDINARY_CLOUD_NAME}/{resource_type}/upload/"
         if (
             parsed.scheme != "https"
             or parsed.hostname != "res.cloudinary.com"
@@ -226,7 +229,7 @@ def _rate_limit(key: str, limit: int, window_seconds: int = 3600) -> bool:
 
 
 def classify_upload(content_type: str, filename: str) -> Optional[str]:
-    """Return 'image' | 'video' | None based on MIME + extension.
+    """Return 'image' | 'video' | 'pdf' | None based on MIME + extension.
 
     Specific MIME types must match the extension. Generic mobile picker MIME
     values can use the allowlisted extension; upload magic bytes are checked
@@ -240,6 +243,8 @@ def classify_upload(content_type: str, filename: str) -> Optional[str]:
     if ext in ALLOWED_VIDEO_EXT:
         if ct in GENERIC_UPLOAD_MIMES or ct.startswith(ALLOWED_VIDEO_MIME_PREFIX):
             return "video"
+    if ext in ALLOWED_PDF_EXT and ct in GENERIC_UPLOAD_MIMES | {"application/pdf"}:
+        return "pdf"
     if not ext and ct in VIDEO_MIME_EXTENSIONS:
         return "video"
     return None
@@ -256,6 +261,8 @@ def _magic_ok(kind: str, head: bytes) -> bool:
                 or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"))
     if kind == "video":
         return head[4:8] == b"ftyp" or head[:4] == b"\x1a\x45\xdf\xa3"
+    if kind == "pdf":
+        return head.startswith(b"%PDF-")
     return False
 
 
@@ -528,10 +535,14 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         if not kind:
             raise HTTPException(
                 415,
-                "Unsupported type. Use JPG/PNG/WEBP/GIF images or "
-                "MP4/MOV/M4V/WEBM/3GP videos.",
+                "Unsupported type. Use JPG/PNG/WEBP/GIF images, "
+                "MP4/MOV/M4V/WEBM/3GP videos, or PDF documents.",
             )
-        cap = MAX_IMAGE_BYTES if kind == "image" else MAX_VIDEO_BYTES
+        cap = {
+            "image": MAX_IMAGE_BYTES,
+            "video": MAX_VIDEO_BYTES,
+            "pdf": MAX_PDF_BYTES,
+        }[kind]
         if len(post.get("media", [])) >= MAX_MEDIA_PER_POST:
             raise HTTPException(409, f"A post can have at most {MAX_MEDIA_PER_POST} media files.")
         chunks = []
