@@ -351,10 +351,14 @@ function PdfPreview({ media, width, styles }: {
     interactive: false,
   }), [media.url]);
   const baseUrl = API_BASE.replace(/\/api\/?$/, "");
+  const togglePreview = () => {
+    if (expanded) setLoading(true);
+    setExpanded(!expanded);
+  };
 
   return (
     <View style={[styles.pdfCard, { width }]}>
-      <Pressable style={styles.pdfHeader} onPress={() => setExpanded((value) => !value)}
+      <Pressable style={styles.pdfHeader} onPress={togglePreview}
         accessibilityRole="button" accessibilityLabel={expanded
           ? "Collapse PDF preview" : "Preview attached PDF"}>
         <View style={styles.pdfIcon}>
@@ -519,7 +523,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
   pdfViewer: { height: 480, backgroundColor: "#F3F4F6" },
   pdfWebView: { flex: 1, backgroundColor: "transparent" },
   pdfLoading: {
-    ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center",
+    ...StyleSheet.absoluteFill, alignItems: "center", justifyContent: "center",
     gap: 8, backgroundColor: "rgba(15, 23, 42, 0.76)",
   },
   pdfLoadingText: { color: "#fff", fontSize: 13, fontWeight: "600" },

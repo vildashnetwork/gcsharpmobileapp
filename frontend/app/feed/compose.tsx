@@ -1,7 +1,7 @@
 /**
  * Compose / edit a Learning Feed post — redesigned.
  *
- * - Media first: two big tiles (photo / video) with size hints.
+ * - Media first: photo/video tiles plus a separate PDF attachment control.
  * - Real upload progress (XMLHttpRequest) with percentage, cancel and retry.
  * - Sticky bottom Post button that shows upload progress inside it.
  * - Keyboard-safe layout, discard confirmation, character counter.
