@@ -238,7 +238,7 @@ export default function PapersScreen() {
                 style={styles.searchInput}
                 value={searchText}
                 onChangeText={setSearchText}
-                placeholder="Search papers (e.g. Physics P2 2023, Pure Maths)"
+                placeholder="Search papers.."
                 placeholderTextColor={t.onSurfaceMuted}
                 returnKeyType="search"
                 accessibilityLabel="Search past papers"

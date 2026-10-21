@@ -280,7 +280,7 @@ function VideoThumb({ media, width, height, onPress, styles }: {
   return (
     <Pressable onPress={onPress} style={[styles.videoThumb, { width, height }]}
       accessibilityRole="button"
-      accessibilityLabel={`${media.name || "Video"}, tap to play full screen`}>
+      accessibilityLabel="Play video full screen">
       {!!poster && !posterFailed && (
         <Image source={{ uri: poster }} style={StyleSheet.absoluteFill}
           resizeMode="cover" onError={() => setPosterFailed(true)} />
@@ -291,16 +291,55 @@ function VideoThumb({ media, width, height, onPress, styles }: {
       </View>
       <View style={styles.videoBadge}>
         <Ionicons name="videocam" size={12} color="#fff" />
-        <Text style={styles.videoBadgeText} numberOfLines={1}>{media.name || "Video"}</Text>
+        <Text style={styles.videoBadgeText}>Video</Text>
       </View>
     </Pressable>
+  );
+}
+
+function InlineVideo({ media, width, height, styles }: {
+  media: MediaItem; width: number; height: number;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const poster = videoPosterUrl(media.url);
+  const [showPoster, setShowPoster] = useState(!!poster);
+  const player = useVideoPlayer(media.url, (p) => { p.loop = false; });
+
+  return (
+    <View style={[styles.inlineVideo, { width, height }]}>
+      <VideoView
+        player={player}
+        style={StyleSheet.absoluteFill}
+        nativeControls
+        contentFit="contain"
+        surfaceType="textureView"
+        onFirstFrameRender={() => setShowPoster(false)}
+      />
+      {!!poster && showPoster && (
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          onPress={() => player.play()}
+          accessibilityRole="button"
+          accessibilityLabel="Play video"
+        >
+          <Image source={{ uri: poster }} style={StyleSheet.absoluteFill}
+            resizeMode="cover" onError={() => setShowPoster(false)} />
+          <View style={styles.videoShade} />
+          <View style={styles.videoPlay}>
+            <Ionicons name="play" size={26} color="#fff" />
+          </View>
+        </Pressable>
+      )}
+    </View>
   );
 }
 
 // ------------------------------------------------------------
 // Post media
 // ------------------------------------------------------------
-export function MediaBlock({ media, cardWidth }: { media: MediaItem[]; cardWidth: number }) {
+export function MediaBlock({ media, cardWidth, inlineVideos = false }: {
+  media: MediaItem[]; cardWidth: number; inlineVideos?: boolean;
+}) {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const [index, setIndex] = useState(0);
@@ -342,8 +381,13 @@ export function MediaBlock({ media, cardWidth }: { media: MediaItem[]; cardWidth
         </View>
       )}
       {videos.map((m, i) => (
-        <VideoThumb key={`${m.url}-${i}`} media={m} width={cardWidth} height={h}
-          onPress={() => open(m)} styles={styles} />
+        inlineVideos ? (
+          <InlineVideo key={`${m.url}-${i}`} media={m} width={cardWidth}
+            height={h} styles={styles} />
+        ) : (
+          <VideoThumb key={`${m.url}-${i}`} media={m} width={cardWidth} height={h}
+            onPress={() => open(m)} styles={styles} />
+        )
       ))}
 
       {viewerIndex !== null && (
@@ -364,6 +408,9 @@ const createStyles = (t: Palette) => StyleSheet.create({
   videoThumb: {
     borderRadius: INNER_RADIUS, overflow: "hidden", backgroundColor: "#1E293B",
     alignItems: "center", justifyContent: "center",
+  },
+  inlineVideo: {
+    borderRadius: INNER_RADIUS, overflow: "hidden", backgroundColor: "#000",
   },
   videoShade: { ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.28)" },
   videoPlay: {

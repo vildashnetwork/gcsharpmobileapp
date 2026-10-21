@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Pressable, TextInput,
   ActivityIndicator, Image, Linking, KeyboardAvoidingView, Platform,
+  useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -14,10 +15,16 @@ import { useTheme } from "@/src/theme-context";
 import { radii, spacing, shadow1, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { timeAgo } from "@/src/lib/timeAgo";
+import { useRelativeTimeNow } from "@/src/hooks/useRelativeTimeNow";
+import { MediaBlock } from "@/src/components/FeedMediaBlock";
 import type { FeedComment, FeedPost } from "../(tabs)/feed";
 
-function CommentItem({ c, isReply, onReply, onDelete }: {
+const AI_ANSWER_COLLAPSE_CHARS = 320;
+const OCR_COLLAPSE_CHARS = 220;
+
+function CommentItem({ c, isReply, now, onReply, onDelete }: {
   c: FeedComment; isReply?: boolean;
+  now: number;
   onReply: (c: FeedComment) => void; onDelete: (c: FeedComment) => void;
 }) {
   const t = useTheme();
@@ -25,26 +32,40 @@ function CommentItem({ c, isReply, onReply, onDelete }: {
   return (
     <View style={[styles.comment, isReply && styles.commentReply]}>
       <View style={styles.commentHead}>
-        <Text style={styles.commentAuthor}>
-          {c.author?.full_name || "Student"}
-        </Text>
-        <Text style={styles.commentTime}>{timeAgo(c.created_at)}</Text>
+        {c.author?.profile_photo ? (
+          <Image source={{ uri: c.author.profile_photo }} style={styles.commentAvatar} />
+        ) : (
+          <View style={[styles.commentAvatar, styles.commentAvatarFallback]}>
+            <Text style={styles.commentAvatarInitial}>
+              {(c.author?.full_name || "S").trim().charAt(0).toUpperCase()}
+            </Text>
+          </View>
+        )}
+        <View style={styles.commentIdentity}>
+          <Text style={styles.commentAuthor} numberOfLines={1}>
+            {c.author?.full_name || "Student"}
+          </Text>
+          <Text style={styles.commentTime}>{timeAgo(c.created_at, now)}</Text>
+        </View>
       </View>
-      <Text style={styles.commentBody}>{c.body}</Text>
+      {!!c.body && <Text style={styles.commentBody}>{c.body}</Text>}
       <View style={styles.commentActions}>
         {!isReply && (
-          <Pressable onPress={() => onReply(c)} hitSlop={6}>
+          <Pressable onPress={() => onReply(c)} hitSlop={6}
+            accessibilityRole="button" accessibilityLabel={`Reply to ${c.author?.full_name || "student"}`}>
             <Text style={styles.commentAction}>Reply</Text>
           </Pressable>
         )}
         {c.is_author && (
-          <Pressable onPress={() => onDelete(c)} hitSlop={6}>
+          <Pressable onPress={() => onDelete(c)} hitSlop={6}
+            accessibilityRole="button" accessibilityLabel="Delete comment">
             <Text style={[styles.commentAction, { color: t.error }]}>Delete</Text>
           </Pressable>
         )}
       </View>
       {(c.replies || []).map((r) => (
         <CommentItem key={r.comment_id} c={r} isReply
+          now={now}
           onReply={onReply} onDelete={onDelete} />
       ))}
     </View>
@@ -55,7 +76,10 @@ export default function PostDetailScreen() {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const router = useRouter();
+  const { width } = useWindowDimensions();
+  const relativeTimeNow = useRelativeTimeNow();
   const { id } = useLocalSearchParams<{ id: string }>();
+  const postMediaWidth = Math.max(200, width - spacing.md * 4);
 
   const [post, setPost] = useState<FeedPost | null>(null);
   const [comments, setComments] = useState<FeedComment[]>([]);
@@ -64,14 +88,16 @@ export default function PostDetailScreen() {
   const [draft, setDraft] = useState("");
   const [replyTo, setReplyTo] = useState<FeedComment | null>(null);
   const [sending, setSending] = useState(false);
+  const [expandedAiPostId, setExpandedAiPostId] = useState<string | null>(null);
+  const [expandedOcrPostId, setExpandedOcrPostId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
     try {
+      const data = await api<FeedPost & { comments?: FeedComment[] }>(`/feed/posts/${id}`);
       setError(null);
-      const data = await api<FeedPost>(`/feed/posts/${id}`);
       setPost(data);
-      setComments((data as any).comments || []);
+      setComments(data.comments || []);
     } catch (e: any) {
       setError(e?.message || "Could not load this post.");
     } finally {
@@ -93,7 +119,7 @@ export default function PostDetailScreen() {
     if (!body || !id) return;
     setSending(true);
     try {
-      const created = await api<FeedComment>(`/feed/posts/${id}/comments`, {
+      await api<FeedComment>(`/feed/posts/${id}/comments`, {
         method: "POST",
         body: { body, parent_comment_id: replyTo?.comment_id ?? null },
       });
@@ -165,7 +191,7 @@ export default function PostDetailScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={styles.authorName}>{post.author?.full_name}</Text>
                   <Text style={styles.meta}>
-                    {timeAgo(post.created_at)} · {post.exam_level}
+                    {timeAgo(post.created_at, relativeTimeNow)} · {post.exam_level}
                   </Text>
                 </View>
                 <View style={styles.typeChip}>
@@ -175,17 +201,11 @@ export default function PostDetailScreen() {
               {!!post.title && <Text style={styles.title}>{post.title}</Text>}
               {!!post.body && <Text style={styles.bodyText}>{post.body}</Text>}
 
-              {(post.media || []).map((m, i) =>
-                m.type === "image" ? (
-                  <Image key={`${m.url}-${i}`} source={{ uri: m.url }}
-                    style={styles.media} resizeMode="cover" />
-                ) : (
-                  <Pressable key={`${m.url}-${i}`} style={styles.videoRow}
-                    onPress={() => Linking.openURL(m.url).catch(() => {})}>
-                    <Ionicons name="play-circle" size={22} color={t.brandPrimary} />
-                    <Text style={styles.videoText}>{m.name || "Video"} — tap to play</Text>
-                  </Pressable>
-                )
+              {!!post.media?.length && (
+                <View style={styles.postMedia}>
+                  <MediaBlock media={post.media} cardWidth={postMediaWidth}
+                    inlineVideos />
+                </View>
               )}
 
               {/* AI explanation */}
@@ -195,7 +215,52 @@ export default function PostDetailScreen() {
                     <Ionicons name="sparkles" size={14} color={t.brandPrimary} />
                     <Text style={styles.aiBadge}>GC AI explanation</Text>
                   </View>
-                  <Text style={styles.aiAnswer}>{post.ai_answer}</Text>
+                  {!!post.ocr_text && (
+                    <View style={styles.ocrBox}>
+                      <Text style={styles.ocrLabel}>Question read from image</Text>
+                      <Text style={styles.ocrText}
+                        numberOfLines={post.ocr_text.length > OCR_COLLAPSE_CHARS &&
+                          expandedOcrPostId !== post.post_id ? 5 : undefined}>
+                        {post.ocr_text}
+                      </Text>
+                      {post.ocr_text.length > OCR_COLLAPSE_CHARS && (
+                        <Pressable
+                          style={styles.aiExpandButton}
+                          onPress={() => setExpandedOcrPostId(
+                            expandedOcrPostId === post.post_id ? null : post.post_id)}
+                          accessibilityRole="button"
+                          accessibilityLabel={expandedOcrPostId === post.post_id
+                            ? "Show less recognized question" : "Show more recognized question"}>
+                          <Text style={styles.aiExpandText}>
+                            {expandedOcrPostId === post.post_id ? "Show less" : "Show more"}
+                          </Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  )}
+                  <Text style={styles.aiAnswer}
+                    numberOfLines={post.ai_answer.length > AI_ANSWER_COLLAPSE_CHARS &&
+                      expandedAiPostId !== post.post_id ? 7 : undefined}>
+                    {post.ai_answer}
+                  </Text>
+                  {post.ai_answer.length > AI_ANSWER_COLLAPSE_CHARS && (
+                    <Pressable
+                      style={styles.aiExpandButton}
+                      onPress={() => setExpandedAiPostId(
+                        expandedAiPostId === post.post_id ? null : post.post_id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={expandedAiPostId === post.post_id
+                        ? "Show less AI explanation" : "Show more AI explanation"}>
+                      <Text style={styles.aiExpandText}>
+                        {expandedAiPostId === post.post_id ? "Show less" : "Show more"}
+                      </Text>
+                      <Ionicons
+                        name={expandedAiPostId === post.post_id ? "chevron-up" : "chevron-down"}
+                        size={14}
+                        color={t.brandPrimary}
+                      />
+                    </Pressable>
+                  )}
                   {(post.ai_citations?.length ?? 0) > 0 && (
                     <View style={{ marginTop: 8, gap: 4 }}>
                       <Text style={styles.citesLabel}>Sources:</Text>
@@ -214,7 +279,11 @@ export default function PostDetailScreen() {
               ) : post.ai_status === "pending" || post.ai_status === "generating" ? (
                 <View style={styles.aiBox}>
                   <ActivityIndicator size="small" color={t.brandPrimary} />
-                  <Text style={styles.aiMuted}>GC AI is preparing an explanation…</Text>
+                  <Text style={styles.aiMuted}>
+                    {post.media?.some((media) => media.type === "image")
+                      ? "GC AI is reading your image and preparing an explanation…"
+                      : "GC AI is preparing an explanation…"}
+                  </Text>
                 </View>
               ) : post.ai_status === "unavailable" || post.ai_status === "error" ? (
                 <View style={styles.aiBox}>
@@ -228,13 +297,26 @@ export default function PostDetailScreen() {
               ) : null}
             </View>
             {/* comments */}
-            <Text style={styles.sectionTitle}>
-              Comments ({post.comment_count || 0})
-            </Text>
+            <View style={styles.commentsHeading}>
+              <View style={styles.commentsHeadingText}>
+                <Text style={styles.sectionTitle}>Comments</Text>
+                <Text style={styles.commentsSubtitle}>Join the discussion on this post</Text>
+              </View>
+              <View style={styles.commentCount}>
+                <Ionicons name="chatbubble-ellipses-outline" size={14} color={t.brandPrimary} />
+                <Text style={styles.commentCountText}>{post.comment_count || 0}</Text>
+              </View>
+            </View>
             {comments.length === 0 ? (
-              <Text style={styles.aiMuted}>No comments yet. Be the first to help!</Text>
+              <View style={styles.emptyComments}>
+                <View style={styles.emptyCommentsIcon}>
+                  <Ionicons name="chatbubble-ellipses-outline" size={22} color={t.brandPrimary} />
+                </View>
+                <Text style={styles.emptyCommentsTitle}>Start the conversation</Text>
+                <Text style={styles.aiMuted}>Be the first to share an idea or help answer this post.</Text>
+              </View>
             ) : comments.map((c) => (
-              <CommentItem key={commentKey(c)} c={c}
+              <CommentItem key={commentKey(c)} c={c} now={relativeTimeNow}
                 onReply={(cc) => setReplyTo(cc)}
                 onDelete={removeComment} />
             ))}
@@ -310,40 +392,73 @@ const createStyles = (t: Palette) => StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill,
     backgroundColor: t.surfaceTertiary,
   },
-  typeChipText: { fontSize: 10, color: t.onSurfaceMuted, fontWeight: "600" },
+  typeChipText: { fontSize: 10, color: t.onSurfaceMuted, fontWeight: "600"   },
   title: { fontSize: 18, fontWeight: "800", color: t.onSurface, marginTop: 10 },
   bodyText: { fontSize: 15, color: t.onSurface, marginTop: 8, lineHeight: 21 },
-  media: { width: "100%", height: 220, borderRadius: radii.sm, marginTop: 10 },
-  videoRow: {
-    flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10,
-    backgroundColor: t.surfaceTertiary, borderRadius: radii.sm, padding: 10,
-  },
-  videoText: { flex: 1, fontSize: 13, color: t.onSurface },
   aiBox: {
     marginTop: 12, padding: 12, borderRadius: radii.sm,
     backgroundColor: t.surfaceTertiary, gap: 6,
   },
   aiHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
   aiBadge: { fontSize: 12, fontWeight: "700", color: t.brandPrimary },
+  ocrBox: {
+    marginTop: 4, padding: 10, borderRadius: radii.sm,
+    backgroundColor: t.surfaceSecondary, gap: 5,
+  },
+  ocrLabel: { fontSize: 12, fontWeight: "800", color: t.onSurface },
+  ocrText: { fontSize: 13, color: t.onSurface, lineHeight: 19 },
   aiAnswer: { fontSize: 14, color: t.onSurface, lineHeight: 20 },
+  aiExpandButton: {
+    alignSelf: "flex-start", flexDirection: "row", alignItems: "center",
+    gap: 4, paddingVertical: 3,
+  },
+  aiExpandText: { fontSize: 13, fontWeight: "700", color: t.brandPrimary },
   aiMuted: { fontSize: 12, color: t.onSurfaceMuted },
   citesLabel: { fontSize: 11, fontWeight: "700", color: t.onSurfaceMuted },
   citeRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   citeText: { fontSize: 12, color: t.brandPrimary, flex: 1 },
   sectionTitle: { fontSize: 15, fontWeight: "800", color: t.onSurface, marginTop: 4 },
+  postMedia: { marginTop: 12, alignItems: "center" },
+  commentsHeading: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 2, marginTop: 4,
+  },
+  commentsHeadingText: { gap: 3 },
+  commentsSubtitle: { fontSize: 12, color: t.onSurfaceMuted },
+  commentCount: {
+    minWidth: 44, height: 32, paddingHorizontal: 10, borderRadius: radii.pill,
+    backgroundColor: t.surfaceSecondary, flexDirection: "row",
+    alignItems: "center", justifyContent: "center", gap: 5,
+  },
+  commentCountText: { fontSize: 12, fontWeight: "700", color: t.onSurface },
+  emptyComments: {
+    alignItems: "center", gap: 7, padding: spacing.lg,
+    backgroundColor: t.surfaceSecondary, borderRadius: radii.md,
+  },
+  emptyCommentsIcon: {
+    width: 42, height: 42, borderRadius: 21, alignItems: "center",
+    justifyContent: "center", backgroundColor: t.surfaceTertiary,
+  },
+  emptyCommentsTitle: { fontSize: 14, fontWeight: "700", color: t.onSurface },
   comment: {
-    backgroundColor: t.surfaceSecondary, borderRadius: radii.sm,
-    padding: spacing.sm, ...shadow1,
+    backgroundColor: t.surfaceSecondary, borderRadius: radii.md,
+    padding: spacing.md, ...shadow1,
   },
   commentReply: {
-    marginTop: 8, marginLeft: 24, backgroundColor: t.surfaceTertiary,
+    marginTop: 8, marginLeft: 22, backgroundColor: t.surfaceTertiary,
   },
-  commentHead: { flexDirection: "row", justifyContent: "space-between" },
+  commentHead: { flexDirection: "row", alignItems: "center", gap: 9 },
+  commentAvatar: { width: 32, height: 32, borderRadius: 16 },
+  commentAvatarFallback: {
+    backgroundColor: t.brandPrimary, alignItems: "center", justifyContent: "center",
+  },
+  commentAvatarInitial: { color: "#fff", fontSize: 13, fontWeight: "800" },
+  commentIdentity: { flex: 1, gap: 2 },
   commentAuthor: { fontSize: 13, fontWeight: "700", color: t.onSurface },
   commentTime: { fontSize: 10, color: t.onSurfaceMuted },
-  commentBody: { fontSize: 14, color: t.onSurface, marginTop: 4, lineHeight: 19 },
-  commentActions: { flexDirection: "row", gap: 14, marginTop: 6 },
-  commentAction: { fontSize: 12, color: t.brandPrimary, fontWeight: "600" },
+  commentBody: { fontSize: 14, color: t.onSurface, marginTop: 10, lineHeight: 20 },
+  commentActions: { flexDirection: "row", gap: 18, marginTop: 10 },
+  commentAction: { fontSize: 12, color: t.brandPrimary, fontWeight: "700" },
   composer: {
     borderTopWidth: 1, borderTopColor: t.divider,
     backgroundColor: t.surfaceSecondary, padding: spacing.sm,

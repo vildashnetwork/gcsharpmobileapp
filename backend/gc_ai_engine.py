@@ -1106,6 +1106,68 @@ async def _call_gemini(prompt: str, system: str,
     return None
 
 
+async def extract_question_from_image(
+        image_data: bytes, mime_type: str, timeout: float = 30.0) -> Optional[str]:
+    """Read educational question text from an uploaded image using Gemini vision."""
+    if not GEMINI_API_KEY:
+        logger.info("Image question OCR skipped because Gemini is not configured")
+        return None
+    if not image_data or len(image_data) > 8 * 1024 * 1024:
+        logger.warning("Image question OCR received empty or oversized image data")
+        return None
+    if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        logger.warning("Image question OCR received unsupported MIME type: %s", mime_type)
+        return None
+
+    import base64
+
+    prompt = (
+        "Read and transcribe the educational question shown in this image. "
+        "Preserve numbers, symbols, equations, units, labels, and answer choices "
+        "as accurately as possible. Return only the transcribed question text; "
+        "do not solve it, explain it, or add commentary. If no question is legible, "
+        "return an empty response."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            response = await hc.post(
+                f"{GEMINI_BASE}/models/{GEMINI_MODEL}:generateContent",
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"role": "user", "parts": [
+                        {"text": prompt},
+                        {"inlineData": {
+                            "mimeType": mime_type,
+                            "data": base64.b64encode(image_data).decode("ascii"),
+                        }},
+                    ]}],
+                    "generationConfig": {
+                        "temperature": 0,
+                        "maxOutputTokens": 1800,
+                    },
+                },
+            )
+        if response.status_code != 200:
+            logger.warning("Gemini image question OCR -> %s", response.status_code)
+            return None
+        parts = response.json()["candidates"][0]["content"]["parts"]
+        text = "\n".join(
+            str(part.get("text", "")) for part in parts if part.get("text")
+        )
+        text = _clean_ocr_text(text)
+        return text[:4000] or None
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        logger.warning("Gemini image question OCR failed: %s", exc)
+        return None
+
+
+def _clean_ocr_text(text: str) -> str:
+    """Remove model-added fences while preserving the question's line breaks."""
+    text = re.sub(r"```(?:text)?\s*|\s*```", "", text or "", flags=re.I)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 async def call_llm(prompt: str, system: Optional[str] = None,
                    max_tokens: int = 900, timeout: float = 30.0) -> Tuple[str, str]:
     """Try Gemini, then a short OpenRouter fallback list.

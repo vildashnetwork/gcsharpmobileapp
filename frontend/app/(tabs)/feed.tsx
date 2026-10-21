@@ -25,6 +25,7 @@ import { useAuth } from "@/src/auth";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 import { MediaBlock } from "@/src/components/FeedMediaBlock";
 import { timeAgo } from "@/src/lib/timeAgo";
+import { useRelativeTimeNow } from "@/src/hooks/useRelativeTimeNow";
 
 export type FeedMedia = { type: "image" | "video"; url: string; name?: string };
 export type FeedAuthor = {
@@ -44,6 +45,7 @@ export type FeedPost = {
   like_count: number; comment_count: number; share_count: number;
   view_count: number;
   ai_answer?: string | null; ai_citations?: FeedCitation[];
+  ocr_text?: string | null;
   ai_status: "none" | "pending" | "generating" | "ready" | "unavailable" | "error";
   ai_error?: string;
   created_at: string; liked?: boolean; saved?: boolean;
@@ -159,13 +161,19 @@ function AiAnswerBlock({ post, onRetry }: {
   const t = useTheme();
   const styles = useMemo(() => createStyles(t), [t]);
   const [expanded, setExpanded] = useState(false);
+  const [ocrExpanded, setOcrExpanded] = useState(false);
   if (!post.ai_status || post.ai_status === "none") return null;
 
   if (post.ai_status === "pending" || post.ai_status === "generating") {
+    const scanningImage = !!post.media?.some((media) => media.type === "image");
     return (
       <View style={[styles.aiStatus]}>
         <ActivityIndicator size="small" color={t.brandPrimary} />
-        <Text style={styles.aiMuted}>GCSharp AI is writing an explanation…</Text>
+        <Text style={styles.aiMuted}>
+          {scanningImage
+            ? "GC AI is reading your image and preparing an explanation…"
+            : "GCSharp AI is writing an explanation…"}
+        </Text>
       </View>
     );
   }
@@ -185,6 +193,8 @@ function AiAnswerBlock({ post, onRetry }: {
 
   const answer = post.ai_answer || "";
   const long = answer.length > AI_COLLAPSE_CHARS;
+  const ocrText = post.ocr_text || "";
+  const longOcr = ocrText.length > BODY_COLLAPSE_CHARS;
   const cites = post.ai_citations ?? [];
 
   return (
@@ -195,6 +205,17 @@ function AiAnswerBlock({ post, onRetry }: {
         </View>
         <Text style={styles.aiBadge}>GCSharp AI</Text>
       </View>
+      {!!ocrText && (
+        <View style={styles.ocrBox}>
+          <Text style={styles.ocrLabel}>Question read from image</Text>
+          <Text style={styles.ocrText} numberOfLines={longOcr && !ocrExpanded ? 5 : undefined}>
+            {ocrText}
+          </Text>
+          {longOcr && (
+            <ShowMore expanded={ocrExpanded} onPress={() => setOcrExpanded((v) => !v)} />
+          )}
+        </View>
+      )}
       <Text style={styles.aiAnswer} numberOfLines={long && !expanded ? 7 : undefined}>
         {answer}
       </Text>
@@ -224,10 +245,11 @@ function AiAnswerBlock({ post, onRetry }: {
 // ------------------------------------------------------------
 // Post card
 // ------------------------------------------------------------
-function PostCard({ post, cardWidth, onToggleLike, onToggleSave, onShare,
+function PostCard({ post, cardWidth, now, onToggleLike, onToggleSave, onShare,
   onRetryAi, onOpen, onEdit, onDelete, canManage }: {
     post: FeedPost;
     cardWidth: number;
+    now: number;
     onToggleLike: (p: FeedPost) => void;
     onToggleSave: (p: FeedPost) => void;
     onShare: (p: FeedPost) => void;
@@ -261,7 +283,7 @@ function PostCard({ post, cardWidth, onToggleLike, onToggleSave, onShare,
             <Text style={styles.authorName} numberOfLines={1}>
               {post.author?.full_name || "Student"}
             </Text>
-            <Text style={styles.meta} numberOfLines={1}>{timeAgo(post.created_at)}</Text>
+            <Text style={styles.meta} numberOfLines={1}>{timeAgo(post.created_at, now)}</Text>
           </View>
           {!!(post.exam_level || post.question_type) && (
             <View style={styles.typeChip}>
@@ -357,6 +379,7 @@ export default function LearningFeedScreen() {
   const router = useRouter();
   const { user } = useAuth();
   const { width } = useWindowDimensions();
+  const relativeTimeNow = useRelativeTimeNow();
   // screen width minus list padding (both sides) minus card padding (both sides)
   const cardWidth = width - spacing.md * 2 - spacing.md * 2;
 
@@ -548,13 +571,14 @@ export default function LearningFeedScreen() {
   const openCompose = useCallback(() => router.push("/feed/compose" as any), [router]);
 
   const renderItem = useCallback(({ item }: { item: FeedPost }) => (
-    <PostCard post={item} cardWidth={cardWidth}
+    <PostCard post={item} cardWidth={cardWidth} now={relativeTimeNow}
       onToggleLike={toggleLike} onToggleSave={toggleSave}
       onShare={sharePost} onRetryAi={retryAi}
       canManage={item.author?.user_id === user?.user_id || user?.role === "admin"}
       onEdit={editPost} onDelete={deletePost}
       onOpen={(p) => router.push(`/feed/${p.post_id}` as any)} />
-  ), [cardWidth, toggleLike, toggleSave, sharePost, retryAi, router, user, editPost, deletePost]);
+  ), [cardWidth, relativeTimeNow, toggleLike, toggleSave, sharePost, retryAi,
+    router, user, editPost, deletePost]);
 
   const advancedFilterCount =
     (subject ? 1 : 0) + (topicFilter.trim() ? 1 : 0) + (questionTypeFilter ? 1 : 0) +
@@ -1000,6 +1024,12 @@ const createStyles = (t: Palette) => StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
   aiBadge: { fontSize: 14, fontWeight: "800", color: t.onBrandTertiary },
+  ocrBox: {
+    gap: 5, padding: 10, borderRadius: radii.sm,
+    backgroundColor: t.surfaceSecondary,
+  },
+  ocrLabel: { fontSize: 12, fontWeight: "800", color: t.onSurface },
+  ocrText: { fontSize: 13, color: t.onSurface, lineHeight: 19 },
   aiAnswer: { fontSize: 15, color: t.onBrandTertiary, lineHeight: 22 },
   aiMuted: { fontSize: 13, color: t.onSurfaceMuted, flex: 1, lineHeight: 18 },
   cites: { gap: 8, paddingTop: 2, paddingRight: 4 },

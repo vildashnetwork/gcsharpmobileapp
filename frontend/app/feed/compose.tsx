@@ -190,7 +190,8 @@ export default function ComposeScreen() {
   const busy = submitting || loadingPost;
   const isVideo = !!file && (file.mimeType?.startsWith("video/") ?? false);
   const hasContent = !!(title.trim() || body.trim() || file);
-  const canPost = !busy && !postLoadFailed && !!(title.trim() || body.trim());
+  const canPost = !busy && !postLoadFailed &&
+    !!(title.trim() || body.trim() || (file && !isVideo));
 
   const pickFile = useCallback(async (kind: "image" | "video" | "any" = "any") => {
     try {
@@ -468,6 +469,14 @@ export default function ComposeScreen() {
               </Pressable>
             </View>
           )}
+          {file && !isVideo && (
+            <View style={styles.ocrHint}>
+              <Ionicons name="scan-outline" size={17} color={t.brandPrimary} />
+              <Text style={styles.ocrHintText}>
+                GC AI will read the question in this image and prepare a solution after you post.
+              </Text>
+            </View>
+          )}
 
           {/* 2. question */}
           <View style={styles.card}>
@@ -627,6 +636,11 @@ const createStyles = (s: Palette) => StyleSheet.create({
     borderRadius: radii.pill, backgroundColor: "rgba(0,0,0,0.6)", maxWidth: "80%",
   },
   previewBarText: { color: "#fff", fontSize: 12, fontWeight: "700", flexShrink: 1 },
+  ocrHint: {
+    flexDirection: "row", alignItems: "center", gap: 8, padding: 12,
+    borderRadius: 14, backgroundColor: s.brandTertiary, marginTop: 4,
+  },
+  ocrHintText: { flex: 1, fontSize: 13, color: s.onBrandTertiary, lineHeight: 18 },
   uploadOverlay: {
     ...StyleSheet.absoluteFill, backgroundColor: "rgba(0,0,0,0.65)",
     alignItems: "center", justifyContent: "center", gap: 10, paddingHorizontal: 32,

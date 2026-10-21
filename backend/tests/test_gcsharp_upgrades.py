@@ -387,6 +387,130 @@ class TestFeedValidation:
         assert len(name) > 10  # includes unique suffix
 
 
+class TestFeedImageQuestions:
+    def test_image_only_question_is_allowed_but_video_only_is_not(self):
+        import gc_feed
+
+        image = [{"type": "image", "url": "https://example.com/image.jpg"}]
+        video = [{"type": "video", "url": "https://example.com/video.mp4"}]
+        assert gc_feed._has_post_question("", "", image) is True
+        assert gc_feed._has_post_question("", "", video) is False
+        assert gc_feed._has_post_question("", "Question text", video) is True
+
+    def test_gemini_ocr_sends_image_and_returns_transcription(self, monkeypatch):
+        import asyncio
+        import base64
+        import gc_ai_engine as gc_ai
+
+        captured = {}
+
+        class _Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"candidates": [{"content": {"parts": [
+                    {"text": "```text\n2x + 3 = 7\n```"}
+                ]}}]}
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def post(self, url, *, params, json):
+                captured.update({"url": url, "params": params, "json": json})
+                return _Response()
+
+        monkeypatch.setattr(gc_ai, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(gc_ai.httpx, "AsyncClient", lambda **kwargs: _Client())
+        image_data = b"small-test-image"
+        result = asyncio.run(gc_ai.extract_question_from_image(
+            image_data, "image/png"))
+
+        assert result == "2x + 3 = 7"
+        assert captured["params"] == {"key": "test-key"}
+        parts = captured["json"]["contents"][0]["parts"]
+        image_part = next(part["inlineData"] for part in parts if "inlineData" in part)
+        assert image_part == {
+            "mimeType": "image/png",
+            "data": base64.b64encode(image_data).decode("ascii"),
+        }
+
+    def test_ocr_text_is_saved_and_sent_to_existing_solver(self, monkeypatch):
+        import asyncio
+        import gc_ai_engine as gc_ai
+        import gc_feed
+        from types import SimpleNamespace
+
+        updates = []
+        queries = []
+
+        class _FeedPosts:
+            async def update_one(self, selector, update):
+                updates.append(update["$set"])
+
+        async def download_image(_url):
+            return b"test-image", "image/png"
+
+        async def extract_question(_image, _mime):
+            return "Solve 2x + 3 = 7."
+
+        async def answer_question(_db, question, **kwargs):
+            queries.append(question)
+            return {"answer": "x = 2", "citations": [], "source": "google-gemini"}
+
+        monkeypatch.setattr(gc_feed, "_download_cloudinary_image", download_image)
+        monkeypatch.setattr(gc_ai, "extract_question_from_image", extract_question)
+        monkeypatch.setattr(gc_ai, "answer_question", answer_question)
+        post = {
+            "post_id": "post_ocr_test",
+            "title": "",
+            "body": "",
+            "subject": "Mathematics",
+            "media": [{"type": "image", "url": "https://example.com/image.png"}],
+        }
+        db = SimpleNamespace(feed_posts=_FeedPosts())
+
+        asyncio.run(gc_feed._generate_ai_answer(db, post))
+
+        assert post["ocr_text"] == "Solve 2x + 3 = 7."
+        assert len(queries) == 1 and "Solve 2x + 3 = 7." in queries[0]
+        assert any(update.get("ocr_text") == "Solve 2x + 3 = 7." for update in updates)
+        assert updates[-1]["ai_status"] == "ready"
+        assert updates[-1]["ai_answer"] == "x = 2"
+
+    def test_unreadable_image_sets_error_instead_of_staying_pending(self, monkeypatch):
+        import asyncio
+        import gc_feed
+        from types import SimpleNamespace
+
+        updates = []
+
+        class _FeedPosts:
+            async def update_one(self, selector, update):
+                updates.append(update["$set"])
+
+        async def download_image(_url):
+            raise ValueError("test image download failure")
+
+        monkeypatch.setattr(gc_feed, "_download_cloudinary_image", download_image)
+        post = {
+            "post_id": "post_ocr_error",
+            "title": "",
+            "body": "",
+            "media": [{"type": "image", "url": "https://example.com/image.png"}],
+        }
+        db = SimpleNamespace(feed_posts=_FeedPosts())
+
+        asyncio.run(gc_feed._generate_ai_answer(db, post))
+
+        assert updates[-1]["ai_status"] == "error"
+        assert "could not read a question" in updates[-1]["ai_error"].lower()
+
+
 # ------------------------------------------------------------
 # Phase 3: knowledge growth (source scoring, dedupe)
 # ------------------------------------------------------------

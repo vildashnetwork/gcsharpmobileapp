@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
@@ -124,6 +125,72 @@ def _validated_cloudinary_media(items: List[FeedMediaIn]) -> List[Dict[str, str]
             "name": _clean_text(item.name, 120) or "Media",
         })
     return media
+
+
+def _has_post_question(title: str, body: str,
+                       media: List[Dict[str, Any]]) -> bool:
+    """Text or an image gives the AI a question to answer; video alone does not."""
+    return bool(title or body or any(item.get("type") == "image" for item in media))
+
+
+async def _download_cloudinary_image(url: str) -> tuple[bytes, str]:
+    """Fetch only this app's Cloudinary image, with strict size and MIME limits."""
+    parsed = urlsplit(url)
+    expected_path = f"/{CLOUDINARY_CLOUD_NAME}/image/upload/"
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "res.cloudinary.com"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port not in (None, 443)
+        or not parsed.path.startswith(expected_path)
+    ):
+        raise ValueError("Image URL is not an approved GCSharp Cloudinary URL.")
+
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=False) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            mime_type = response.headers.get("content-type", "").split(";")[0].lower()
+            if mime_type not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+                raise ValueError("Uploaded file is not a supported image.")
+            content_length = response.headers.get("content-length")
+            if content_length and int(content_length) > MAX_IMAGE_BYTES:
+                raise ValueError("Image exceeds the OCR size limit.")
+
+            chunks = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    raise ValueError("Image exceeds the OCR size limit.")
+                chunks.append(chunk)
+
+    image_data = b"".join(chunks)
+    if not image_data:
+        raise ValueError("Cloudinary returned an empty image.")
+    return image_data, mime_type
+
+
+async def _extract_post_ocr(post: Dict[str, Any], gc_ai) -> str:
+    """Read question text from attached images; reuse a saved transcript on retry."""
+    existing = _clean_text(post.get("ocr_text"), MAX_TEXT_LEN)
+    if existing:
+        return existing
+
+    transcriptions = []
+    for media in post.get("media") or []:
+        if media.get("type") != "image" or not media.get("url"):
+            continue
+        try:
+            image_data, mime_type = await _download_cloudinary_image(media["url"])
+            text = await gc_ai.extract_question_from_image(image_data, mime_type)
+            text = _clean_text(text, MAX_TEXT_LEN)
+            if text:
+                transcriptions.append(text)
+        except Exception as exc:
+            logger.warning("Image OCR failed for post %s: %s",
+                           post.get("post_id"), exc)
+    return _clean_text("\n\n".join(transcriptions), MAX_TEXT_LEN)
 
 
 
@@ -272,6 +339,7 @@ async def serialize_post(db, doc: Dict[str, Any], viewer_id: str,
         "view_count": doc.get("view_count", 0),
         "ai_answer": doc.get("ai_answer"),
         "ai_citations": doc.get("ai_citations", []),
+        "ocr_text": doc.get("ocr_text"),
         "ai_status": doc.get("ai_status", "none"),
         "created_at": doc.get("created_at", ""),
         "updated_at": doc.get("updated_at", ""),
@@ -297,9 +365,6 @@ async def _generate_ai_answer(db, post: Dict[str, Any],
     import gc_ai_engine as gc_ai
 
     post_id = post.get("post_id")
-    query = _clean_text((post.get("title", "") + "\n" + post.get("body", "")), 2000)
-    if not query:
-        return
     await db.feed_posts.update_one({"post_id": post_id},
                                    {"$set": {"ai_status": "generating",
                                              "updated_at": datetime.utcnow().isoformat()}})
@@ -307,6 +372,35 @@ async def _generate_ai_answer(db, post: Dict[str, Any],
         await emit_event("ai_answer", {"post_id": post_id,
                                        "status": "generating"}, topic="feed")
     try:
+        text_query = _clean_text(
+            (post.get("title", "") + "\n" + post.get("body", "")), 2000)
+        ocr_text = await _extract_post_ocr(post, gc_ai)
+        if ocr_text:
+            await db.feed_posts.update_one(
+                {"post_id": post_id},
+                {"$set": {"ocr_text": ocr_text,
+                          "updated_at": datetime.utcnow().isoformat()}})
+            post["ocr_text"] = ocr_text
+
+        query_parts = [text_query] if text_query else []
+        if ocr_text:
+            query_parts.append(
+                "Question transcribed from the attached image. Solve it step by "
+                "step, preserving the original values and symbols:\n" + ocr_text)
+        query = "\n\n".join(query_parts)
+        if not query:
+            message = (
+                "GC AI could not read a question from this image. Try a clearer "
+                "photo or add the question as text.")
+            await db.feed_posts.update_one(
+                {"post_id": post_id},
+                {"$set": {"ai_status": "error", "ai_error": message,
+                          "updated_at": datetime.utcnow().isoformat()}})
+            if emit_event:
+                await emit_event("ai_answer", {"post_id": post_id,
+                                               "status": "error"}, topic="feed")
+            return
+
         outcome = await gc_ai.answer_question(
             db, query, subject=post.get("subject", "General"),
             allow_web_learning=True, use_gc_model=True)
@@ -385,9 +479,10 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             raise HTTPException(429, "You are posting too quickly. Try again later.")
         title = _clean_text(payload.title, MAX_TITLE_LEN)
         body = _clean_text(payload.body, MAX_TEXT_LEN)
-        if not title and not body:
-            raise HTTPException(400, "A post needs a title or some content.")
         media = _validated_cloudinary_media(payload.media)
+        if not _has_post_question(title, body, media):
+            raise HTTPException(
+                400, "Add text or attach a question image before posting.")
         qtype = payload.question_type if payload.question_type in VALID_QUESTION_TYPES else "question"
         level = payload.exam_level if payload.exam_level in VALID_EXAM_LEVELS else "General"
         now = datetime.utcnow().isoformat()
@@ -401,7 +496,8 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             "exam_level": level, "question_type": qtype,
             "media": media, "like_count": 0, "comment_count": 0,
             "share_count": 0, "view_count": 0,
-            "ai_answer": None, "ai_citations": [], "ai_status": "pending",
+            "ai_answer": None, "ai_citations": [], "ocr_text": None,
+            "ai_status": "pending",
             "created_at": now, "updated_at": now,
         }
         await db.feed_posts.insert_one(dict(doc))
@@ -552,8 +648,10 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             updates["media"] = combined_media
         resulting_title = updates.get("title", post.get("title", ""))
         resulting_body = updates.get("body", post.get("body", ""))
-        if not resulting_title and not resulting_body:
-            raise HTTPException(400, "A post needs a title or some content.")
+        resulting_media = updates.get("media", post.get("media", []))
+        if not _has_post_question(resulting_title, resulting_body, resulting_media):
+            raise HTTPException(
+                400, "A post needs text or an attached question image.")
 
         updates["updated_at"] = datetime.utcnow().isoformat()
         content_changed = bool(
@@ -561,10 +659,12 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
                 {"title", "body", "subject", "topic", "exam_level", "question_type"}
             )
         )
-        if content_changed:
+        question_changed = content_changed or media_input is not None
+        if question_changed:
             updates.update({
                 "ai_answer": None,
                 "ai_citations": [],
+                "ocr_text": None,
                 "ai_status": "pending",
                 "ai_error": None,
             })
@@ -578,7 +678,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         except Exception as e:
             logger.warning("Feed post update event failed for %s: %s", post_id, e)
 
-        if content_changed:
+        if question_changed:
             import asyncio
             asyncio.create_task(_generate_ai_answer(
                 db, updated, emit_event, create_notification))
