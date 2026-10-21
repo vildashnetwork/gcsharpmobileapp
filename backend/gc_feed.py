@@ -1,8 +1,8 @@
 """
 GCSharp Learning Feed (Phase 1).
 
-A dedicated feed where students post educational questions, text, images and
-short videos, and receive AI-generated explanations with clickable citations.
+A dedicated feed where students post educational questions, text, images,
+short videos and PDFs, and receive AI-generated explanations with citations.
 
 Design notes:
   * Reuses the existing auth (get_current_user), MongoDB `db`, the WebSocket

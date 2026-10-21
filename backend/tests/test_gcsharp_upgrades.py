@@ -313,12 +313,14 @@ class TestFeedValidation:
         assert gc_feed.classify_upload("application/octet-stream", "clip.mp4") == "video"
         assert gc_feed.classify_upload("", "clip.3gp") == "video"
         assert gc_feed.classify_upload("video/mp4", "clip") == "video"
+        assert gc_feed.classify_upload("application/pdf", "paper.pdf") == "pdf"
+        assert gc_feed.classify_upload("application/octet-stream", "paper.pdf") == "pdf"
 
     def test_classify_upload_rejects_mismatches(self):
         import gc_feed
         # Extension/MIME disagreement is rejected (renamed exe trick).
         assert gc_feed.classify_upload("image/jpeg", "evil.exe") is None
-        assert gc_feed.classify_upload("application/pdf", "doc.pdf") is None
+        assert gc_feed.classify_upload("application/pdf", "doc.exe") is None
         assert gc_feed.classify_upload("text/html", "page.jpg") is None
         assert gc_feed.classify_upload("application/pdf", "clip.mp4") is None
 
@@ -330,6 +332,12 @@ class TestFeedValidation:
             name="photo.jpg",
         )
         assert gc_feed._validated_cloudinary_media([image])[0]["type"] == "image"
+        pdf = gc_feed.FeedMediaIn(
+            type="pdf",
+            url=f"https://res.cloudinary.com/{gc_feed.CLOUDINARY_CLOUD_NAME}/raw/upload/v1/paper.pdf",
+            name="paper.pdf",
+        )
+        assert gc_feed._validated_cloudinary_media([pdf])[0]["type"] == "pdf"
 
         with pytest.raises(gc_feed.HTTPException) as error:
             gc_feed._validated_cloudinary_media([
@@ -366,9 +374,11 @@ class TestFeedValidation:
         assert gc_feed._magic_ok("image", b"RIFF....WEBP") is True              # WEBP
         assert gc_feed._magic_ok("video", b"\x00\x00\x00\x18ftypisom") is True  # MP4
         assert gc_feed._magic_ok("video", b"\x1a\x45\xdf\xa3") is True          # WebM
+        assert gc_feed._magic_ok("pdf", b"%PDF-1.7\n") is True
         # PE executable / plain text must never pass.
         assert gc_feed._magic_ok("image", b"MZ\x90\x00") is False
         assert gc_feed._magic_ok("video", b"just some text") is False
+        assert gc_feed._magic_ok("pdf", b"not a PDF") is False
 
     def test_rate_limit_blocks_after_budget(self):
         import gc_feed

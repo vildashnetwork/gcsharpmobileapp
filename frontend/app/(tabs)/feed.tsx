@@ -27,7 +27,7 @@ import { MediaBlock } from "@/src/components/FeedMediaBlock";
 import { timeAgo } from "@/src/lib/timeAgo";
 import { useRelativeTimeNow } from "@/src/hooks/useRelativeTimeNow";
 
-export type FeedMedia = { type: "image" | "video"; url: string; name?: string };
+export type FeedMedia = { type: "image" | "video" | "pdf"; url: string; name?: string };
 export type FeedAuthor = {
   user_id: string; full_name: string; profile_photo?: string | null;
   role?: string; level?: number;
