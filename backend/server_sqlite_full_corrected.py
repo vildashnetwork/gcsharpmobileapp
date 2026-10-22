@@ -41,6 +41,11 @@ import gc_ai_engine as gc_ai
 import gc_knowledge_growth as gc_kg
 import gc_training as gc_train
 
+AI_TOKEN_INITIAL_GRANT = 100
+AI_TOKEN_EXHAUSTED_MESSAGE = (
+    "AI tokens exhausted. Visit gcsharp.com/pay to add tokens and continue using GC AI."
+)
+
 # Optional integrations (SMS OTP + scheduled jobs). Guarded so the app still
 # boots if these packages aren't installed yet — install with:
 #   pip install twilio apscheduler
@@ -685,7 +690,46 @@ def public_user(user: dict) -> dict:
     safe.setdefault("accuracy", 0.0)
     safe.setdefault("settings", DEFAULT_SETTINGS)
     safe.setdefault("last_goal_met_date", None)
+    safe.setdefault("ai_tokens_remaining", AI_TOKEN_INITIAL_GRANT)
+    safe.setdefault("ai_tokens_used", 0)
     return safe
+
+
+async def _ensure_ai_token_balance(user_id: str) -> dict:
+    """Initialize legacy accounts once and return their persisted token balance."""
+    await db.users.update_one(
+        {"user_id": user_id, "ai_tokens_remaining": {"$exists": False}},
+        {"$set": {
+            "ai_tokens_remaining": AI_TOKEN_INITIAL_GRANT,
+            "ai_tokens_used": 0,
+        }},
+    )
+    user_doc = await db.users.find_one(
+        {"user_id": user_id},
+        {"_id": 0, "ai_tokens_remaining": 1, "ai_tokens_used": 1},
+    )
+    if not user_doc:
+        raise HTTPException(404, "Account not found.")
+    try:
+        remaining = max(0, int(user_doc["ai_tokens_remaining"]))
+        used = max(0, int(user_doc.get("ai_tokens_used", 0)))
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error("Invalid AI token balance for user %s: %s", user_id, e)
+        raise HTTPException(500, "Could not read your AI token balance.") from e
+    return {"remaining": remaining, "used": used}
+
+
+async def _consume_ai_token(user_id: str) -> int:
+    """Atomically charge one AI request or reject it when the balance is empty."""
+    await _ensure_ai_token_balance(user_id)
+    result = await db.users.update_one(
+        {"user_id": user_id, "ai_tokens_remaining": {"$gt": 0}},
+        {"$inc": {"ai_tokens_remaining": -1, "ai_tokens_used": 1}},
+    )
+    if result.modified_count != 1:
+        raise HTTPException(402, AI_TOKEN_EXHAUSTED_MESSAGE)
+    balance = await _ensure_ai_token_balance(user_id)
+    return balance["remaining"]
 
 # ============================================================
 # Pydantic Models for PIN Auth
@@ -1042,6 +1086,8 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user.setdefault("subjects", [])
     user.setdefault("goals", [])
     user.setdefault("daily_commitment", "")
+    user.setdefault("ai_tokens_remaining", AI_TOKEN_INITIAL_GRANT)
+    user.setdefault("ai_tokens_used", 0)
     user.setdefault("proficiency", "")
     user.setdefault("learning_style", "")
     user.setdefault("specialization", "")
@@ -1050,6 +1096,11 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user.setdefault("last_goal_met_date", None)
     
     return user
+
+
+@api_router.get("/ai/tokens")
+async def get_ai_token_balance(user: dict = Depends(get_current_user)):
+    return await _ensure_ai_token_balance(user["user_id"])
 
 
 async def get_current_user_optional(authorization: Optional[str] = Header(None)):
@@ -2476,7 +2527,8 @@ async def answer_question(inp: AnswerIn, user: dict = Depends(get_current_user))
 # ============================================================
 
 @api_router.post("/solve")
-async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current_user_optional)):
+async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current_user)):
+    await _consume_ai_token(user["user_id"])
     local_result = solve_math_local(req.question)
     if local_result:
         return {
@@ -2523,6 +2575,7 @@ async def solve_math_problem(req: SolveRequest, user: dict = Depends(get_current
 
 @api_router.post("/questions/generate")
 async def generate_questions(req: GenerateQuestionsRequest, user: dict = Depends(get_current_user)):
+    await _consume_ai_token(user["user_id"])
     cache_key = f"{req.level}|{req.subject}|{req.year}|{req.paper}|{req.count}"
     cached = await db.questions_cache.find_one({"cache_key": cache_key}, {"_id": 0})
     if cached:
@@ -2941,6 +2994,7 @@ async def teacher_overview(user: dict = Depends(get_current_user)):
 @api_router.post("/ai/chat/emergent")
 async def ai_chat_emergent(inp: ChatRequest, user: dict = Depends(get_current_user)):
     """Legacy route name and storage contract, served by Gemini/OpenRouter."""
+    await _consume_ai_token(user["user_id"])
     history = await db.chat_messages.find(
         {"user_id": user["user_id"], "session_id": inp.session_id},
         {"_id": 0},
@@ -2997,6 +3051,7 @@ async def ai_solution(inp: SolutionIn, user: dict = Depends(get_current_user)):
     """
     Generate a step‑by‑step solution with narration using OpenRouter.
     """
+    await _consume_ai_token(user["user_id"])
     system = (
         "You are a GCE examiner-tutor. Given a question, produce a JSON object with these keys:\n"
         "- title: short problem title (max 8 words)\n"
@@ -3069,6 +3124,7 @@ async def _load_ai_session_history(user_id: str, session_id: str) -> list:
 
 @api_router.post("/ai/chat")
 async def ai_chat(req: ChatRequest, user: dict = Depends(get_current_user)):
+    await _consume_ai_token(user["user_id"])
     session_id = (req.session_id or "").strip() or f"chat_{uuid.uuid4().hex[:12]}"
     session = await db.ai_sessions.find_one({"session_id": session_id, "user_id": user["user_id"]}, {"_id": 0})
     if not session:
@@ -3261,6 +3317,7 @@ async def ai_health():
 async def ai_explain(req: ChatRequest, user: dict = Depends(get_current_user)):
     # GCSharp tutor brain: local solver -> knowledge base -> web research
     # -> Gemini/OpenRouter synthesis, with clickable source citations.
+    await _consume_ai_token(user["user_id"])
     outcome = await gc_ai.answer_question(
         db,
         req.message,
@@ -3305,6 +3362,7 @@ async def ai_voice(req: VoiceRequest, user: dict = Depends(get_current_user)):
     key = hashlib.sha1(
         f"{req.lang}|{req.voice}|{req.text}".encode("utf-8", "ignore")
     ).hexdigest()
+    await _consume_ai_token(user["user_id"])
     if key in _TTS_CACHE:
         return _TTS_CACHE[key]
 
@@ -3341,6 +3399,7 @@ async def ai_transcribe(
     if not raw:
         return {"text": "", "engine": None, "fallback": True}
 
+    await _consume_ai_token(user["user_id"])
     try:
         out = await gc_ai.transcribe_audio(
             raw, filename=file.filename or "clip.m4a", lang=lang or "en-US"
@@ -3370,6 +3429,7 @@ async def ai_knowledge_stats(user: dict = Depends(get_current_user)):
 @api_router.get("/ai/knowledge/search")
 async def ai_knowledge_search(q: str, user: dict = Depends(get_current_user)):
     """Search what GC AI has already learned (TF-IDF cosine matching)."""
+    await _consume_ai_token(user["user_id"])
     kb = gc_ai.KnowledgeBase(db)
     match = await kb.find_match(q)
     if not match:
@@ -4317,7 +4377,11 @@ def _strip_reasoning_preamble(text: str) -> str:
 # ============================================================
 
 @api_router.post("/papers/ask")
-async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user_optional)):
+async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user)):
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(400, "Question is required.")
+    await _consume_ai_token(user["user_id"])
     p = await db.papers.find_one({"paper_id": req.paper_id}, {"_id": 0})
     subject = p["subject"] if p else "General"
     system = (
@@ -4338,7 +4402,7 @@ async def ask_about_paper(req: AskRequest, user: dict = Depends(get_current_user
     )
     try:
         resp, _provider = await _generate_ai_text(
-            f"Question:\n\n{req.question}", system=system,
+            f"Question:\n\n{question}", system=system,
             max_tokens=QA_MAX_TOKENS, timeout=QA_TIMEOUT)
     except HTTPException:
         raise
@@ -4391,6 +4455,7 @@ def _normalise_qa_items(raw_items: list) -> list:
 @api_router.post("/papers/{paper_id}/qa")
 async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user)):
     p = await _load_paper_or_404(paper_id)
+    await _consume_ai_token(user["user_id"])
     cached = await db.paper_qa_cache.find_one({"paper_id": paper_id}, {"_id": 0})
     if cached:
         return {"items": _normalise_qa_items(cached.get("items")), "cached": True}
@@ -4425,6 +4490,7 @@ async def generate_paper_qa(paper_id: str, user: dict = Depends(get_current_user
 @api_router.post("/papers/{paper_id}/video")
 async def generate_video_solution(paper_id: str, user: dict = Depends(get_current_user)):
     p = await _load_paper_or_404(paper_id)
+    await _consume_ai_token(user["user_id"])
     cached = await db.paper_video_cache.find_one({"paper_id": paper_id}, {"_id": 0})
     if cached:
         return {"scenes": cached["scenes"], "title": cached.get("title", p.get("title", "")),
@@ -4477,6 +4543,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
 
     text_hash = hashlib.sha256(req.text.encode("utf-8")).hexdigest()[:16]
     cache_key = f"{paper_id}_{text_hash}"
+    await _consume_ai_token(user["user_id"])
     cached = await db.highlight_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
     if cached:
         return {"scenes": cached["scenes"], "title": cached["title"], "question": cached["question"], "cached": True}
@@ -4611,6 +4678,7 @@ async def text_to_video(req: TextToVideoRequest,
         raise HTTPException(400, "Provide a topic or some text to build the lesson from.")
     cache_key = "t2v_" + hashlib.sha256(
         f"{text}|{req.subject}|{req.level}|{req.lesson_focus}".encode()).hexdigest()[:24]
+    await _consume_ai_token(user["user_id"])
     cached = await db.text_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
     if cached:
         return {**cached, "cached": True}
@@ -4652,6 +4720,7 @@ async def pdf_to_video(file: UploadFile, user: dict = Depends(get_current_user))
     filename = (file.filename or "document.pdf")[:80]
     cache_key = "p2v_" + hashlib.sha256(
         f"{filename}|{len(content)}|{text[:500]}".encode()).hexdigest()[:24]
+    await _consume_ai_token(user["user_id"])
     cached = await db.text_video_cache.find_one({"cache_key": cache_key}, {"_id": 0})
     if cached:
         return {**cached, "cached": True}
@@ -5093,6 +5162,16 @@ def _group_ai_history(messages: List[dict], limit: int = 12) -> str:
     return "\n".join(lines)
 
 
+def _is_group_ai_trigger(payload: dict) -> bool:
+    kind = str(payload.get("kind") or "text").strip().lower()
+    text = str(payload.get("text") or payload.get("question") or "").strip()
+    return (
+        kind in ("text", "highlight", "question")
+        and text.lower().lstrip().startswith("@ai")
+        and bool(text[3:].strip())
+    )
+
+
 async def _answer_group_ai(db, group: dict, question: str, asker: dict) -> Dict:
     """Answer a group question with the shared GC AI brain (non-streaming)."""
     history_docs = await db.study_group_messages.find(
@@ -5355,6 +5434,8 @@ async def post_group_message_http(group_id: str, payload: dict,
     if not g:
         raise HTTPException(404, "Group not found")
     _require_group_member(g, user["user_id"])
+    if _is_group_ai_trigger(payload or {}):
+        await _consume_ai_token(user["user_id"])
     msg = await _store_group_message(g, user, payload or {})
     await _broadcast_group(group_id, {"type": "message", "message": msg})
     asyncio.create_task(_maybe_answer_group_ai(group_id, msg, dict(user)))
@@ -5371,6 +5452,7 @@ async def ask_group_ai_http(group_id: str, payload: dict,
     question = str((payload or {}).get("question") or (payload or {}).get("text") or "").strip()
     if not question:
         raise HTTPException(400, "Question is required")
+    await _consume_ai_token(user["user_id"])
     qmsg = await _store_group_message(g, user, {"kind": "text", "text": question})
     await _broadcast_group(group_id, {"type": "message", "message": qmsg})
     fresh = await db.study_groups.find_one({"group_id": group_id}, {"_id": 0})
@@ -5665,12 +5747,15 @@ async def websocket_study_group(websocket: WebSocket, group_id: str,
                             await websocket.send_json({"type": "error",
                                                        "message": "Question is required"})
                             continue
+                        await _consume_ai_token(user["user_id"])
                         qmsg = await _store_group_message(
                             fresh, user, {"kind": "text", "text": question})
                         await _broadcast_group(group_id, {"type": "message",
                                                           "message": qmsg})
                         asyncio.create_task(_reply_group_ai(fresh, qmsg, dict(user)))
                     else:
+                        if _is_group_ai_trigger(data):
+                            await _consume_ai_token(user["user_id"])
                         msg = await _store_group_message(fresh, user, data)
                         await _broadcast_group(group_id, {"type": "message",
                                                           "message": msg})
@@ -5790,6 +5875,7 @@ try:
         create_notification=create_notification,
         get_current_user=get_current_user,
         get_current_user_optional=get_current_user_optional,
+        consume_ai_token=_consume_ai_token,
         media_dir=str(FEED_MEDIA_DIR),
         media_base_url=(APP_URL.rstrip("/") + "/api/feed/media"),
     )

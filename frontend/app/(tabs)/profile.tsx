@@ -176,7 +176,7 @@ import { useTheme } from "@/src/theme-context";
 
 // app/(tabs)/profile.tsx
 import { useCallback, useEffect, useState } from "react";
-import { View, Text, StyleSheet, Pressable, ScrollView, Image, Switch, Linking } from "react-native";
+import { View, Text, StyleSheet, Pressable, ScrollView, Image, Switch, Linking, Alert } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter, useFocusEffect } from "expo-router";
@@ -187,6 +187,7 @@ import { useAuth } from "@/src/auth";
 import { storage } from "@/src/utils/storage";
 import { useLanguage, type Lang } from "@/src/i18n";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
+import { api } from "@/src/api";
 
 const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
 const HELP_CENTER_URL = "https://support.gcsharp.com";
@@ -197,6 +198,23 @@ export default function Profile() {
   const { user, logout, refresh } = useAuth();
   const { t, lang, setLang } = useLanguage();
   const router = useRouter();
+  const [aiTokens, setAiTokens] = useState<number | null>(null);
+  const [aiTokensLoading, setAiTokensLoading] = useState(true);
+  const [aiTokensError, setAiTokensError] = useState(false);
+
+  const loadAiTokens = useCallback(async () => {
+    setAiTokensLoading(true);
+    setAiTokensError(false);
+    try {
+      const balance = await api<{ remaining: number }>("/ai/tokens");
+      setAiTokens(balance.remaining);
+    } catch (error) {
+      console.error("Failed to load AI token balance", error);
+      setAiTokensError(true);
+    } finally {
+      setAiTokensLoading(false);
+    }
+  }, []);
 
   // === Offline mode toggle ===
   const [isOffline, setIsOffline] = useState(false);
@@ -229,8 +247,18 @@ export default function Profile() {
   useFocusEffect(
     useCallback(() => {
       refresh();
-    }, [refresh])
+      void loadAiTokens();
+    }, [refresh, loadAiTokens])
   );
+
+  const openTokenPurchase = async () => {
+    try {
+      await Linking.openURL("https://gcsharp.com/pay");
+    } catch (error) {
+      console.error("Could not open the AI token purchase page", error);
+      Alert.alert("Unable to open page", "Please try again later.");
+    }
+  };
 
   const getInitials = (name?: string) => {
     if (!name) return "U";
@@ -390,6 +418,42 @@ export default function Profile() {
           <Metric icon="star" label={t.home.xp} value={String(user?.xp ?? 0)} tint={theme.success} />
         </View>
 
+        <View style={styles.tokenCard} testID="ai-token-balance-card">
+          <View style={styles.tokenDetails}>
+            <View style={[styles.modeIconWrap, { backgroundColor: theme.brandTertiary }]}>
+              <Ionicons name="flash-outline" size={18} color={theme.onBrandTertiary} />
+            </View>
+            <View style={styles.tokenCopy}>
+              <Text style={styles.modeTitle}>GC AI tokens</Text>
+              <Text style={styles.modeSub}>
+                {aiTokensLoading
+                  ? "Loading balance..."
+                  : aiTokensError
+                    ? "Balance unavailable. Tap to retry."
+                    : "Tokens remaining"}
+              </Text>
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={aiTokensError ? "Retry loading AI token balance" : `AI tokens remaining: ${aiTokens ?? 0}`}
+              disabled={aiTokensLoading}
+              onPress={() => aiTokensError && void loadAiTokens()}
+              style={styles.tokenBalanceButton}
+            >
+              <Text style={styles.tokenBalance}>{aiTokensLoading ? "—" : aiTokensError ? "Retry" : aiTokens}</Text>
+            </Pressable>
+          </View>
+          <Pressable
+            accessibilityRole="link"
+            onPress={() => void openTokenPurchase()}
+            style={styles.tokenPurchaseButton}
+            testID="buy-ai-tokens"
+          >
+            <Text style={styles.tokenPurchaseText}>Get more tokens</Text>
+            <Ionicons name="open-outline" size={16} color={theme.onBrandPrimary} />
+          </Pressable>
+        </View>
+
         <Row icon="home-outline" label={t.tabs.home} onPress={() => router.push("/(tabs)/index")} testID="row-dashboard" />
         <Row icon="create-outline" label={t.profile.editProfile} onPress={() => router.push("/edit-profile")} testID="row-edit" />
         <Row icon="stats-chart-outline" label={t.stats.title} onPress={() => router.push("/stats")} testID="row-stats" />
@@ -501,6 +565,39 @@ const createStyles = (t: Palette) => StyleSheet.create({
   },
   modeTitle: { fontWeight: "700", color: t.onSurface, fontSize: 14 },
   modeSub: { color: t.onSurfaceMuted, fontSize: 12, marginTop: 1 },
+  tokenCard: {
+    backgroundColor: t.surfaceSecondary,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    gap: spacing.md,
+    ...shadow1,
+  },
+  tokenDetails: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  tokenCopy: { flex: 1 },
+  tokenBalanceButton: {
+    minWidth: 54,
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: spacing.sm,
+    borderRadius: radii.md,
+    backgroundColor: t.surfaceTertiary,
+  },
+  tokenBalance: { color: t.brandPrimary, fontSize: 20, fontWeight: "800" },
+  tokenPurchaseButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    backgroundColor: t.brandPrimary,
+    paddingVertical: spacing.sm,
+    borderRadius: radii.md,
+  },
+  tokenPurchaseText: { color: t.onBrandPrimary, fontWeight: "700" },
   segRow: {
     flexDirection: "row",
     backgroundColor: t.surfaceTertiary,

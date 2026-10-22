@@ -474,7 +474,7 @@ async def _generate_ai_answer(db, post: Dict[str, Any],
 
 def build_feed_router(*, db, manager, emit_event, create_notification,
                       get_current_user, get_current_user_optional,
-                      media_dir: str, media_base_url: str):
+                      consume_ai_token, media_dir: str, media_base_url: str):
     router = APIRouter(prefix="/feed", tags=["learning-feed"])
 
     # ---------------- create post ----------------
@@ -490,6 +490,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         if not _has_post_question(title, body, media):
             raise HTTPException(
                 400, "Add text or attach a question image before posting.")
+        await consume_ai_token(uid)
         qtype = payload.question_type if payload.question_type in VALID_QUESTION_TYPES else "question"
         level = payload.exam_level if payload.exam_level in VALID_EXAM_LEVELS else "General"
         now = datetime.utcnow().isoformat()
@@ -672,6 +673,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
         )
         question_changed = content_changed or media_input is not None
         if question_changed:
+            await consume_ai_token(user["user_id"])
             updates.update({
                 "ai_answer": None,
                 "ai_citations": [],
@@ -874,6 +876,7 @@ def build_feed_router(*, db, manager, emit_event, create_notification,
             return {"ai_status": "generating"}
         if not _rate_limit(f"airetry:{user['user_id']}", 10, window_seconds=600):
             raise HTTPException(429, "Too many AI retries. Try again later.")
+        await consume_ai_token(user["user_id"])
         import asyncio
         asyncio.create_task(_generate_ai_answer(db, post, emit_event,
                                                  create_notification))

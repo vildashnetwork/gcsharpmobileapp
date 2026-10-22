@@ -250,9 +250,8 @@ import {
   ScrollView,
   Pressable,
   ActivityIndicator,
-  SafeAreaView,
-  useSafeAreaInsets,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { theme, spacing, radii, shadow1 } from '@/src/theme';
@@ -260,6 +259,7 @@ import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from '@/src/api';
 import { useReadingTimer } from '@/src/hooks/useReadingTimer';
 import { StreakBadge } from '@/src/components/StreakBadge';
+import { gcAiErrorMessage } from '@/src/lib/gcAiMessage';
 
 // Replace with your actual PDF viewer (e.g., react-native-pdf)
 const PDFView = ({ url }: { url: string }) => (
@@ -292,6 +292,7 @@ export default function MCQViewer() {
   const [qaLoading, setQaLoading] = useState(false);
   const [video, setVideo] = useState<any>(null);
   const [videoLoading, setVideoLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   // === READING TIMER ===
   const { displaySeconds } = useReadingTimer(id);
@@ -300,9 +301,9 @@ export default function MCQViewer() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await api.get(`/papers/${id}`);
-        setPaper(res.data);
-        setDraftSaved(res.data.saved || false);
+        const res = await api<Paper>(`/papers/${id}`);
+        setPaper(res);
+        setDraftSaved(res.saved || false);
       } catch {
         // handle error
       } finally {
@@ -314,7 +315,10 @@ export default function MCQViewer() {
   // === DRAFT TOGGLE ===
   const toggleDraft = async () => {
     try {
-      const { data } = await api.post('/drafts', { paper_id: id });
+      const data = await api<{ saved: boolean }>('/drafts', {
+        method: 'POST',
+        body: { paper_id: id },
+      });
       setDraftSaved(data.saved);
     } catch {
       // error
@@ -324,11 +328,12 @@ export default function MCQViewer() {
   // === GENERATE Q&A ===
   const generateQA = async () => {
     setQaLoading(true);
+    setAiError(null);
     try {
-      const { data } = await api.post(`/papers/${id}/qa`);
+      const data = await api<{ items?: any[] }>(`/papers/${id}/qa`, { method: 'POST' });
       setQaItems(data.items || []);
-    } catch {
-      // error
+    } catch (error) {
+      setAiError(gcAiErrorMessage(error, "GC AI could not generate solutions. Please try again."));
     } finally {
       setQaLoading(false);
     }
@@ -337,11 +342,12 @@ export default function MCQViewer() {
   // === GENERATE VIDEO ===
   const generateVideo = async () => {
     setVideoLoading(true);
+    setAiError(null);
     try {
-      const { data } = await api.post(`/papers/${id}/video`);
+      const data = await api<any>(`/papers/${id}/video`, { method: 'POST' });
       setVideo(data);
-    } catch {
-      // error
+    } catch (error) {
+      setAiError(gcAiErrorMessage(error, "GC AI could not build the video solution. Please try again."));
     } finally {
       setVideoLoading(false);
     }
@@ -436,6 +442,7 @@ export default function MCQViewer() {
               </Text>
             </Pressable>
           )}
+          {aiError && <Text accessibilityRole="alert" style={styles.aiError}>{aiError}</Text>}
         </View>
 
         {/* Q&A List */}
@@ -528,6 +535,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
   aiHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
   aiTitle: { fontWeight: '600', fontSize: 16 },
   aiSub: { fontSize: 12, color: t.onSurfaceMuted, marginBottom: 12 },
+  aiError: { color: t.error, fontSize: 13, fontWeight: '600', marginTop: spacing.sm },
   aiButton: {
     backgroundColor: t.brandPrimary,
     paddingVertical: 12,
