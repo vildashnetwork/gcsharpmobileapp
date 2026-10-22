@@ -9,7 +9,12 @@
 export function pdfHtml(
   pdfUrl: string,
   page = 1,
-  opts: { pdfjsRuntime?: string; pdfjsWorker?: string; interactive?: boolean } = {}
+  opts: {
+    pdfjsRuntime?: string;
+    pdfjsWorker?: string;
+    interactive?: boolean;
+    copyOnly?: boolean;
+  } = {}
 ): string {
   // The runtime is normally inlined by the caller (app/pdf.tsx resolves the
   // bundled assets). If it wasn't provided, fall back to the CDN so the
@@ -23,7 +28,10 @@ export function pdfHtml(
       pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
     } catch (e) { pdfjsLib.GlobalWorkerOptions.workerSrc = ""; }`
     : `pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";`;
-  const popupMarkup = opts.interactive === false ? "" : `
+  const popupMarkup = opts.copyOnly ? `
+  <div id="popup">
+    <button class="primary" id="copyBtn">Copy text</button>
+  </div>` : opts.interactive === false ? "" : `
   <div id="popup">
     <button class="primary" id="askBtn">Ask GC AI</button>
     <button class="warn" id="videoBtn">Video</button>
@@ -91,6 +99,7 @@ ${runtimeTag}
     .replace(/&/g, "\\u0026")};
   const START_PAGE = ${page};
   const INTERACTIVE = ${opts.interactive !== false};
+  const COPY_ONLY = ${opts.copyOnly === true};
   const post = (msg) => window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(msg));
   ${workerSetup}
 
@@ -227,7 +236,7 @@ ${runtimeTag}
     }
   }
 
-  if (INTERACTIVE) {
+  if (INTERACTIVE || COPY_ONLY) {
     function hidePopup() {
       if (selectionTimer) clearTimeout(selectionTimer);
       document.getElementById("popup").style.display = "none";
@@ -270,24 +279,33 @@ ${runtimeTag}
       } catch (e) { hidePopup(); }
     });
 
-    document.getElementById("askBtn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      post({ type: "ask", text: currentSelection, page: currentPage });
-      hidePopup();
-      window.getSelection && window.getSelection().removeAllRanges();
-    });
-    document.getElementById("videoBtn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      post({ type: "video", text: currentSelection, page: currentPage });
-      hidePopup();
-      window.getSelection && window.getSelection().removeAllRanges();
-    });
-    document.getElementById("saveBtn").addEventListener("click", (e) => {
-      e.stopPropagation();
-      post({ type: "draft", text: currentSelection, page: currentPage });
-      hidePopup();
-      window.getSelection && window.getSelection().removeAllRanges();
-    });
+    if (COPY_ONLY) {
+      document.getElementById("copyBtn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        post({ type: "copy", text: currentSelection });
+        hidePopup();
+        window.getSelection && window.getSelection().removeAllRanges();
+      });
+    } else {
+      document.getElementById("askBtn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        post({ type: "ask", text: currentSelection, page: currentPage });
+        hidePopup();
+        window.getSelection && window.getSelection().removeAllRanges();
+      });
+      document.getElementById("videoBtn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        post({ type: "video", text: currentSelection, page: currentPage });
+        hidePopup();
+        window.getSelection && window.getSelection().removeAllRanges();
+      });
+      document.getElementById("saveBtn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        post({ type: "draft", text: currentSelection, page: currentPage });
+        hidePopup();
+        window.getSelection && window.getSelection().removeAllRanges();
+      });
+    }
   }
 
   render();

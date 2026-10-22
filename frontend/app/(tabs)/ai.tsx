@@ -145,7 +145,7 @@ export default function AITutor() {
   const { user } = useAuth();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ seed?: string }>();
+  const params = useLocalSearchParams<{ seed?: string; s?: string | string[] }>();
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -177,6 +177,7 @@ export default function AITutor() {
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
   const seededRef = useRef(false);
+  const openedSessionRef = useRef<string | null>(null);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const typingMessages = [
     "Checking your question",
@@ -237,6 +238,22 @@ export default function AITutor() {
       console.error("Failed to load chat:", error);
     }
   };
+
+  const loadChatRef = useRef(loadChat);
+  useEffect(() => {
+    loadChatRef.current = loadChat;
+  }, [loadChat]);
+
+  useEffect(() => {
+    const sessionId = Array.isArray(params.s) ? params.s[0] : params.s;
+    if (!sessionId) {
+      openedSessionRef.current = null;
+      return;
+    }
+    if (openedSessionRef.current === sessionId) return;
+    openedSessionRef.current = sessionId;
+    void loadChatRef.current(sessionId);
+  }, [params.s]);
 
   // ----- Delete a chat -----
   const deleteChat = async (sessionId: string) => {
@@ -1420,9 +1437,6 @@ let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => {
   styles = createStyles(getPaletteSnapshot());
 });
-
-
-
 
 
 

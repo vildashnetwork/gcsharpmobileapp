@@ -11,14 +11,12 @@ import {
   Dimensions,
   FlatList,
   Image,
-  Modal,
-  TouchableOpacity,
   Animated,
   Easing,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
@@ -261,10 +259,19 @@ export default function Home() {
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [error, setError] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [loadingNotifications, setLoadingNotifications] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+
+  useFocusEffect(useCallback(() => {
+    let active = true;
+    api<Notification[]>("/notifications")
+      .then((items) => {
+        if (active) setUnreadCount(items.filter((notification) => !notification.read).length);
+      })
+      .catch((cause) => {
+        console.warn("[notifications] could not refresh dashboard unread count:", cause);
+      });
+    return () => { active = false; };
+  }, []));
 
   // ----- Live notifications over WebSocket -----
   // Backend pushes a JSON notification object the instant one is created
@@ -282,7 +289,6 @@ export default function Home() {
     ws.onmessage = (event) => {
       try {
         const incoming: Notification = JSON.parse(event.data);
-        setNotifications((prev) => [incoming, ...prev]);
         if (!incoming.read) setUnreadCount((prev) => prev + 1);
       } catch (err) {
         console.error("Failed to parse incoming notification:", err);
@@ -325,19 +331,7 @@ export default function Home() {
         return res;
       });
 
-      // Backend returns a plain array from GET /notifications, not
-      // { notifications: [...] } — matching that here is what actually
-      // makes notifications show up in the bell/modal.
-      const notificationsPromise = api<Notification[]>("/notifications").then((res) => {
-        const notifs = res || [];
-        setNotifications(notifs);
-        const unread = notifs.filter((n) => !n.read).length;
-        setUnreadCount(unread);
-        setLoadingProgress((p) => Math.min(p + 10, 95));
-        return res;
-      });
-
-      await Promise.all([statsPromise, leaderboardPromise, coursesPromise, notificationsPromise]);
+      await Promise.all([statsPromise, leaderboardPromise, coursesPromise]);
       setLoadingProgress(100);
       await new Promise((resolve) => setTimeout(resolve, 300));
       setLoading(false);
@@ -358,42 +352,6 @@ export default function Home() {
     setLoadingProgress(0);
     await loadData();
     setRefreshing(false);
-  };
-
-  // Mark a single notification as read.
-  // api() has the signature api<T>(url, { method, body }) — there is no
-  // api.put(...) helper, so that call was throwing silently before.
-  const markAsRead = async (notificationId: string) => {
-    try {
-      await api<{ ok: boolean }>(`/notifications/${notificationId}/read`, { method: "PUT" });
-      setNotifications((prev) =>
-        prev.map((n) => (n._id === notificationId ? { ...n, read: true } : n))
-      );
-      setUnreadCount((prev) => Math.max(0, prev - 1));
-    } catch (err) {
-      console.error("Failed to mark as read:", err);
-    }
-  };
-
-  const markAllAsRead = async () => {
-    try {
-      await api<{ ok: boolean }>("/notifications/read-all", { method: "PUT" });
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-      setUnreadCount(0);
-    } catch (err) {
-      console.error("Failed to mark all as read:", err);
-    }
-  };
-
-  const handleNotificationPress = (notification: Notification) => {
-    if (!notification.read) {
-      markAsRead(notification._id);
-    }
-    if (notification.link) {
-      // router.push(notification.link);
-      // console.log(notification.link)
-      setModalVisible(false);
-    }
   };
 
   const data = stats;
@@ -437,7 +395,7 @@ export default function Home() {
           </View>
           <View style={styles.headerActions}>
             <LanguageSwitcher />
-            <Pressable style={styles.bell} onPress={() => setModalVisible(true)} testID="notifications-btn">
+            <Pressable style={styles.bell} onPress={() => router.push("/notifications")} testID="notifications-btn">
               <Ionicons name="notifications-outline" size={22} color={theme.brand} />
               {unreadCount > 0 && (
                 <View style={styles.badge}>
@@ -660,79 +618,6 @@ export default function Home() {
         </View>
       </ScrollView>
 
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={modalVisible}
-        onRequestClose={() => setModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={styles.modalHandle} />
-
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{t.home.notifications}</Text>
-              <View style={styles.modalHeaderActions}>
-                {unreadCount > 0 && (
-                  <TouchableOpacity onPress={markAllAsRead} style={styles.markAllBtn}>
-                    <Text style={styles.markAllText}>{t.home.markAllRead}</Text>
-                  </TouchableOpacity>
-                )}
-                <TouchableOpacity onPress={() => setModalVisible(false)} style={styles.closeBtn}>
-                  <Ionicons name="close" size={24} color={theme.onSurface} />
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {loadingNotifications ? (
-              <View style={styles.modalLoading}>
-                <Text style={styles.modalLoadingText}>{t.home.loadingNotifications}</Text>
-              </View>
-            ) : notifications.length === 0 ? (
-              <View style={styles.emptyNotifications}>
-                <Ionicons name="notifications-off-outline" size={48} color={theme.onSurfaceMuted} />
-                <Text style={styles.emptyNotificationsText}>{t.home.noNotifications}</Text>
-                <Text style={styles.emptyNotificationsSub}>{t.home.checkBackLater}</Text>
-              </View>
-            ) : (
-              <ScrollView style={styles.notificationList}>
-                {notifications.map((notification) => (
-                  <Pressable
-                    key={notification._id}
-                    style={[styles.notificationItem, notification.read && styles.notificationRead]}
-                    onPress={() => handleNotificationPress(notification)}
-                  >
-                    <View style={styles.notificationIcon}>
-                      {notification.type === "streak" && (
-                        <Ionicons name="flame" size={20} color={theme.warning} />
-                      )}
-                      {notification.type === "reminder" && (
-                        <Ionicons name="time-outline" size={20} color={theme.brandPrimary} />
-                      )}
-                      {notification.type === "ai_reply" && (
-                        <Ionicons name="chatbubble-ellipses" size={20} color={theme.brandPrimary} />
-                      )}
-                      {(!notification.type || notification.type === "info") && (
-                        <Ionicons name="information-circle" size={20} color={theme.brand} />
-                      )}
-                    </View>
-                    <View style={styles.notificationContent}>
-                      <Text style={[styles.notificationMessage, notification.read && styles.notificationMessageRead]}>
-                        {notification.message}
-                      </Text>
-                      <Text style={styles.notificationTime}>
-                        {new Date(notification.created_at).toLocaleDateString()} ·{" "}
-                        {new Date(notification.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </Text>
-                    </View>
-                    {!notification.read && <View style={styles.unreadDot} />}
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -933,51 +818,6 @@ const createStyles = (t: Palette) => StyleSheet.create({
     borderColor: t.border,
   },
   leaderboardAvatarText: { fontSize: 11, fontWeight: "700", color: t.brand },
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  modalContainer: { backgroundColor: t.surfaceSecondary, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingBottom: spacing.lg },
-  modalHandle: { alignSelf: "center", width: 40, height: 4, borderRadius: 2, backgroundColor: t.borderStrong, marginTop: 8, marginBottom: 8, opacity: 0.4 },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: t.divider,
-  },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: t.onSurface },
-  modalHeaderActions: { flexDirection: "row", alignItems: "center", gap: 12 },
-  markAllBtn: { paddingVertical: 4, paddingHorizontal: 8 },
-  markAllText: { fontSize: 13, color: t.brandPrimary, fontWeight: "600" },
-  closeBtn: { padding: 4 },
-  modalLoading: { padding: spacing.xl, alignItems: "center" },
-  modalLoadingText: { color: t.onSurfaceMuted },
-  emptyNotifications: { padding: spacing.xl, alignItems: "center", gap: 8 },
-  emptyNotificationsText: { fontSize: 16, fontWeight: "600", color: t.onSurface },
-  emptyNotificationsSub: { fontSize: 14, color: t.onSurfaceMuted },
-  notificationList: { paddingHorizontal: spacing.lg },
-  notificationItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: t.divider,
-    gap: 12,
-  },
-  notificationRead: { opacity: 0.6 },
-  notificationIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: t.surfaceTertiary,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  notificationContent: { flex: 1 },
-  notificationMessage: { fontSize: 14, color: t.onSurface, lineHeight: 20 },
-  notificationMessageRead: { color: t.onSurfaceMuted },
-  notificationTime: { fontSize: 11, color: t.onSurfaceMuted, marginTop: 2 },
-  unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: t.brandPrimary, marginLeft: 4 },
   loaderOverlay: {
     position: "absolute",
     top: 0,

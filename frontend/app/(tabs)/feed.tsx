@@ -51,7 +51,7 @@ export type FeedPost = {
   created_at: string; liked?: boolean; saved?: boolean;
 };
 
-type QuickFilter = "all" | "verified" | "unanswered" | "video";
+type QuickFilter = "all" | "verified" | "unanswered" | "video" | "saved";
 
 const AI_COLLAPSE_CHARS = 320;
 const BODY_COLLAPSE_CHARS = 220;
@@ -408,6 +408,15 @@ export default function LearningFeedScreen() {
     const requestId = ++loadRequestId.current;
     try {
       setError(null);
+      if (quickFilter === "saved") {
+        const data = await api<{ items: FeedPost[] }>("/feed/saved");
+        if (requestId !== loadRequestId.current) return;
+        setPosts(data.items || []);
+        setHasMore(false);
+        setCursor(null);
+        return;
+      }
+
       const params = new URLSearchParams({ limit: "20", sort });
       if (subject) params.set("subject", subject);
       if (searchQuery) params.set("q", searchQuery);
@@ -434,7 +443,7 @@ export default function LearningFeedScreen() {
       }
     }
   }, [sort, subject, searchQuery, topicFilter, examLevelFilter,
-    questionTypeFilter, cursor]);
+    questionTypeFilter, cursor, quickFilter]);
   const loadRef = useRef(load);
   useEffect(() => {
     loadRef.current = load;
@@ -451,7 +460,7 @@ export default function LearningFeedScreen() {
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sort, subject, searchQuery, topicFilter, examLevelFilter,
-    questionTypeFilter]);
+    questionTypeFilter, quickFilter]);
 
   useFocusEffect(useCallback(() => {
     if (hasFocusedBefore.current) {
@@ -493,6 +502,7 @@ export default function LearningFeedScreen() {
     }
     if (quickFilter === "unanswered") return !post.ai_answer;
     if (quickFilter === "video") return post.media?.some((media) => media.type === "video");
+    if (quickFilter === "saved") return post.saved;
     return true;
   }), [posts, quickFilter]);
 
@@ -601,6 +611,7 @@ export default function LearningFeedScreen() {
     { key: "verified", label: "AI verified" },
     { key: "unanswered", label: unansweredCount > 0 ? `Unanswered · ${unansweredCount}` : "Unanswered" },
     { key: "video", label: "Videos" },
+    { key: "saved", label: "Saved" },
   ];
 
   return (

@@ -1408,8 +1408,7 @@ async def login_user(req: LoginRequest, response: Response):
     await create_notification(
         user["user_id"],
         f"Welcome back, {user.get('full_name', 'Student')}! Keep up your study streak.",
-        "info",
-        "/dashboard"
+        "info"
     )
     return {"token": session_token, "user": user}
 
@@ -1509,8 +1508,7 @@ async def process_session(request: Request, response: Response):
     await create_notification(
         user_id,
         f"Welcome back, {user.get('full_name', 'Student')}! Ready to learn?",
-        "info",
-        "/dashboard"
+        "info"
     )
     return {"session_token": session_token, "user": user}
 
@@ -1648,7 +1646,7 @@ async def register_with_pin(
     )
 
     # Send welcome notification
-    await create_notification(user_id, "Account created! Start your learning journey.", "info", "/dashboard")
+    await create_notification(user_id, "Account created! Start your learning journey.", "info")
 
     return {
         "token": session_token,
@@ -1748,8 +1746,7 @@ async def pin_login(
     await create_notification(
         user["user_id"],
         f"Welcome back, {fresh_user.get('full_name', 'Student')}!",
-        "info",
-        "/dashboard"
+        "info"
     )
 
     return {
@@ -1807,8 +1804,7 @@ async def biometric_login(
     await create_notification(
         user["user_id"],
         f"Welcome back, {user.get('full_name', 'Student')}!",
-        "info",
-        "/dashboard"
+        "info"
     )
 
     return {
@@ -2001,8 +1997,7 @@ async def verify_phone_otp(req: PhoneVerifyRequest, response: Response):
         await create_notification(
             user["user_id"],
             f"Welcome, {user.get('full_name', 'Student')}!",
-            "info",
-            "/dashboard"
+            "info"
         )
 
         return {"success": True, "token": session_token, "user": public_user(user)}
@@ -2077,8 +2072,7 @@ async def exchange_session(request: Request, response: Response):
         await create_notification(
             user_id,
             f"Welcome back, {user.get('full_name', 'Student')}!",
-            "info",
-            "/dashboard"
+            "info"
         )
 
         return {"session_token": session_token, "user": user}
@@ -4889,7 +4883,7 @@ async def _streak_settle_yesterday(user: dict, yesterday):
         await create_notification(
             user_id,
             "You missed yesterday goal. Study today to start a new streak!",
-            "reminder", "/study")
+            "reminder")
     await db.reminder_log.insert_one({
         "user_id": user_id, "date": yesterday.isoformat(),
         "sent_at": now.isoformat()})
@@ -4919,7 +4913,7 @@ async def _streak_evening_nudge(user: dict, today):
                 await send_brevo_email(email, "Your streak needs you tonight!", note)
             except Exception as e:
                 logger.warning(f"Streak nudge email failed: {e}")
-        await create_notification(user_id, note, "reminder", "/study")
+        await create_notification(user_id, note, "reminder")
     else:
         try:
             fresh = await db.users.find_one(

@@ -233,7 +233,7 @@
 
 
 // app/_layout.tsx
-import { Stack, useRouter, type Href } from "expo-router";
+import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef, useState } from "react";
 import { LogBox, StatusBar, View, Text, StyleSheet, Modal, Pressable } from "react-native";
@@ -255,6 +255,7 @@ import {
   installNotificationResponseHandler,
   registerPushToken,
 } from "@/src/lib/pushNotifications";
+import { getNotificationHref } from "@/src/lib/notificationNavigation";
 
 LogBox.ignoreAllLogs(true);
 
@@ -385,7 +386,8 @@ function AppContent() {
       if (active && handledNotificationRef.current !== responseId) {
         handledNotificationRef.current = responseId;
         try {
-          router.push(link as Href);
+          const href = getNotificationHref(link);
+          if (href) router.push(href);
         } catch (error) {
           console.warn("[push] failed to open notification link:", error);
         }

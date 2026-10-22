@@ -13,7 +13,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, Image, Pressable, ScrollView, FlatList, Modal, StyleSheet,
-  ActivityIndicator,
+  ActivityIndicator, Clipboard, Platform,
   useWindowDimensions,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -345,10 +345,12 @@ function PdfPreview({ media, width, styles }: {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [pageCount, setPageCount] = useState<number | null>(null);
+  const [copyStatus, setCopyStatus] = useState("");
   const html = useMemo(() => pdfHtml(media.url, 1, {
     pdfjsRuntime: PDFJS_RUNTIME,
     pdfjsWorker: PDFJS_WORKER,
     interactive: false,
+    copyOnly: true,
   }), [media.url]);
   const baseUrl = API_BASE.replace(/\/api\/?$/, "");
   const togglePreview = () => {
@@ -367,9 +369,9 @@ function PdfPreview({ media, width, styles }: {
         <View style={styles.pdfDescription}>
           <Text style={styles.pdfTitle}>PDF document</Text>
           <Text style={styles.pdfSubtitle}>
-            {expanded
-              ? pageCount ? `${pageCount} pages · Scroll to read` : "Loading pages…"
-              : "Tap to preview and scroll through pages"}
+            {copyStatus || (expanded
+              ? pageCount ? `${pageCount} pages · Select text, then tap Copy` : "Loading pages…"
+              : "Tap to preview and scroll through pages")}
           </Text>
         </View>
         <Ionicons name={expanded ? "chevron-up" : "chevron-down"}
@@ -386,13 +388,31 @@ function PdfPreview({ media, width, styles }: {
             scrollEnabled
             onLoadEnd={() => setLoading(false)}
             onMessage={(event) => {
+              let message: { type?: string; pages?: number; text?: string };
               try {
-                const message = JSON.parse(event.nativeEvent.data);
-                if (message.type === "meta" && Number.isInteger(message.pages)) {
-                  setPageCount(message.pages);
-                }
+                message = JSON.parse(event.nativeEvent.data);
               } catch {
-                setPageCount(null);
+                return;
+              }
+              if (message.type === "meta" && typeof message.pages === "number" &&
+                Number.isInteger(message.pages)) {
+                setPageCount(message.pages);
+              } else if (message.type === "copy" && typeof message.text === "string") {
+                const text = message.text.trim();
+                if (!text) return;
+                if (Platform.OS === "web" && typeof navigator !== "undefined" &&
+                  navigator.clipboard) {
+                  void navigator.clipboard.writeText(text).then(
+                    () => setCopyStatus("Selected text copied to clipboard"),
+                    (error: unknown) => {
+                      console.warn("Could not copy selected PDF text:", error);
+                      setCopyStatus("Could not copy selected text");
+                    },
+                  );
+                } else {
+                  Clipboard.setString(text);
+                  setCopyStatus("Selected text copied to clipboard");
+                }
               }
             }}
             style={styles.pdfWebView}
