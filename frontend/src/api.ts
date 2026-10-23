@@ -210,9 +210,21 @@ export async function setToken(t: string | null) {
 
 export async function api<T = any>(
   path: string,
-  opts: { method?: string; body?: any; auth?: boolean } = {}
+  opts: {
+    method?: string;
+    body?: any;
+    auth?: boolean;
+    queueOffline?: boolean;
+    cacheFallback?: boolean;
+  } = {}
 ): Promise<T> {
-  const { method = "GET", body, auth = true } = opts;
+  const {
+    method = "GET",
+    body,
+    auth = true,
+    queueOffline = true,
+    cacheFallback = true,
+  } = opts;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (auth) {
@@ -224,7 +236,7 @@ export async function api<T = any>(
       console.log(`No auth token for ${path}`);
       // No token present at all — not a server rejection, just nothing to send.
       // GETs can still be served from the offline cache below.
-      if (method === "GET") {
+      if (method === "GET" && cacheFallback) {
         const cached = await readCachedGet<T>(path);
         if (cached !== null) return cached;
       }
@@ -249,7 +261,7 @@ export async function api<T = any>(
 
     // OFFLINE FALLBACK — GETs are served from the last cached response so
     // screens keep working with the app fully offline.
-    if (method === "GET") {
+    if (method === "GET" && cacheFallback) {
       const cached = await readCachedGet<T>(path);
       if (cached !== null) {
         console.log(`[offline] Serving cached GET ${path}`);
@@ -261,6 +273,12 @@ export async function api<T = any>(
     // sync worker when connectivity returns. Callers get a synthetic
     // success so optimistic UI keeps working.
     if (method !== "GET") {
+      if (!queueOffline) {
+        throw new ApiError(
+          "This action needs an internet connection to verify offline access.",
+          null
+        );
+      }
       await enqueueMutation(path, method, body, auth);
       console.log(`[offline] Queued ${method} ${path} for later sync`);
       return { __offlineQueued: true } as T;

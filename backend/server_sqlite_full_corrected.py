@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr, Field
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 import bcrypt
 import jwt as pyjwt
 import httpx
@@ -45,6 +46,11 @@ AI_TOKEN_INITIAL_GRANT = 100
 AI_TOKEN_EXHAUSTED_MESSAGE = (
     "AI tokens exhausted. Visit gcsharp.com/pay to add tokens and continue using GC AI."
 )
+OFFLINE_TRIAL_DAYS = 7
+OFFLINE_DAILY_PAPER_LIMIT = 10
+OFFLINE_DOWNLOAD_RETENTION_DAYS = 40
+OFFLINE_MANUAL_GRANT_EMAIL = "gcsmartsmart@gmail.com"
+OFFLINE_MANUAL_GRANT_ID = "gcsmartsmart-offline-7-days-2026-10-23"
 
 # Optional integrations (SMS OTP + scheduled jobs). Guarded so the app still
 # boots if these packages aren't installed yet — install with:
@@ -249,6 +255,10 @@ async def lifespan(app: FastAPI):
         # Existing indexes
         await db.users.create_index("email", unique=True)
         await db.users.create_index("user_id", unique=True)
+        await db.offline_paper_downloads.create_index(
+            [("user_id", 1), ("day", 1)], unique=True)
+        await db.offline_paper_downloads.create_index(
+            "expires_at", expireAfterSeconds=0)
         await db.user_sessions.create_index("session_token", unique=True)
         await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
         await db.subjects.create_index("subject_id", unique=True)
@@ -351,6 +361,27 @@ async def lifespan(app: FastAPI):
         await seed_all_data()
     except Exception as e:
         print(f"Seed data warning: {e}")
+
+    try:
+        now = datetime.now(timezone.utc)
+        await db.users.update_many(
+            {"offline_trial_expires_at": {"$exists": False}},
+            {"$set": _new_offline_trial_fields(now)},
+        )
+    except Exception as e:
+        logger.exception("Could not grant the one-time offline trial to legacy accounts: %s", e)
+
+    try:
+        await _grant_offline_trial_once(
+            OFFLINE_MANUAL_GRANT_EMAIL,
+            OFFLINE_MANUAL_GRANT_ID,
+        )
+    except Exception as e:
+        logger.exception(
+            "Could not apply the requested offline trial grant to %s: %s",
+            OFFLINE_MANUAL_GRANT_EMAIL,
+            e,
+        )
 
     if AsyncIOScheduler and IntervalTrigger:
         try:
@@ -731,6 +762,159 @@ async def _consume_ai_token(user_id: str) -> int:
     balance = await _ensure_ai_token_balance(user_id)
     return balance["remaining"]
 
+
+def _new_offline_trial_fields(now: Optional[datetime] = None) -> dict:
+    started_at = now or datetime.now(timezone.utc)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    expires_at = started_at + timedelta(days=OFFLINE_TRIAL_DAYS)
+    return {
+        "offline_trial_started_at": started_at.isoformat(),
+        "offline_trial_expires_at": expires_at.isoformat(),
+    }
+
+
+async def _grant_offline_trial_once(
+    email: str,
+    grant_id: str,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Apply a one-time support grant to a matching existing account."""
+    result = await db.users.update_one(
+        {
+            "email": email.strip().lower(),
+            "offline_manual_grant_id": {"$ne": grant_id},
+        },
+        {"$set": {
+            **_new_offline_trial_fields(now),
+            "offline_manual_grant_id": grant_id,
+        }},
+    )
+    if result.modified_count:
+        logger.info("Applied one-time offline trial grant %s to %s", grant_id, email)
+        return True
+    return False
+
+
+def _parse_offline_datetime(value) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("Offline entitlement dates must be ISO-8601") from error
+    else:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _ensure_offline_access(user_id: str) -> dict:
+    """Grant legacy users once and return their current offline entitlement."""
+    await db.users.update_one(
+        {"user_id": user_id, "offline_trial_expires_at": {"$exists": False}},
+        {"$set": _new_offline_trial_fields()},
+    )
+    user_doc = await db.users.find_one(
+        {"user_id": user_id},
+        {
+            "_id": 0,
+            "offline_trial_started_at": 1,
+            "offline_trial_expires_at": 1,
+            "offline_access_until": 1,
+        },
+    )
+    if not user_doc:
+        raise HTTPException(404, "Account not found.")
+    try:
+        now = datetime.now(timezone.utc)
+        trial_expires_at = _parse_offline_datetime(
+            user_doc.get("offline_trial_expires_at"))
+        trial_started_at = _parse_offline_datetime(
+            user_doc.get("offline_trial_started_at"))
+        paid_until = _parse_offline_datetime(
+            user_doc.get("offline_access_until"))
+    except ValueError as error:
+        logger.error("Invalid offline access date for user %s: %s", user_id, error)
+        raise HTTPException(500, "Could not read your offline access period.") from error
+    if not trial_expires_at:
+        logger.error("Offline trial expiry missing for user %s", user_id)
+        raise HTTPException(500, "Could not read your offline access period.")
+
+    expires_at = max(
+        (value for value in (trial_expires_at, paid_until) if value is not None),
+        default=trial_expires_at,
+    )
+    active = expires_at > now
+    access_type = (
+        "subscription" if paid_until and paid_until > now
+        else "trial" if trial_expires_at > now
+        else "expired"
+    )
+    seconds_remaining = max(0, int((expires_at - now).total_seconds()))
+    return {
+        "active": active,
+        "access_type": access_type,
+        "trial_started_at": trial_started_at.isoformat() if trial_started_at else None,
+        "trial_expires_at": trial_expires_at.isoformat(),
+        "paid_until": paid_until.isoformat() if paid_until else None,
+        "expires_at": expires_at.isoformat(),
+        "remaining_days": (seconds_remaining + 86399) // 86400,
+        "download_limit_per_day": OFFLINE_DAILY_PAPER_LIMIT,
+    }
+
+
+async def _record_offline_paper_download(user_id: str, paper_id: str) -> dict:
+    """Count each paper once per UTC day, atomically enforcing the daily cap."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    downloads = db.offline_paper_downloads
+    key = {"user_id": user_id, "day": today}
+    try:
+        await downloads.update_one(
+            key,
+            {"$setOnInsert": {
+                "paper_ids": [],
+                "expires_at": datetime.now(timezone.utc)
+                + timedelta(days=OFFLINE_DOWNLOAD_RETENTION_DAYS),
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # Another request created this user's daily record concurrently.
+        pass
+
+    await downloads.update_one(
+        {
+            **key,
+            "paper_ids": {"$ne": paper_id},
+            "$expr": {
+                "$lt": [
+                    {"$size": {"$ifNull": ["$paper_ids", []]}},
+                    OFFLINE_DAILY_PAPER_LIMIT,
+                ]
+            },
+        },
+        {"$addToSet": {"paper_ids": paper_id}},
+    )
+    record = await downloads.find_one(key, {"_id": 0, "paper_ids": 1})
+    if not record:
+        logger.error("Could not read offline download count for user %s", user_id)
+        raise HTTPException(500, "Could not verify today's offline download limit.")
+
+    paper_ids = record.get("paper_ids") or []
+    if paper_id not in paper_ids:
+        raise HTTPException(
+            429,
+            f"Daily offline download limit reached ({OFFLINE_DAILY_PAPER_LIMIT} papers).",
+        )
+    return {
+        "downloaded_today": len(paper_ids),
+        "remaining_today": max(0, OFFLINE_DAILY_PAPER_LIMIT - len(paper_ids)),
+        "daily_limit": OFFLINE_DAILY_PAPER_LIMIT,
+    }
+
 # ============================================================
 # Pydantic Models for PIN Auth
 # ============================================================
@@ -1103,6 +1287,41 @@ async def get_ai_token_balance(user: dict = Depends(get_current_user)):
     return await _ensure_ai_token_balance(user["user_id"])
 
 
+@api_router.get("/offline/access")
+async def get_offline_access(user: dict = Depends(get_current_user)):
+    access = await _ensure_offline_access(user["user_id"])
+    today = datetime.now(timezone.utc).date().isoformat()
+    downloads = await db.offline_paper_downloads.find_one(
+        {"user_id": user["user_id"], "day": today},
+        {"_id": 0, "paper_ids": 1},
+    )
+    downloaded_today = len((downloads or {}).get("paper_ids") or [])
+    return {
+        **access,
+        "downloaded_today": downloaded_today,
+        "downloads_remaining_today": max(
+            0, OFFLINE_DAILY_PAPER_LIMIT - downloaded_today),
+    }
+
+
+@api_router.post("/offline/papers/{paper_id}/download")
+async def authorize_offline_paper_download(
+    paper_id: str,
+    user: dict = Depends(get_current_user),
+):
+    access = await _ensure_offline_access(user["user_id"])
+    if not access["active"]:
+        raise HTTPException(
+            402,
+            "Offline access expired. Visit gcsharp.com/pay to renew your monthly plan.",
+        )
+    paper = await db.papers.find_one(
+        {"paper_id": paper_id}, {"_id": 0, "paper_id": 1, "pdf_url": 1})
+    if not paper or not paper.get("pdf_url"):
+        raise HTTPException(404, "Paper PDF not found.")
+    return await _record_offline_paper_download(user["user_id"], paper_id)
+
+
 async def get_current_user_optional(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         return None
@@ -1403,6 +1622,7 @@ async def register_user(req: RegisterRequest):
         raise HTTPException(400, "Email already registered")
     
     user_id = f"user_{uuid.uuid4().hex[:12]}"
+    created_at = datetime.now(timezone.utc)
     user = {
         "user_id": user_id,
         "email": req.email.lower(),
@@ -1424,7 +1644,8 @@ async def register_user(req: RegisterRequest):
         "level": 1,
         "streak": 0,
         "profile_photo": None,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": created_at.isoformat(),
+        **_new_offline_trial_fields(created_at),
     }
     await db.users.insert_one(user)
     token = make_jwt(user_id)
@@ -1512,6 +1733,7 @@ async def process_session(request: Request, response: Response):
             user.update(updates)
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
+        created_at = datetime.now(timezone.utc)
         user = {
             "user_id": user_id,
             "email": email,
@@ -1533,7 +1755,8 @@ async def process_session(request: Request, response: Response):
             "xp": 0,
             "level": 1,
             "streak": 0,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": created_at.isoformat(),
+            **_new_offline_trial_fields(created_at),
         }
         await db.users.insert_one(dict(user))
     
@@ -1645,6 +1868,7 @@ async def register_with_pin(
 
     user_id = f"user_{uuid.uuid4().hex[:12]}"
     biometric_token = new_biometric_token()
+    created_at = datetime.now(timezone.utc)
 
     user = {
         "user_id": user_id,
@@ -1671,8 +1895,9 @@ async def register_with_pin(
         "profile_photo": None,
         "failed_pin_attempts": 0,
         "pin_locked_until": None,
-        "pin_created_at": datetime.utcnow(),
-        "created_at": datetime.utcnow(),
+        "pin_created_at": created_at,
+        "created_at": created_at,
+        **_new_offline_trial_fields(created_at),
     }
 
     try:
@@ -2018,6 +2243,7 @@ async def verify_phone_otp(req: PhoneVerifyRequest, response: Response):
 
         if not user:
             user_id = f"user_{uuid.uuid4().hex[:12]}"
+            created_at = datetime.now(timezone.utc)
             user = {
                 "user_id": user_id,
                 "phone": phone_full,
@@ -2029,7 +2255,8 @@ async def verify_phone_otp(req: PhoneVerifyRequest, response: Response):
                 "subjects": [], "goals": [], "daily_commitment": "", "proficiency": "",
                 "learning_style": "", "specialization": "",
                 "xp": 0, "level": 1, "streak": 0, "profile_photo": None,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": created_at.isoformat(),
+                **_new_offline_trial_fields(created_at),
             }
             await db.users.insert_one(dict(user))
 
@@ -2087,6 +2314,7 @@ async def exchange_session(request: Request, response: Response):
             user_id = user["user_id"]
         else:
             user_id = f"user_{uuid.uuid4().hex[:12]}"
+            created_at = datetime.now(timezone.utc)
             user = {
                 "user_id": user_id,
                 "email": email,
@@ -2099,7 +2327,8 @@ async def exchange_session(request: Request, response: Response):
                 "subjects": [], "goals": [], "daily_commitment": "", "proficiency": "",
                 "learning_style": "", "specialization": "",
                 "xp": 0, "level": 1, "streak": 0,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": created_at.isoformat(),
+                **_new_offline_trial_fields(created_at),
             }
             await db.users.insert_one(dict(user))
 
@@ -4356,6 +4585,25 @@ async def _generate_ai_json(prompt: str, required_key: str, *,
         raise _ai_unavailable_to_http(e)
 
 
+async def _generate_gc_video_json(prompt: str, required_key: str, *,
+                                  system: Optional[str] = None,
+                                  max_tokens: int = VIDEO_MAX_TOKENS,
+                                  timeout: float = VIDEO_TIMEOUT,
+                                  retries: int = 2):
+    """Generate video scripts with GCSharp's configured model, never an external LLM."""
+    import gc_model
+
+    try:
+        result = await gc_model.get_gc_model().generate_json(
+            prompt, required_key, system=system, max_tokens=max_tokens,
+            timeout=timeout, retries=retries)
+    except gc_model.GCModelUnavailableError as e:
+        logger.error("GCSharp video model generation failed: %s", str(e)[:500])
+        raise HTTPException(
+            503, f"GCSharp video model unavailable: {e}") from e
+    return result, "gcsharp"
+
+
 def _ai_unavailable_to_http(e: Exception) -> HTTPException:
     """Return a retryable response when neither configured provider can answer."""
     logger.error("Gemini/OpenRouter unavailable: %s", str(e)[:300])
@@ -4511,7 +4759,7 @@ async def generate_video_solution(paper_id: str, user: dict = Depends(get_curren
         "Narration must be natural spoken English. Return ONLY JSON."
     )
     try:
-        parsed, _provider = await _generate_ai_json(
+        parsed, _provider = await _generate_gc_video_json(
             prompt, "scenes", system=system,
             max_tokens=VIDEO_MAX_TOKENS, timeout=VIDEO_TIMEOUT, retries=2)
         raw_scenes = parsed.get("scenes", [])
@@ -4581,7 +4829,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
         "Create 3-6 scenes. Ensure the final scene ends with a final answer, e.g. 'Final answer: B'. Return ONLY JSON."
     )
     try:
-        parsed, _provider = await _generate_ai_json(
+        parsed, _provider = await _generate_gc_video_json(
             prompt, "scenes", system=system,
             max_tokens=VIDEO_MAX_TOKENS, timeout=VIDEO_TIMEOUT, retries=2)
         raw_scenes = parsed["scenes"]
@@ -4606,7 +4854,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
 
 
 # ============================================================
-# Text-to-video + PDF-to-video: Gemini/OpenRouter generate the lesson script
+# Text-to-video + PDF-to-video: the GCSharp model generates the lesson script
 # (scenes with heading/whiteboard/narration); existing TTS, audio cache, and
 # player components consume the same scene shape as the other video routes.
 # ============================================================
@@ -4624,7 +4872,7 @@ _VIDEO_SCENE_SYSTEM = (
 async def _generate_text_lesson(source_text: str, *, title_hint: str,
                                 subject: str, level: str,
                                 focus: str) -> dict:
-    """Shared Gemini/OpenRouter lesson builder used by text-to-video routes."""
+    """Shared GCSharp-model lesson builder used by text- and PDF-to-video routes."""
     focus_line = ("Solve the problem step by step." if focus == "solve"
                   else "Explain the concept clearly with a worked example.")
     prompt = (
@@ -4640,13 +4888,13 @@ async def _generate_text_lesson(source_text: str, *, title_hint: str,
         "The last scene must end with a clear final answer or takeaway. "
         "Return ONLY JSON."
     )
-    parsed, _provider = await _generate_ai_json(
+    parsed, _provider = await _generate_gc_video_json(
         prompt, "scenes", system=_VIDEO_SCENE_SYSTEM,
         max_tokens=VIDEO_MAX_TOKENS, timeout=VIDEO_TIMEOUT, retries=2)
     raw_scenes = parsed.get("scenes", [])
     scenes = _normalise_video_scenes(raw_scenes, limit=8)
     if not scenes:
-        raise HTTPException(502, "The AI provider returned an empty video script. Please retry.")
+        raise HTTPException(502, "GCSharp returned an empty video script. Please retry.")
     return {
         "title": parsed.get("title") or title_hint[:80],
         "question": parsed.get("question") or title_hint[:200],
@@ -4670,7 +4918,7 @@ def _rate_limit_text_video(user_id: str) -> bool:
 @api_router.post("/ai/video/from-text")
 async def text_to_video(req: TextToVideoRequest,
                         user: dict = Depends(get_current_user)):
-    """Text/topic -> structured educational lesson via configured AI providers."""
+    """Text/topic -> structured educational lesson via the GCSharp model."""
     if not _rate_limit_text_video(user["user_id"]):
         raise HTTPException(429, "Too many video generations. Try again later.")
     text = (req.text or "").strip()
@@ -4701,7 +4949,7 @@ async def text_to_video(req: TextToVideoRequest,
 
 @api_router.post("/ai/video/from-pdf")
 async def pdf_to_video(file: UploadFile, user: dict = Depends(get_current_user)):
-    """Uploaded PDF -> extracted content -> Gemini/OpenRouter-generated lesson."""
+    """Uploaded PDF -> extracted content -> GCSharp-model-generated lesson."""
     if not _rate_limit_text_video(user["user_id"]):
         raise HTTPException(429, "Too many video generations. Try again later.")
     content = await file.read(15 * 1024 * 1024 + 1)
@@ -5891,8 +6139,12 @@ except Exception as _feed_err:
 
 @api_router.get("/ai/model/status")
 async def gc_model_status(probe: int = 0):
-    """Status of external runtime providers. ?probe=1 performs a tiny live call."""
+    """Report external AI providers and GCSharp's video model configuration."""
+    import gc_model
+
     providers = gc_ai.provider_status()
+    video_model = gc_model.get_gc_model()
+    video_state = video_model.status()
     configured = bool(
         providers.get("gemini_configured") or providers.get("openrouter_configured"))
     status = {
@@ -5911,6 +6163,26 @@ async def gc_model_status(probe: int = 0):
             status.update(available=True, active_provider=provider)
         except gc_ai.AIProvidersUnavailableError as e:
             status["unavailable_reason"] = str(e)[:300]
+        video_state = await video_model.healthcheck(timeout=12.0)
+    status["video_model"] = {
+        "configured": bool(video_state.get("configured")),
+        "backend": video_state.get("backend"),
+        "healthy": bool(video_state.get("healthy")),
+        "latency_ms": video_state.get("latency_ms"),
+    }
+    status["video_available"] = bool(
+        video_state.get("configured")
+        and (video_state.get("healthy") if probe else True)
+    )
+    if status["video_available"]:
+        status["video_unavailable_reason"] = None
+    elif not video_state.get("configured"):
+        status["video_unavailable_reason"] = (
+            "Set GC_MODEL_URL, GC_MODEL_PATH, or GC_MODEL_REPO_ID and GC_MODEL_FILE.")
+    else:
+        status["video_unavailable_reason"] = (
+            "The GCSharp video model failed its health check. "
+            "Check backend logs and model-server availability.")
     return status
 
 

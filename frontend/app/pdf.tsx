@@ -1116,8 +1116,8 @@ export default function PdfViewer() {
   const isOnline = useNetworkStatus();
 
   // Resolve the PDF source for the WebView:
-  //  - ONLINE: the remote URL (and kick off a background byte-cache so the
-  //    paper is available offline next time).
+  //  - ONLINE: stream the remote PDF; explicit saves are counted against the
+  //    daily offline-download allowance below.
   //  - OFFLINE: a base64 data URI built from the on-device cached bytes.
   // The pdf.js runtime is always inlined into the HTML, so the viewer never
   // needs the CDN — only the PDF bytes themselves differ online/offline.
@@ -1147,8 +1147,6 @@ export default function PdfViewer() {
         console.warn("[PdfViewer] Cached PDF read failed:", e);
       }
       if (isOnline) {
-        // Best-effort background caching of the bytes for offline use.
-        cacheMediaBytes(fullUrl, "pdf").catch(() => { });
         if (mounted) setPdfSrc(fullUrl);
         return;
       }
@@ -1258,8 +1256,20 @@ export default function PdfViewer() {
     if (downloadingUrls.includes(item.pdf_url)) return;
     setDownloadingUrls((prev) => [...prev, item.pdf_url]);
     try {
+      if (!item.paper_id) {
+        throw new Error("This paper cannot be saved offline because its paper ID is missing.");
+      }
+      const quota = await api<{ downloaded_today: number; remaining_today: number; daily_limit: number }>(
+        `/offline/papers/${encodeURIComponent(item.paper_id)}/download`,
+        { method: "POST", queueOffline: false },
+      );
       const localUri = await cacheMediaBytes(item.pdf_url, "pdf");
       const entry = localUri ? await getMediaManifestEntry(item.pdf_url) : null;
+      setSavedMsg(
+        localUri
+          ? `“${item.title}” ${t.pdf.readOffline} · ${quota.remaining_today} downloads left today`
+          : `${t.pdf.couldntDownload} “${item.title}”. ${t.pdf.checkConnection}`
+      );
       setDownloadItems((prev) =>
         prev.map((it) =>
           it.pdf_url === item.pdf_url
@@ -1274,12 +1284,10 @@ export default function PdfViewer() {
         )
       );
       if (item.pdf_url === fullUrl) setCurrentCached(!!localUri);
-      setSavedMsg(
-        localUri
-          ? `“${item.title}” ${t.pdf.readOffline}`
-          : `${t.pdf.couldntDownload} “${item.title}”. ${t.pdf.checkConnection}`
-      );
       setTimeout(() => setSavedMsg(null), 3000);
+    } catch (error) {
+      setSavedMsg(error instanceof Error ? error.message : "Could not verify the offline download.");
+      setTimeout(() => setSavedMsg(null), 4000);
     } finally {
       setDownloadingUrls((prev) => prev.filter((u) => u !== item.pdf_url));
     }
@@ -1289,14 +1297,24 @@ export default function PdfViewer() {
     if (!fullUrl || currentCached || downloadingCurrent) return;
     setDownloadingCurrent(true);
     try {
+      if (!paper_id) {
+        throw new Error("This paper cannot be saved offline because its paper ID is missing.");
+      }
+      const quota = await api<{ downloaded_today: number; remaining_today: number; daily_limit: number }>(
+        `/offline/papers/${encodeURIComponent(paper_id)}/download`,
+        { method: "POST", queueOffline: false },
+      );
       const localUri = await cacheMediaBytes(fullUrl, "pdf");
       setCurrentCached(!!localUri);
       setSavedMsg(
         localUri
-          ? t.pdf.paperDownloaded
+          ? `${t.pdf.paperDownloaded} · ${quota.remaining_today} downloads left today`
           : t.pdf.downloadFailed
       );
       setTimeout(() => setSavedMsg(null), 3000);
+    } catch (error) {
+      setSavedMsg(error instanceof Error ? error.message : "Could not verify the offline download.");
+      setTimeout(() => setSavedMsg(null), 4000);
     } finally {
       setDownloadingCurrent(false);
     }

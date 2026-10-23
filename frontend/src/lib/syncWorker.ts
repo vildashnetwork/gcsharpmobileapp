@@ -6,8 +6,9 @@
  *      saves, read receipts, profile edits...).
  *   2. Refreshes the core GET endpoints into the offline response cache so
  *      the app has data to show when the user goes offline.
- *   3. Downloads media BYTES (lesson videos, paper PDFs, thumbnails, avatars)
- *      to disk via mediaStore so they play/open with no network.
+ *   3. Downloads eligible media BYTES (lesson videos, thumbnails, avatars)
+ *      to disk via mediaStore. Paper PDFs require an explicit quota-authorized
+ *      download from the PDF screen or download manager.
  *
  * It runs:
  *   - once at app start (after auth resolves),
@@ -82,7 +83,7 @@ async function collectMediaUrls(): Promise<{ url: string; kind: MediaKind }[]> {
         if (seen.has(u)) return;
         seen.add(u);
         const kind = kindFromUrl(u);
-        if (kind) out.push({ url: u, kind });
+        if (kind && kind !== "pdf") out.push({ url: u, kind });
     };
 
     // Course list + details (thumbnails + video urls)
@@ -98,12 +99,6 @@ async function collectMediaUrls(): Promise<{ url: string; kind: MediaKind }[]> {
         push(c?.video_url);
     }
 
-    // Papers (pdf urls)
-    const papers = await readCachedGet<any>("/papers");
-    for (const p of papers?.items || papers || []) {
-        push(p?.pdf_url);
-    }
-
     // Saved videos
     const saved = await readCachedGet<any[]>("/videos/saved");
     for (const v of saved || []) {
@@ -111,12 +106,8 @@ async function collectMediaUrls(): Promise<{ url: string; kind: MediaKind }[]> {
         push(v?.video_url);
     }
 
-    // Drafts (pdf urls)
-    const drafts = await readCachedGet<any[]>("/drafts");
-    for (const d of drafts || []) {
-        push(d?.pdf_url);
-    }
-
+    // Paper and draft PDFs are intentionally omitted. PDF saves require
+    // explicit server authorization against the daily offline-download limit.
     return out;
 }
 
@@ -168,7 +159,7 @@ async function prefetchData(): Promise<void> {
     }
 }
 
-/** Download media bytes for everything referenced by cached data. */
+/** Download non-PDF media bytes referenced by cached data. */
 async function prefetchMedia(): Promise<void> {
     const urls = await collectMediaUrls();
     let downloaded = 0;

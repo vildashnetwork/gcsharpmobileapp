@@ -9,6 +9,12 @@ export function isGcAiProviderFailure(message: string): boolean {
 }
 
 export function presentGcAiMessage(message: string): string {
+  const videoModelFailure = message.match(
+    /^GCSharp video model unavailable:\s*([\s\S]+)$/i,
+  );
+  if (videoModelFailure) {
+    return `GC AI video generation is unavailable. ${videoModelFailure[1].trim()}`;
+  }
   return isGcAiProviderFailure(message) ? GC_AI_UNAVAILABLE_MESSAGE : message;
 }
 

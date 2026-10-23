@@ -188,8 +188,13 @@ import { storage } from "@/src/utils/storage";
 import { useLanguage, type Lang } from "@/src/i18n";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 import { api } from "@/src/api";
+import {
+  cacheOfflineAccess,
+  OFFLINE_MODE_KEY,
+  publishOfflineModePreference,
+  type OfflineAccessStatus,
+} from "@/src/lib/offlineAccess";
 
-const OFFLINE_MODE_KEY = "gcsmart_offline_mode";
 const HELP_CENTER_URL = "https://support.gcsharp.com";
 
 export default function Profile() {
@@ -201,6 +206,9 @@ export default function Profile() {
   const [aiTokens, setAiTokens] = useState<number | null>(null);
   const [aiTokensLoading, setAiTokensLoading] = useState(true);
   const [aiTokensError, setAiTokensError] = useState(false);
+  const [offlineAccess, setOfflineAccess] = useState<OfflineAccessStatus | null>(null);
+  const [offlineAccessLoading, setOfflineAccessLoading] = useState(true);
+  const [offlineAccessError, setOfflineAccessError] = useState(false);
 
   const loadAiTokens = useCallback(async () => {
     setAiTokensLoading(true);
@@ -216,6 +224,29 @@ export default function Profile() {
     }
   }, []);
 
+  const loadOfflineAccess = useCallback(async () => {
+    setOfflineAccessLoading(true);
+    setOfflineAccessError(false);
+    try {
+      const status = await api<OfflineAccessStatus>(
+        "/offline/access",
+        { cacheFallback: false },
+      );
+      setOfflineAccess(status);
+      if (user?.user_id) {
+        const cached = await cacheOfflineAccess(user.user_id, status);
+        if (!cached) {
+          console.error("Could not securely cache offline access expiry.");
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load offline access", error);
+      setOfflineAccessError(true);
+    } finally {
+      setOfflineAccessLoading(false);
+    }
+  }, [user]);
+
   // === Offline mode toggle ===
   const [isOffline, setIsOffline] = useState(false);
   const [modeLoading, setModeLoading] = useState(true);
@@ -224,7 +255,9 @@ export default function Profile() {
     (async () => {
       try {
         const saved = await storage.getItem<boolean>(OFFLINE_MODE_KEY, false);
-        setIsOffline(!!saved);
+        const enabled = !!saved;
+        setIsOffline(enabled);
+        publishOfflineModePreference(enabled);
       } catch (e) {
         console.warn("Failed to load offline mode preference", e);
       } finally {
@@ -234,9 +267,19 @@ export default function Profile() {
   }, []);
 
   const toggleOfflineMode = async (value: boolean) => {
+    if (value && offlineAccessLoading) return;
+    if (value && !offlineAccess?.active) {
+      Alert.alert(
+        "Offline access required",
+        "Your free offline trial has ended. Subscribe to keep using downloaded content offline.",
+      );
+      return;
+    }
     setIsOffline(value); // optimistic update
     try {
-      await storage.setItem(OFFLINE_MODE_KEY, value);
+      const saved = await storage.setItem(OFFLINE_MODE_KEY, value);
+      if (!saved) throw new Error("Could not save offline mode preference.");
+      publishOfflineModePreference(value);
     } catch (e) {
       console.warn("Failed to persist offline mode preference", e);
       setIsOffline(!value); // revert on failure
@@ -248,7 +291,8 @@ export default function Profile() {
     useCallback(() => {
       refresh();
       void loadAiTokens();
-    }, [refresh, loadAiTokens])
+      void loadOfflineAccess();
+    }, [refresh, loadAiTokens, loadOfflineAccess])
   );
 
   const openTokenPurchase = async () => {
@@ -281,19 +325,39 @@ export default function Profile() {
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 32 }}>
         {/* Profile header with image or fallback */}
         <View style={styles.head}>
-          <Pressable onPress={() => router.push("/edit-profile")} style={styles.avatarTouch}>
-            {user?.profile_photo ? (
-              <Image source={{ uri: user.profile_photo }} style={styles.avatarImage} />
-            ) : (
-              <View style={styles.avatarFallback}>
-                <Text style={styles.avatarTxt}>{getInitials(user?.full_name)}</Text>
+          <View style={styles.headProfileRow}>
+            <Pressable onPress={() => router.push("/edit-profile")} style={styles.avatarTouch}>
+              {user?.profile_photo ? (
+                <Image source={{ uri: user.profile_photo }} style={styles.avatarImage} />
+              ) : (
+                <View style={styles.avatarFallback}>
+                  <Text style={styles.avatarTxt}>{getInitials(user?.full_name)}</Text>
+                </View>
+              )}
+            </Pressable>
+            <View style={styles.profileIdentity}>
+              <Text style={styles.name} numberOfLines={2}>{user?.full_name}</Text>
+              <Text style={styles.email} numberOfLines={1}>{user?.email}</Text>
+              <View style={styles.pill}>
+                <Text style={styles.pillTxt}>{user?.exam_level || "Teacher"}</Text>
               </View>
-            )}
-          </Pressable>
-          <Text style={styles.name}>{user?.full_name}</Text>
-          <Text style={styles.email}>{user?.email}</Text>
-          <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{user?.exam_level || "Teacher"}</Text>
+            </View>
+          </View>
+          <View style={styles.offlineDaysRow} testID="profile-offline-days">
+            <Ionicons
+              name="cloud-download-outline"
+              size={17}
+              color={offlineAccess?.active ? theme.success : theme.onSurfaceMuted}
+            />
+            <Text style={styles.offlineDaysText}>
+              {offlineAccessLoading
+                ? "Checking offline access..."
+                : offlineAccessError
+                  ? "Offline access status unavailable"
+                  : offlineAccess?.active
+                    ? `${offlineAccess.remaining_days} day${offlineAccess.remaining_days === 1 ? "" : "s"} left for offline mode`
+                    : "Offline access has expired"}
+            </Text>
           </View>
         </View>
 
@@ -406,10 +470,49 @@ export default function Profile() {
             testID="offline-mode-switch"
             value={!isOffline}
             onValueChange={(online) => toggleOfflineMode(!online)}
-            disabled={modeLoading}
+            disabled={modeLoading || offlineAccessLoading}
             trackColor={{ false: theme.borderStrong, true: theme.brandPrimary }}
             thumbColor="#fff"
           />
+        </View>
+
+        <View style={styles.offlineAccessCard} testID="offline-access-card">
+          <View style={styles.tokenDetails}>
+            <View style={[styles.modeIconWrap, { backgroundColor: theme.brandTertiary }]}>
+              <Ionicons name="cloud-download-outline" size={18} color={theme.onBrandTertiary} />
+            </View>
+            <View style={styles.tokenCopy}>
+              <Text style={styles.modeTitle}>Offline access</Text>
+              <Text style={styles.modeSub}>
+                {offlineAccessLoading
+                  ? "Checking access..."
+                  : offlineAccessError
+                    ? "Access status unavailable. Tap retry."
+                    : offlineAccess?.active
+                      ? `${offlineAccess.access_type === "subscription" ? "Monthly access" : "Free trial"} · ${offlineAccess.remaining_days} day${offlineAccess.remaining_days === 1 ? "" : "s"} left`
+                      : "Your free offline trial has ended"}
+              </Text>
+            </View>
+            {offlineAccessError ? (
+              <Pressable accessibilityRole="button" onPress={() => void loadOfflineAccess()}>
+                <Text style={styles.offlineRetryText}>Retry</Text>
+              </Pressable>
+            ) : null}
+          </View>
+          <Text style={styles.offlineLimitText}>
+            {offlineAccess
+              ? `${offlineAccess.downloads_remaining_today} of ${offlineAccess.download_limit_per_day} paper downloads left today`
+              : "Download up to 10 papers per day for offline study"}
+          </Text>
+          <Pressable
+            accessibilityRole="link"
+            onPress={() => void openTokenPurchase()}
+            style={styles.tokenPurchaseButton}
+            testID="buy-offline-access"
+          >
+            <Text style={styles.tokenPurchaseText}>Subscribe monthly</Text>
+            <Ionicons name="open-outline" size={16} color={theme.onBrandPrimary} />
+          </Pressable>
         </View>
 
         <View style={styles.metricsRow}>
@@ -516,19 +619,27 @@ function Row({ icon, label, onPress, danger, testID }: any) {
 
 const createStyles = (t: Palette) => StyleSheet.create({
   root: { flex: 1, backgroundColor: t.surface },
-  head: { alignItems: "center", padding: spacing.lg, gap: 6 },
-  avatarTouch: {},
+  head: {
+    backgroundColor: t.surfaceSecondary,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    gap: spacing.md,
+    ...shadow1,
+  },
+  headProfileRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  profileIdentity: { flex: 1, minWidth: 0, gap: 3 },
+  avatarTouch: { flexShrink: 0 },
   avatarImage: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     borderWidth: 2,
     borderColor: t.brandPrimary,
   },
   avatarFallback: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     backgroundColor: t.brand,
     alignItems: "center",
     justifyContent: "center",
@@ -536,8 +647,17 @@ const createStyles = (t: Palette) => StyleSheet.create({
     borderColor: t.brandPrimary,
   },
   avatarTxt: { color: t.onBrandPrimary, fontSize: 32, fontWeight: "800" },
-  name: { fontSize: 20, fontWeight: "800", color: t.onSurface, marginTop: 4 },
+  name: { fontSize: 20, fontWeight: "800", color: t.onSurface },
   email: { color: t.onSurfaceMuted },
+  offlineDaysRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: t.border,
+  },
+  offlineDaysText: { flex: 1, color: t.onSurface, fontSize: 13, fontWeight: "700" },
   pill: {
     marginTop: 6,
     paddingHorizontal: 12,
@@ -572,6 +692,15 @@ const createStyles = (t: Palette) => StyleSheet.create({
     gap: spacing.md,
     ...shadow1,
   },
+  offlineAccessCard: {
+    backgroundColor: t.surfaceSecondary,
+    padding: spacing.md,
+    borderRadius: radii.md,
+    gap: spacing.sm,
+    ...shadow1,
+  },
+  offlineLimitText: { color: t.onSurfaceMuted, fontSize: 12 },
+  offlineRetryText: { color: t.brandPrimary, fontWeight: "700", fontSize: 12 },
   tokenDetails: {
     flexDirection: "row",
     alignItems: "center",

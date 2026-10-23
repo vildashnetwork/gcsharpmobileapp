@@ -1,16 +1,17 @@
 # Configuring GCSharp AI Providers
 
 GC Sharp uses **Gemini first** and **OpenRouter as a bounded fallback** for
-tutor answers, feed answers, worked solutions, question generation, and
-text/PDF-to-video scripts. AI-backed tutor responses use Google Custom Search
-when configured and include citations from the evidence actually retrieved.
-DuckDuckGo remains a keyless search fallback. The local GCSharp model options
-below are retained for a future self-hosted runtime; they are not required for
-current generation.
+tutor answers, feed answers, worked solutions, and question generation.
+Paper-video, highlighted-question video, text-to-video, and uploaded-PDF-to-video
+scripts are generated only by the GCSharp model configured through `GC_MODEL_*`;
+they do not fall back to an external LLM. AI-backed tutor responses use Google
+Custom Search when configured and include citations from the evidence actually
+retrieved. DuckDuckGo remains a keyless search fallback.
 
-## 1. Configure runtime generation and search
+## 1. Configure external generation and search for non-video AI
 
-Set at least one generation provider in the backend service environment:
+For non-video tutor and question features, set at least one generation
+provider in the backend service environment:
 
 ```text
 GEMINI_API_KEY=<your Gemini API key>
@@ -33,13 +34,14 @@ Google credentials are absent or return no usable results, the service uses
 the existing keyless DuckDuckGo fallback. Keep all keys in the deployment
 provider's secret environment settings; do not commit them to `.env.example`.
 
-## 2. Optional future self-hosted inference backend
+## 2. Configure the GCSharp video-generation model
 
-The adapter (`backend/gc_model.py`) supports two inference backends and a
-convenience workflow for downloading GGUF weights. These settings are not
-needed by the current runtime. If you are preparing a future migration, configure either
-`GC_MODEL_URL`, `GC_MODEL_PATH`, or both `GC_MODEL_REPO_ID` and
-`GC_MODEL_FILE` in `backend/.env`:
+The adapter (`backend/gc_model.py`) supports OpenAI-compatible inference
+servers and local GGUF weights, plus an optional workflow for downloading GGUF
+weights. Configure at least one of `GC_MODEL_URL`, `GC_MODEL_PATH`, or both
+`GC_MODEL_REPO_ID` and `GC_MODEL_FILE` in the backend service environment.
+Without a working GCSharp model, the video endpoints return HTTP 503 with a
+configuration or reachability message; they do not use Gemini/OpenRouter.
 
 ### Option A — OpenAI-compatible server (`GC_MODEL_URL`) — recommended
 
@@ -162,9 +164,10 @@ curl https://<backend-host>/api/ai/model/status?probe=1  # small live generation
 ```
 
 The response reports which providers and search service are configured. The
-probe identifies the provider that answered. If neither generation provider
-is configured or available, AI endpoints return HTTP 503 so the app can offer
-a retry rather than showing a fabricated answer.
+probe identifies the external provider that answered and checks the separate
+`video_model` status. `video_available` is false when GCSharp video generation
+is not configured or fails its health check. Video endpoints return HTTP 503
+with the model's configuration or reachability reason if they cannot generate.
 
 ## 5. Background jobs
 

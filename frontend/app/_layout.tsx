@@ -236,9 +236,9 @@
 import { Stack, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect, useRef, useState } from "react";
-import { LogBox, StatusBar, View, Text, StyleSheet, Modal, Pressable } from "react-native";
+import { ActivityIndicator, Alert, AppState, Linking, LogBox, StatusBar, View, Text, StyleSheet, Modal, Pressable } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -250,7 +250,17 @@ import { LanguageProvider, useLanguage } from "@/src/i18n";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { storage } from "@/src/utils/storage";
+import { api } from "@/src/api";
 import { useAppUpdates } from "@/src/hooks/useAppUpdates";
+import {
+  cacheOfflineAccess,
+  getCachedOfflineAccessExpiry,
+  getOfflineModeSnapshot,
+  OFFLINE_MODE_KEY,
+  publishOfflineModePreference,
+  subscribeOfflineMode,
+  type OfflineAccessStatus,
+} from "@/src/lib/offlineAccess";
 import {
   installNotificationResponseHandler,
   registerPushToken,
@@ -364,13 +374,175 @@ function AppLoader() {
   );
 }
 
+function OfflineAccessLoading() {
+  const t = useTheme();
+  return (
+    <View style={[styles.offlineGate, { backgroundColor: t.surface }]}>
+      <ActivityIndicator size="large" color={t.brandPrimary} />
+      <Text style={[styles.offlineGateBody, { color: t.onSurfaceMuted }]}>
+        Checking offline access…
+      </Text>
+    </View>
+  );
+}
+
+function OfflineAccessExpired({
+  canContinueOnline,
+  onContinueOnline,
+  onRefreshAccess,
+}: {
+  canContinueOnline: boolean;
+  onContinueOnline: () => void;
+  onRefreshAccess: () => void;
+}) {
+  const t = useTheme();
+  const openPaymentPage = async () => {
+    try {
+      await Linking.openURL("https://gcsharp.com/pay");
+    } catch (error) {
+      console.error("Could not open the offline subscription page", error);
+      Alert.alert("Unable to open page", "Please try again later.");
+    }
+  };
+
+  return (
+    <SafeAreaView style={[styles.offlineGate, { backgroundColor: t.surface }]}>
+      <Ionicons name="cloud-offline-outline" size={48} color={t.brandPrimary} />
+      <Text style={[styles.offlineGateTitle, { color: t.onSurface }]}>
+        Offline access has expired
+      </Text>
+      <Text style={[styles.offlineGateBody, { color: t.onSurfaceMuted }]}>
+        Offline mode has expired. Subscribe for monthly offline access, or
+        continue using GC Sharp online.
+      </Text>
+      <Pressable
+        accessibilityRole="link"
+        onPress={() => void openPaymentPage()}
+        style={[styles.offlineGateButton, { backgroundColor: t.brandPrimary }]}
+        testID="offline-access-pay"
+      >
+        <Text style={[styles.offlineGateButtonText, { color: t.onBrandPrimary }]}>
+          Subscribe monthly
+        </Text>
+        <Ionicons name="open-outline" size={17} color={t.onBrandPrimary} />
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        onPress={onRefreshAccess}
+        style={styles.offlineGateSecondaryButton}
+        testID="refresh-offline-access"
+      >
+        <Text style={[styles.offlineGateSecondaryText, { color: t.onSurface }]}>
+          I&apos;ve paid — refresh access
+        </Text>
+      </Pressable>
+      {canContinueOnline ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={onContinueOnline}
+          style={styles.offlineGateSecondaryButton}
+          testID="continue-online"
+        >
+          <Text style={[styles.offlineGateSecondaryText, { color: t.onSurface }]}>
+            Continue online
+          </Text>
+        </Pressable>
+      ) : null}
+    </SafeAreaView>
+  );
+}
+
 // ----- Main App with Auth -----
 function AppContent() {
   const { loading, user, isOnline } = useAuth();
   const t = useTheme();
   const router = useRouter();
   const handledNotificationRef = useRef<string | null>(null);
+  const [offlineMode, setOfflineMode] = useState(getOfflineModeSnapshot);
+  const [offlineAccessExpiresAt, setOfflineAccessExpiresAt] = useState<number | null>(null);
+  const [offlineAccessReadyFor, setOfflineAccessReadyFor] = useState<string | null>(null);
+  const [offlineAccessNow, setOfflineAccessNow] = useState(0);
+  const [offlineAccessRefreshRequest, setOfflineAccessRefreshRequest] = useState(0);
   useAppUpdates();
+
+  useEffect(() => {
+    const unsubscribe = subscribeOfflineMode(setOfflineMode);
+    storage.getItem<boolean>(OFFLINE_MODE_KEY, false).then((saved) => {
+      publishOfflineModePreference(!!saved);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (loading) return;
+    let active = true;
+
+    const refreshOfflineAccess = async () => {
+      const userId = user?.user_id;
+      if (!userId) {
+        setOfflineAccessExpiresAt(null);
+        return;
+      }
+
+      const cachedExpiry = await getCachedOfflineAccessExpiry(userId);
+      if (!active) return;
+      setOfflineAccessExpiresAt(cachedExpiry);
+      setOfflineAccessReadyFor(userId);
+      setOfflineAccessNow(Date.now());
+
+      if (!isOnline) return;
+      try {
+        const status = await api<OfflineAccessStatus>(
+          "/offline/access",
+          { cacheFallback: false },
+        );
+        const expiry = Date.parse(status.expires_at);
+        if (!Number.isFinite(expiry)) {
+          throw new Error("The server returned an invalid offline access expiry.");
+        }
+        if (!active) return;
+        setOfflineAccessExpiresAt(expiry);
+        setOfflineAccessNow(Date.now());
+        const cached = await cacheOfflineAccess(userId, status);
+        if (!cached) {
+          console.error("Could not securely cache offline access expiry.");
+        }
+      } catch (error) {
+        console.warn("Could not refresh offline access status:", error);
+      }
+    };
+
+    void refreshOfflineAccess();
+    const appStateListener = AppState.addEventListener("change", (state) => {
+      if (state === "active") void refreshOfflineAccess();
+    });
+
+    return () => {
+      active = false;
+      appStateListener.remove();
+    };
+  }, [loading, user?.user_id, isOnline, offlineAccessRefreshRequest]);
+
+  const continueOnline = async () => {
+    const saved = await storage.setItem(OFFLINE_MODE_KEY, false);
+    if (!saved) {
+      console.error("Could not disable offline-only mode.");
+      Alert.alert("Unable to change mode", "Please try again.");
+      return;
+    }
+    publishOfflineModePreference(false);
+  };
+
+  useEffect(() => {
+    if (!offlineAccessExpiresAt || (isOnline && !offlineMode)) return;
+    const remaining = offlineAccessExpiresAt - offlineAccessNow;
+    if (remaining <= 0) return;
+    const timer = setTimeout(
+      () => setOfflineAccessNow(Date.now()),
+      Math.min(remaining + 1, 24 * 60 * 60 * 1000),
+    );
+    return () => clearTimeout(timer);
+  }, [isOnline, offlineAccessExpiresAt, offlineAccessNow, offlineMode]);
 
   useEffect(() => {
     if (loading || !user?.user_id) return;
@@ -409,6 +581,25 @@ function AppContent() {
   // Show loader over the entire app during auth initialization
   if (loading) {
     return <AppLoader />;
+  }
+
+  const usingOfflineAccess = !isOnline || offlineMode;
+  const offlineAccessReady = offlineAccessReadyFor === user?.user_id;
+  if (user && usingOfflineAccess && !offlineAccessReady) {
+    return <OfflineAccessLoading />;
+  }
+  if (
+    user &&
+    usingOfflineAccess &&
+    (!offlineAccessExpiresAt || offlineAccessExpiresAt <= offlineAccessNow)
+  ) {
+    return (
+      <OfflineAccessExpired
+        canContinueOnline={isOnline}
+        onContinueOnline={() => void continueOnline()}
+        onRefreshAccess={() => setOfflineAccessRefreshRequest((value) => value + 1)}
+      />
+    );
   }
 
   return (
@@ -534,6 +725,27 @@ const createStyles = (t: Palette) => StyleSheet.create({
   profileReminderSecondaryText: { color: t.onSurface, fontSize: 14, fontWeight: "700" },
   profileReminderNever: { padding: 8, marginTop: 2 },
   profileReminderNeverText: { color: t.onSurfaceMuted, fontSize: 12, textDecorationLine: "underline" },
+  offlineGate: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: spacing.xl,
+    gap: spacing.md,
+  },
+  offlineGateTitle: { fontSize: 22, fontWeight: "800", textAlign: "center" },
+  offlineGateBody: { maxWidth: 380, fontSize: 15, lineHeight: 23, textAlign: "center" },
+  offlineGateButton: {
+    minHeight: 48,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radii.md,
+  },
+  offlineGateButtonText: { fontSize: 15, fontWeight: "800" },
+  offlineGateSecondaryButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: spacing.lg },
+  offlineGateSecondaryText: { fontSize: 14, fontWeight: "700" },
 });
 
 // Rebuild the module styles whenever the active palette changes so
