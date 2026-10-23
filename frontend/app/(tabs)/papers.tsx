@@ -13,12 +13,19 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 import { radii, shadow1, spacing, type Palette } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
+import {
+  getDownloadedPaperDrafts,
+  getRemovedDownloadedPaperDraftIds,
+  mergeDownloadedPapersIntoDrafts,
+  type DownloadedPaperDraft,
+} from "@/src/lib/offlineDrafts";
+import { getLocalMediaUri, listCachedMedia } from "@/src/lib/mediaStore";
 
 type Paper = {
   paper_id: string;
@@ -31,6 +38,12 @@ type Paper = {
   saved: boolean;
   views?: number;
 };
+
+type SavedPaper = Pick<Paper, "paper_id"> &
+  Partial<Omit<Paper, "paper_id">> & {
+    downloaded_offline?: boolean;
+    saved_at?: string;
+  };
 
 type PaperFilters = {
   levels: string[];
@@ -51,7 +64,29 @@ const DISPLAY_LEVELS = [
   { label: "ITVEE", value: "ITVEE" },
 ];
 
+const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
 const emptyFilters: PaperFilters = { levels: [], subjects: [], years: [], papers: [1, 2, 3] };
+
+function cachedPdfTitle(url: string): string {
+  try {
+    const filename = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    return filename.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ") || "Downloaded paper";
+  } catch {
+    return "Downloaded paper";
+  }
+}
+
+function cachedPdfId(url: string): string {
+  let hash = 5381;
+  for (let index = 0; index < url.length; index += 1) {
+    hash = ((hash << 5) + hash + url.charCodeAt(index)) | 0;
+  }
+  return `cached_pdf_${(hash >>> 0).toString(36)}`;
+}
+
+function paperUrl(pdfUrl: string): string {
+  return pdfUrl.startsWith("http") ? pdfUrl : `${BACKEND}${pdfUrl}`;
+}
 
 function normalizeLevel(value?: string | null) {
   const normalized = (value || "").trim().toLowerCase();
@@ -79,7 +114,7 @@ export default function PapersScreen() {
   const [selectedPaper, setSelectedPaper] = useState<number | null>(null);
   const [searchText, setSearchText] = useState("");
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [savedPapers, setSavedPapers] = useState<Paper[]>([]);
+  const [savedPapers, setSavedPapers] = useState<SavedPaper[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,13 +135,99 @@ export default function PapersScreen() {
   }, []);
 
   const loadSavedPapers = useCallback(async () => {
-    try {
-      const result = await api<Paper[]>("/drafts");
-      setSavedPapers(Array.isArray(result) ? result : []);
-    } catch (cause) {
-      console.warn("[papers] could not load saved papers:", cause);
+    const userId = user?.user_id;
+    if (!userId) {
+      setSavedPapers([]);
+      return;
     }
-  }, []);
+
+    try {
+      const [serverDrafts, cachedMedia] = await Promise.all([
+        api<SavedPaper[]>("/drafts").then(
+          (result) => Array.isArray(result) ? result : [],
+          (cause) => {
+            console.warn("[papers] could not load server drafts:", cause);
+            return [];
+          },
+        ),
+        listCachedMedia().catch((cause) => {
+          console.warn("[papers] could not inspect downloaded papers:", cause);
+          return [];
+        }),
+      ]);
+
+      let downloadedDrafts = await getDownloadedPaperDrafts(userId);
+      const cachedPdfs = cachedMedia.filter((media) => media.kind === "pdf");
+      if (cachedPdfs.length > 0) {
+        try {
+          let library: Paper[] = [];
+          try {
+            const response = await api<{ items?: Paper[] } | Paper[]>("/papers");
+            library = Array.isArray(response) ? response : response.items || [];
+          } catch (cause) {
+            console.warn("[papers] could not load metadata for older cached PDFs:", cause);
+          }
+          const papersByUrl = new Map(
+            library
+              .filter((paper) => paper.pdf_url)
+              .map((paper) => [paperUrl(paper.pdf_url!), paper]),
+          );
+          const cachedPapers = (
+            await Promise.all(
+              cachedPdfs.map(async (media): Promise<DownloadedPaperDraft | null> => {
+                const localUri = await getLocalMediaUri(media.remoteUrl);
+                if (!localUri) return null;
+                const paper = papersByUrl.get(media.remoteUrl);
+                return {
+                  paper_id: paper?.paper_id || cachedPdfId(media.remoteUrl),
+                  title: paper?.title || cachedPdfTitle(media.remoteUrl),
+                  pdf_url: media.remoteUrl,
+                  subject: paper?.subject,
+                  level: paper?.level,
+                  year: paper?.year,
+                  paper_number: paper?.paper_number,
+                  saved_at: new Date(media.cachedAt).toISOString(),
+                  downloaded_offline: true,
+                };
+              }),
+            )
+          ).filter((paper): paper is DownloadedPaperDraft => paper !== null);
+          await mergeDownloadedPapersIntoDrafts(userId, cachedPapers);
+          downloadedDrafts = await getDownloadedPaperDrafts(userId);
+        } catch (cause) {
+          console.warn("[papers] could not import older cached PDFs into drafts:", cause);
+        }
+      }
+
+      const removedDraftIds = new Set(await getRemovedDownloadedPaperDraftIds(userId));
+      const merged = new Map(
+        serverDrafts
+          .filter((paper) =>
+            !removedDraftIds.has(paper.paper_id) &&
+            !(paper.pdf_url && removedDraftIds.has(paper.pdf_url))
+          )
+          .map((paper) => [paper.paper_id, paper]),
+      );
+      for (const paper of downloadedDrafts) {
+        if (removedDraftIds.has(paper.paper_id) || removedDraftIds.has(paper.pdf_url)) continue;
+        const serverDraft = merged.get(paper.paper_id);
+        merged.set(paper.paper_id, {
+          ...paper,
+          ...serverDraft,
+          pdf_url: paper.pdf_url || serverDraft?.pdf_url,
+          saved_at: paper.saved_at || serverDraft?.saved_at,
+          downloaded_offline: true,
+        });
+      }
+      setSavedPapers(
+        [...merged.values()].sort(
+          (a, b) => Date.parse(b.saved_at || "") - Date.parse(a.saved_at || ""),
+        ),
+      );
+    } catch (cause) {
+      console.warn("[papers] could not load saved or downloaded papers:", cause);
+    }
+  }, [user?.user_id]);
 
   const loadPapers = useCallback(async (isRefresh = false) => {
     if (authLoading) return;
@@ -145,10 +266,15 @@ export default function PapersScreen() {
   useEffect(() => {
     const timer = setTimeout(() => {
       void loadFilters();
-      void loadSavedPapers();
     }, 0);
     return () => clearTimeout(timer);
-  }, [loadFilters, loadSavedPapers]);
+  }, [loadFilters]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadSavedPapers();
+    }, [loadSavedPapers]),
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => void loadPapers(), 0);
@@ -200,11 +326,15 @@ export default function PapersScreen() {
     setActivePicker(null);
   };
 
-  const openPaper = (paper: Paper) => {
+  const openPaper = (paper: SavedPaper) => {
+    const paperTitle =
+      paper.title ||
+      [paper.subject, paper.year].filter((value) => value !== undefined && value !== "").join(" ") ||
+      "Saved paper";
     if (paper.pdf_url) {
       router.push({
         pathname: "/pdf",
-        params: { url: paper.pdf_url, title: paper.title || `${paper.subject} ${paper.year}`, paper_id: paper.paper_id },
+        params: { url: paper.pdf_url, title: paperTitle, paper_id: paper.paper_id },
       });
     } else {
       router.push(`/past-questions/${paper.paper_id}`);
@@ -227,7 +357,14 @@ export default function PapersScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.listContent}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => void loadPapers(true)} tintColor={t.brandPrimary} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              void loadPapers(true);
+              void loadSavedPapers();
+            }}
+            tintColor={t.brandPrimary}
+          />
         }
         ListHeaderComponent={
           <View>
@@ -322,7 +459,7 @@ export default function PapersScreen() {
             <View style={styles.vaultHeader}>
               <View style={styles.vaultTitleWrap}>
                 <View style={styles.vaultDot} />
-                <Text style={styles.vaultTitle}>Offline Revision Vault</Text>
+                <Text style={styles.vaultTitle}>My Drafts</Text>
               </View>
               <Pressable onPress={() => router.push("/drafts")} style={styles.manageButton}>
                 <Text style={styles.manageText}>Manage ({savedPapers.length})</Text>
@@ -332,7 +469,7 @@ export default function PapersScreen() {
 
             {savedPapers.length > 0 ? (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.vaultRow}>
-                {savedPapers.slice(0, 8).map((paper) => (
+                {savedPapers.map((paper) => (
                   <Pressable key={paper.paper_id} style={styles.vaultCard} onPress={() => openPaper(paper)}>
                     <View style={styles.vaultPills}>
                       <Text style={styles.vaultPill}>{paper.level || user?.exam_level || "GCE A-Level"}</Text>
@@ -342,10 +479,16 @@ export default function PapersScreen() {
                       </View>
                     </View>
                     <Text style={styles.vaultCardTitle} numberOfLines={2}>
-                      {paper.title || `${paper.year} ${paper.subject} Paper ${paper.paper_number}`}
+                      {paper.title ||
+                        [paper.year, paper.subject, paper.paper_number ? `Paper ${paper.paper_number}` : null]
+                          .filter(Boolean)
+                          .join(" ") ||
+                        "Downloaded paper"}
                     </Text>
                     <Text style={styles.vaultCardMeta} numberOfLines={1}>
-                      {paper.subject} · {paper.year} · Paper {paper.paper_number}
+                      {[paper.subject, paper.year, paper.paper_number ? `Paper ${paper.paper_number}` : null]
+                        .filter(Boolean)
+                        .join(" · ") || (paper.downloaded_offline ? "Downloaded for offline use" : "Saved paper")}
                     </Text>
                   </Pressable>
                 ))}

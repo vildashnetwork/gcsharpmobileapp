@@ -617,6 +617,7 @@ import * as ScreenCapture from "expo-screen-capture";
 import { File } from "expo-file-system";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useAuth } from "@/src/auth";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { pdfHtml } from "@/src/pdf-html";
@@ -636,9 +637,10 @@ import {
   deleteCachedMedia,
   type MediaManifestEntry,
 } from "@/src/lib/mediaStore";
+import { saveDownloadedPaperDraft } from "@/src/lib/offlineDrafts";
 import { PDFJS_RUNTIME, PDFJS_WORKER } from "@/src/generated/pdfjsRuntime";
 import { useGcVoice } from "@/src/hooks/useGcVoice";
-import { API_BASE, readToken } from "@/src/api";
+import { API_BASE } from "@/src/api";
 import { gcAiErrorMessage } from "@/src/lib/gcAiMessage";
 
 const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
@@ -918,6 +920,7 @@ type DownloadItem = {
   paper_id?: string;
   title: string;
   subject?: string;
+  level?: string;
   year?: number;
   paper_number?: number;
   pdf_url: string;
@@ -958,6 +961,7 @@ export default function PdfViewer() {
   const { url, title, paper_id } = useLocalSearchParams<{ url: string; title?: string; paper_id?: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
   const { t } = useLanguage();
   const webRef = useRef<WebView>(null);
   const [loading, setLoading] = useState(true);
@@ -1252,6 +1256,36 @@ export default function PdfViewer() {
     loadDownloads();
   };
 
+  const saveDownloadToDrafts = async (downloadedPaper: Omit<Paper, "title" | "subject" | "level" | "year" | "paper_number"> & Partial<Pick<Paper, "title" | "subject" | "level" | "year" | "paper_number">>) => {
+    if (!user?.user_id) {
+      console.error("Downloaded paper has no authenticated user to associate with drafts.");
+      return false;
+    }
+    try {
+      await saveDownloadedPaperDraft(user.user_id, {
+        paper_id: downloadedPaper.paper_id,
+        title: downloadedPaper.title || "Downloaded paper",
+        pdf_url: downloadedPaper.pdf_url,
+        subject: downloadedPaper.subject,
+        level: downloadedPaper.level,
+        year: downloadedPaper.year,
+        paper_number: downloadedPaper.paper_number,
+      });
+    } catch (error) {
+      console.error("Could not save the downloaded paper to this phone's drafts", error);
+      return false;
+    }
+
+    void api<{ saved: boolean }>("/drafts/downloaded", {
+      method: "POST",
+      body: { paper_id: downloadedPaper.paper_id },
+      queueOffline: false,
+    }).catch((error) => {
+      console.warn("Downloaded paper is saved on this phone, but server draft sync failed:", error);
+    });
+    return true;
+  };
+
   const downloadPdf = async (item: DownloadItem) => {
     if (downloadingUrls.includes(item.pdf_url)) return;
     setDownloadingUrls((prev) => [...prev, item.pdf_url]);
@@ -1265,9 +1299,20 @@ export default function PdfViewer() {
       );
       const localUri = await cacheMediaBytes(item.pdf_url, "pdf");
       const entry = localUri ? await getMediaManifestEntry(item.pdf_url) : null;
+      const savedToDrafts = localUri
+        ? await saveDownloadToDrafts({
+          paper_id: item.paper_id,
+          title: item.title,
+          subject: item.subject,
+          level: item.level,
+          year: item.year,
+          paper_number: item.paper_number,
+          pdf_url: item.pdf_url,
+        })
+        : false;
       setSavedMsg(
         localUri
-          ? `“${item.title}” ${t.pdf.readOffline} · ${quota.remaining_today} downloads left today`
+          ? `“${item.title}” ${t.pdf.readOffline}${savedToDrafts ? " · Saved to My Drafts" : ""} · ${quota.remaining_today} downloads left today`
           : `${t.pdf.couldntDownload} “${item.title}”. ${t.pdf.checkConnection}`
       );
       setDownloadItems((prev) =>
@@ -1305,10 +1350,21 @@ export default function PdfViewer() {
         { method: "POST", queueOffline: false },
       );
       const localUri = await cacheMediaBytes(fullUrl, "pdf");
+      const savedToDrafts = localUri
+        ? await saveDownloadToDrafts({
+          paper_id,
+          title: paper?.title || title || "Downloaded paper",
+          subject: paper?.subject,
+          level: paper?.level,
+          year: paper?.year,
+          paper_number: paper?.paper_number,
+          pdf_url: fullUrl,
+        })
+        : false;
       setCurrentCached(!!localUri);
       setSavedMsg(
         localUri
-          ? `${t.pdf.paperDownloaded} · ${quota.remaining_today} downloads left today`
+          ? `${t.pdf.paperDownloaded}${savedToDrafts ? " · Saved to My Drafts" : ""} · ${quota.remaining_today} downloads left today`
           : t.pdf.downloadFailed
       );
       setTimeout(() => setSavedMsg(null), 3000);

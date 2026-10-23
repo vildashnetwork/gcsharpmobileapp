@@ -780,19 +780,29 @@ async def _grant_offline_trial_once(
     now: Optional[datetime] = None,
 ) -> bool:
     """Apply a one-time support grant to a matching existing account."""
+    started_at = now or datetime.now(timezone.utc)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    expires_at = started_at + timedelta(days=OFFLINE_TRIAL_DAYS)
     result = await db.users.update_one(
         {
             "email": email.strip().lower(),
             "offline_manual_grant_id": {"$ne": grant_id},
         },
         {"$set": {
-            **_new_offline_trial_fields(now),
             "offline_manual_grant_id": grant_id,
+            "offline_manual_grant_started_at": started_at.isoformat(),
+            "offline_manual_grant_expires_at": expires_at.isoformat(),
         }},
     )
     if result.modified_count:
-        logger.info("Applied one-time offline trial grant %s to %s", grant_id, email)
+        logger.info("Applied one-time offline access grant %s to %s", grant_id, email)
         return True
+    logger.info(
+        "Offline access grant %s was already applied or no account matched %s",
+        grant_id,
+        email,
+    )
     return False
 
 
@@ -824,6 +834,7 @@ async def _ensure_offline_access(user_id: str) -> dict:
             "offline_trial_started_at": 1,
             "offline_trial_expires_at": 1,
             "offline_access_until": 1,
+            "offline_manual_grant_expires_at": 1,
         },
     )
     if not user_doc:
@@ -836,6 +847,8 @@ async def _ensure_offline_access(user_id: str) -> dict:
             user_doc.get("offline_trial_started_at"))
         paid_until = _parse_offline_datetime(
             user_doc.get("offline_access_until"))
+        manual_grant_expires_at = _parse_offline_datetime(
+            user_doc.get("offline_manual_grant_expires_at"))
     except ValueError as error:
         logger.error("Invalid offline access date for user %s: %s", user_id, error)
         raise HTTPException(500, "Could not read your offline access period.") from error
@@ -844,13 +857,20 @@ async def _ensure_offline_access(user_id: str) -> dict:
         raise HTTPException(500, "Could not read your offline access period.")
 
     expires_at = max(
-        (value for value in (trial_expires_at, paid_until) if value is not None),
+        (
+            value
+            for value in (trial_expires_at, paid_until, manual_grant_expires_at)
+            if value is not None
+        ),
         default=trial_expires_at,
     )
     active = expires_at > now
     access_type = (
         "subscription" if paid_until and paid_until > now
-        else "trial" if trial_expires_at > now
+        else "trial" if (
+            trial_expires_at > now
+            or (manual_grant_expires_at and manual_grant_expires_at > now)
+        )
         else "expired"
     )
     seconds_remaining = max(0, int((expires_at - now).total_seconds()))
@@ -1245,6 +1265,14 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
     user = await db.users.find_one({"user_id": user_id})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    if (
+        str(user.get("email", "")).strip().lower() == OFFLINE_MANUAL_GRANT_EMAIL
+        and user.get("offline_manual_grant_id") != OFFLINE_MANUAL_GRANT_ID
+    ):
+        await _grant_offline_trial_once(
+            OFFLINE_MANUAL_GRANT_EMAIL,
+            OFFLINE_MANUAL_GRANT_ID,
+        )
     
     # ---- FIX: Override full_name and profile_photo with current DB values ----
     if "name" in user:
@@ -4059,6 +4087,43 @@ async def save_draft(req: DraftRequest, user: dict = Depends(get_current_user)):
         "paper_id": req.paper_id,
         "created_at": datetime.utcnow().isoformat(),
     })
+    return {"saved": True}
+
+
+@api_router.post("/drafts/downloaded")
+async def save_downloaded_paper_draft(
+    req: DraftRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Idempotently add a paper downloaded for offline use to My Drafts."""
+    paper = await db.papers.find_one(
+        {"paper_id": req.paper_id}, {"_id": 0, "paper_id": 1})
+    if not paper:
+        raise HTTPException(404, "Paper not found.")
+
+    try:
+        await db.drafts.update_one(
+            {"user_id": user["user_id"], "paper_id": req.paper_id},
+            {"$setOnInsert": {
+                "draft_id": f"draft_{uuid.uuid4().hex[:12]}",
+                "user_id": user["user_id"],
+                "paper_id": req.paper_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "saved_from_download": True,
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # A concurrent save already created this (user, paper) draft.
+        existing = await db.drafts.find_one(
+            {"user_id": user["user_id"], "paper_id": req.paper_id})
+        if not existing:
+            logger.exception(
+                "Could not save downloaded paper %s to drafts for user %s",
+                req.paper_id,
+                user["user_id"],
+            )
+            raise HTTPException(500, "Could not save this paper to My Drafts.")
     return {"saved": True}
 
 

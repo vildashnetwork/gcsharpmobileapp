@@ -17,6 +17,20 @@ class FakeUsers:
         self.user = user
 
     async def update_one(self, query, update):
+        if (
+            "email" in query
+            and query.get("offline_manual_grant_id") == {
+                "$ne": update["$set"]["offline_manual_grant_id"]
+            }
+        ):
+            if (
+                self.user.get("email") != query["email"]
+                or self.user.get("offline_manual_grant_id")
+                == update["$set"]["offline_manual_grant_id"]
+            ):
+                return SimpleNamespace(modified_count=0)
+            self.user.update(update["$set"])
+            return SimpleNamespace(modified_count=1)
         if query.get("offline_trial_expires_at") == {"$exists": False}:
             if "offline_trial_expires_at" in self.user:
                 return SimpleNamespace(modified_count=0)
@@ -76,6 +90,21 @@ class FakeOfflineDownloads:
         ):
             return None
         return {"paper_ids": list(self.record["paper_ids"])}
+
+
+class FakeDrafts:
+    def __init__(self):
+        self.records = {}
+
+    async def update_one(self, query, update, upsert=False):
+        key = (query["user_id"], query["paper_id"])
+        if key not in self.records and upsert:
+            self.records[key] = dict(update["$setOnInsert"])
+            return SimpleNamespace(upserted_id="created")
+        return SimpleNamespace(upserted_id=None)
+
+    async def find_one(self, query):
+        return self.records.get((query["user_id"], query["paper_id"]))
 
 
 @pytest.fixture
@@ -147,6 +176,82 @@ def test_expired_offline_trial_stays_expired(server_module):
     assert status["active"] is False
     assert status["access_type"] == "expired"
     assert users.user["offline_trial_expires_at"] == "2000-01-08T00:00:00+00:00"
+
+
+def test_requested_email_receives_idempotent_seven_day_manual_grant(server_module):
+    module, users = server_module
+    users.user["email"] = module.OFFLINE_MANUAL_GRANT_EMAIL
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    original_trial_expiry = "2000-01-08T00:00:00+00:00"
+    users.user.update({
+        "offline_trial_started_at": "2000-01-01T00:00:00+00:00",
+        "offline_trial_expires_at": original_trial_expiry,
+    })
+
+    granted = asyncio.run(module._grant_offline_trial_once(
+        module.OFFLINE_MANUAL_GRANT_EMAIL,
+        module.OFFLINE_MANUAL_GRANT_ID,
+        now,
+    ))
+    repeated = asyncio.run(module._grant_offline_trial_once(
+        module.OFFLINE_MANUAL_GRANT_EMAIL,
+        module.OFFLINE_MANUAL_GRANT_ID,
+        now + timedelta(days=30),
+    ))
+    status = asyncio.run(module._ensure_offline_access("test-user"))
+
+    expected_expiry = now + timedelta(days=7)
+    assert granted is True
+    assert repeated is False
+    assert users.user["offline_manual_grant_id"] == module.OFFLINE_MANUAL_GRANT_ID
+    assert users.user["offline_manual_grant_started_at"] == now.isoformat()
+    assert users.user["offline_manual_grant_expires_at"] == expected_expiry.isoformat()
+    assert users.user["offline_trial_expires_at"] == original_trial_expiry
+    assert status["active"] is True
+    assert status["access_type"] == "trial"
+    assert status["expires_at"] == expected_expiry.isoformat()
+
+
+def test_requested_email_grant_does_not_create_a_missing_account(server_module):
+    module, users = server_module
+    existing_email = "another-account@example.com"
+    users.user["email"] = existing_email
+
+    granted = asyncio.run(module._grant_offline_trial_once(
+        module.OFFLINE_MANUAL_GRANT_EMAIL,
+        module.OFFLINE_MANUAL_GRANT_ID,
+    ))
+
+    assert granted is False
+    assert users.user["email"] == existing_email
+    assert "offline_manual_grant_id" not in users.user
+
+
+def test_downloaded_paper_draft_is_added_idempotently(server_module, monkeypatch):
+    module, _users = server_module
+    drafts = FakeDrafts()
+
+    class FakePapers:
+        async def find_one(self, query, projection):
+            return {"paper_id": query["paper_id"]}
+
+    monkeypatch.setattr(
+        module, "db",
+        SimpleNamespace(papers=FakePapers(), drafts=drafts),
+    )
+    request = module.DraftRequest(paper_id="paper-1")
+
+    first = asyncio.run(module.save_downloaded_paper_draft(
+        request, {"user_id": "test-user"}))
+    second = asyncio.run(module.save_downloaded_paper_draft(
+        request, {"user_id": "test-user"}))
+
+    assert first == {"saved": True}
+    assert second == {"saved": True}
+    assert len(drafts.records) == 1
+    assert drafts.records[("test-user", "paper-1")]["saved_from_download"] is True
 
 
 def test_offline_download_limit_counts_unique_papers_and_rejects_the_eleventh(server_module, monkeypatch):

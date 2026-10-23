@@ -557,7 +557,7 @@ export default function Profile() {
           </Pressable>
         </View>
 
-        <Row icon="home-outline" label={t.tabs.home} onPress={() => router.push("/(tabs)/index")} testID="row-dashboard" />
+        <Row icon="home-outline" label={t.tabs.home} onPress={() => router.push("/")} testID="row-dashboard" />
         <Row icon="create-outline" label={t.profile.editProfile} onPress={() => router.push("/edit-profile")} testID="row-edit" />
         <Row icon="stats-chart-outline" label={t.stats.title} onPress={() => router.push("/stats")} testID="row-stats" />
         <Row icon="bookmark-outline" label={t.profile.drafts} onPress={() => router.push("/drafts")} testID="row-drafts" />

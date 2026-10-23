@@ -637,6 +637,27 @@ import { theme, spacing, radii, shadow1 } from "@/src/theme";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { storage } from "@/src/utils/storage/index";
+import { useAuth } from "@/src/auth";
+import {
+  getDownloadedPaperDrafts,
+  getRemovedDownloadedPaperDraftIds,
+  mergeDownloadedPapersIntoDrafts,
+  removeDownloadedPaperDraft,
+  type DownloadedPaperDraft,
+} from "@/src/lib/offlineDrafts";
+import { getLocalMediaUri, listCachedMedia } from "@/src/lib/mediaStore";
+
+const BACKEND = process.env.EXPO_PUBLIC_BACKEND_URL;
+
+type PaperMetadata = {
+  paper_id: string;
+  title?: string;
+  pdf_url?: string;
+  subject?: string;
+  level?: string;
+  year?: number;
+  paper_number?: number;
+};
 
 // ---------- Helpers ----------
 const timeAgo = (dateStr?: string) => {
@@ -660,6 +681,7 @@ type Draft = {
   year?: number;
   paper_number?: number;
   saved_at?: string;
+  downloaded_offline?: boolean;
 };
 
 // 🔧 Moved outside component to fix reference errors
@@ -675,9 +697,31 @@ type LocalHighlight = {
   saved_at: string;
 };
 
+function cachedPdfTitle(url: string): string {
+  try {
+    const filename = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+    return filename.replace(/\.pdf$/i, "").replace(/[_-]+/g, " ") || "Downloaded paper";
+  } catch {
+    return "Downloaded paper";
+  }
+}
+
+function cachedPdfId(url: string): string {
+  let hash = 5381;
+  for (let index = 0; index < url.length; index += 1) {
+    hash = ((hash << 5) + hash + url.charCodeAt(index)) | 0;
+  }
+  return `cached_pdf_${(hash >>> 0).toString(36)}`;
+}
+
+function paperUrl(pdfUrl: string): string {
+  return pdfUrl.startsWith("http") ? pdfUrl : `${BACKEND}${pdfUrl}`;
+}
+
 export default function DraftsScreen() {
   useTheme(); // re-render this screen when light/dark changes
   const router = useRouter();
+  const { user } = useAuth();
   const [items, setItems] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -711,13 +755,83 @@ export default function DraftsScreen() {
     }
 
     try {
-      // Load saved highlights
-      const savedHighlights = await storage.getItem<LocalHighlight[]>(HIGHLIGHTS_KEY, []);
+      const [savedHighlights, cachedMedia, papersResponse] = await Promise.all([
+        storage.getItem<LocalHighlight[]>(HIGHLIGHTS_KEY, []),
+        user?.user_id ? listCachedMedia() : Promise.resolve([]),
+        user?.user_id
+          ? api<PaperMetadata[] | { items?: PaperMetadata[] }>("/papers").catch((error) => {
+              console.warn("Could not load paper metadata for downloaded PDFs:", error);
+              return null;
+            })
+          : Promise.resolve(null),
+      ]);
       setHighlights(savedHighlights || []);
 
-      // Fetch drafts
-      const drafts = await api<Draft[]>("/drafts");
-      setItems(drafts || []);
+      if (user?.user_id) {
+        const library = Array.isArray(papersResponse)
+          ? papersResponse
+          : papersResponse && typeof papersResponse === "object"
+            ? papersResponse.items || []
+            : [];
+        const papersByUrl = new Map(
+          library
+            .filter((paper) => paper.pdf_url)
+            .map((paper) => [paperUrl(paper.pdf_url!), paper]),
+        );
+        const cachedPapers = (
+          await Promise.all(
+            cachedMedia
+              .filter((media) => media.kind === "pdf")
+              .map(async (media): Promise<DownloadedPaperDraft | null> => {
+                const localUri = await getLocalMediaUri(media.remoteUrl);
+                if (!localUri) return null;
+                const paper = papersByUrl.get(media.remoteUrl);
+                return {
+                  paper_id: paper?.paper_id || cachedPdfId(media.remoteUrl),
+                  title: paper?.title || cachedPdfTitle(media.remoteUrl),
+                  pdf_url: media.remoteUrl,
+                  subject: paper?.subject,
+                  level: paper?.level,
+                  year: paper?.year,
+                  paper_number: paper?.paper_number,
+                  saved_at: new Date(media.cachedAt).toISOString(),
+                  downloaded_offline: true,
+                };
+              }),
+          )
+        ).filter((paper): paper is DownloadedPaperDraft => paper !== null);
+        await mergeDownloadedPapersIntoDrafts(user.user_id, cachedPapers);
+      }
+
+      const [downloadedDrafts, removedDraftIds] = user?.user_id
+        ? await Promise.all([
+            getDownloadedPaperDrafts(user.user_id),
+            getRemovedDownloadedPaperDraftIds(user.user_id),
+          ])
+        : [[], []];
+      let drafts: Draft[] = [];
+      try {
+        drafts = await api<Draft[]>("/drafts");
+      } catch (error) {
+        console.warn("Could not load server drafts; showing this phone's downloaded drafts:", error);
+      }
+      const removedDraftIdSet = new Set(removedDraftIds);
+      const visibleServerDrafts = drafts.filter((draft) => !removedDraftIdSet.has(draft.paper_id));
+      const downloadedById = new Map(
+        downloadedDrafts.map((draft) => [draft.paper_id, draft])
+      );
+      const serverDraftIds = new Set(visibleServerDrafts.map((draft) => draft.paper_id));
+      const mergedDrafts = [
+        ...visibleServerDrafts.map((draft) => ({
+          ...draft,
+          downloaded_offline: downloadedById.has(draft.paper_id),
+        })),
+        ...downloadedDrafts.filter((draft) => !serverDraftIds.has(draft.paper_id)),
+      ];
+      mergedDrafts.sort(
+        (a, b) => Date.parse(b.saved_at || "") - Date.parse(a.saved_at || "")
+      );
+      setItems(mergedDrafts);
     } catch (error: any) {
       console.error("Failed to load drafts:", error);
       if (error.message?.includes("401")) {
@@ -739,7 +853,7 @@ export default function DraftsScreen() {
       setProgress(100);
       setTimeout(() => setProgress(0), 600);
     }
-  }, [router]);
+  }, [router, user?.user_id]);
 
   useEffect(() => {
     load();
@@ -792,8 +906,22 @@ export default function DraftsScreen() {
 
   const deleteDraft = async (paperId: string) => {
     try {
-      await api(`/drafts/${paperId}`, { method: "DELETE" });
+      if (user?.user_id) {
+        const draft = items.find((item) => item.paper_id === paperId);
+        await removeDownloadedPaperDraft(
+          user.user_id,
+          paperId,
+          draft?.pdf_url ? paperUrl(draft.pdf_url) : undefined,
+        );
+      }
       setItems((prev) => prev.filter((x) => x.paper_id !== paperId));
+      if (!paperId.startsWith("cached_pdf_")) {
+        try {
+          await api(`/drafts/${encodeURIComponent(paperId)}`, { method: "DELETE" });
+        } catch (error) {
+          console.warn("Removed this draft from the phone, but server draft deletion failed:", error);
+        }
+      }
     } catch (error) {
       console.error("Failed to delete draft:", error);
     }
@@ -974,6 +1102,9 @@ export default function DraftsScreen() {
                       .filter(Boolean)
                       .join(" · ")}
                   </Text>
+                  {d.downloaded_offline ? (
+                    <Text style={styles.cardDownloaded}>Saved on this phone for offline use</Text>
+                  ) : null}
                   <Text style={styles.cardTime}>
                     <Ionicons name="time-outline" size={12} color={theme.onSurfaceMuted} />{" "}
                     {timeAgo(d.saved_at)}
@@ -1275,6 +1406,11 @@ const createStyles = (t: Palette) => StyleSheet.create({
   cardMeta: {
     fontSize: 12,
     color: t.onSurfaceMuted,
+  },
+  cardDownloaded: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: t.success,
   },
   cardTime: {
     fontSize: 11,
