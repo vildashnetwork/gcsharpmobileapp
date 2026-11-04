@@ -84,3 +84,7 @@ backend/*.db
 frontend/.env 
 "*.env" 
 "backend/*.db" 
+
+# GCSharp AI platform runtime artifacts (Phase 1-4)
+backend/feed_media/
+backend/training_runs/

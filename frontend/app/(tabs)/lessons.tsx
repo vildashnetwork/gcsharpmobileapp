@@ -5,6 +5,7 @@
 // import { Ionicons } from "@expo/vector-icons";
 // import { useRouter } from "expo-router";
 // import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { useTheme } from "@/src/theme-context";
 // import { api } from "@/src/api";
 // import { useAuth } from "@/src/auth";
 
@@ -190,17 +191,22 @@ import { Image } from "expo-image";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { theme, spacing, radii, shadow1 } from "@/src/theme";
+import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
 import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
+import { GlobalAppHeader } from "@/src/components/GlobalAppHeader";
 
 type Course = {
   course_id: string;
   title: string;
   description: string;
-  subject_name: string;
-  exam_level: string;
+  subject?: string;
+  subject_name?: string;
+  level?: string;
+  exam_level?: string;
   teacher_name: string;
   teacher_avatar?: string;
+  teacher_id?: string;
   thumbnail: string;
   duration: string;
   views: number;
@@ -208,10 +214,26 @@ type Course = {
   video_url?: string;
 };
 
-const LEVELS = ["All", "GCE O", "GCE A", "HND", "Concours"];
+const LEVELS = [
+  { label: "All", value: "All" },
+  { label: "GCE O Level", value: "GCE O" },
+  { label: "GCE A Level", value: "GCE A" },
+  { label: "HND", value: "HND" },
+  { label: "Concours", value: "CONCOUR" },
+  { label: "ATVEE", value: "ATVEE" },
+  { label: "ITVEE", value: "ITVEE" },
+] as const;
 const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_THUMBNAIL =
   "https://images.unsplash.com/photo-1708011271954-c0d2b3155ded?crop=entropy&cs=srgb&fm=jpg&q=85&w=800";
+
+function normalizeExamLevel(value: string | undefined) {
+  return (value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+LEVEL$/, "")
+    .replace("CONCOURS", "CONCOUR");
+}
 
 // Extracted + memoized so scrolling or unrelated parent state changes
 // (search text, refreshing flag) don't force every visible card to
@@ -223,6 +245,7 @@ const CourseCard = memo(function CourseCard({
   course: Course;
   onPress: (course: Course) => void;
 }) {
+  const router = useRouter();
   return (
     <Pressable testID={`course-${course.course_id}`} style={styles.card} onPress={() => onPress(course)}>
       <View style={styles.thumbWrap}>
@@ -244,19 +267,35 @@ const CourseCard = memo(function CourseCard({
       <View style={{ padding: spacing.md, gap: 4 }}>
         <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
           <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{course.exam_level || "GCE A"}</Text>
+            <Text style={styles.pillTxt}>{course.level || course.exam_level || "GCE A"}</Text>
           </View>
           <View style={styles.pill}>
-            <Text style={styles.pillTxt}>{course.subject_name || "Mathematics"}</Text>
+            <Text style={styles.pillTxt}>{course.subject || course.subject_name || "Mathematics"}</Text>
           </View>
         </View>
         <Text style={styles.cardTitle} numberOfLines={2}>{course.title}</Text>
         <Text style={styles.cardDesc} numberOfLines={2}>{course.description}</Text>
-        <View style={{ flexDirection: "row", gap: 10, marginTop: 4 }}>
-          <View style={styles.row}>
-            <Ionicons name="person-outline" size={13} color={theme.onSurfaceMuted} />
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 4, alignItems: "center" }}>
+          <Pressable
+            style={styles.row}
+            disabled={!course.teacher_id}
+            onPress={() => course.teacher_id && router.push(`/teacher-profile/${course.teacher_id}` as any)}
+            testID={`teacher-link-${course.course_id}`}
+          >
+            {course.teacher_avatar ? (
+              <Image source={{ uri: course.teacher_avatar }} style={styles.teacherAvatar} cachePolicy="memory-disk" />
+            ) : (
+              <View style={styles.teacherAvatarFallback}>
+                <Text style={styles.teacherAvatarInitial}>
+                  {(course.teacher_name || "T").charAt(0).toUpperCase()}
+                </Text>
+              </View>
+            )}
             <Text style={styles.meta}>{course.teacher_name || "GC Teacher"}</Text>
-          </View>
+            {course.teacher_id ? (
+              <Ionicons name="chevron-forward" size={12} color={theme.onSurfaceMuted} />
+            ) : null}
+          </Pressable>
           <View style={styles.row}>
             <Ionicons name="eye-outline" size={13} color={theme.onSurfaceMuted} />
             <Text style={styles.meta}>{course.views || 0}</Text>
@@ -322,10 +361,11 @@ function LoadingSkeletonList() {
 }
 
 export default function Library() {
+  useTheme(); // re-render this screen when light/dark changes
   const { user } = useAuth();
   const router = useRouter();
   const [items, setItems] = useState<Course[]>([]);
-  const [level, setLevel] = useState("All");
+  const [level, setLevel] = useState<(typeof LEVELS)[number]["value"]>("All");
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -347,10 +387,7 @@ export default function Library() {
   const load = useCallback(async (opts: { silent?: boolean } = {}) => {
     try {
       if (!opts.silent) setLoading(true);
-      let url = "/library/courses";
-      if (level !== "All") {
-        url = `/library/courses?exam_level=${encodeURIComponent(level)}`;
-      }
+      const url = "/library/courses";
 
       console.log(`[Lessons] Fetching: ${url}`);
 
@@ -372,7 +409,7 @@ export default function Library() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [level]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -391,14 +428,20 @@ export default function Library() {
   // fetched — matches title, description, teacher, and subject so a
   // search for a teacher's name or topic works, not just exact titles.
   const filteredItems = useMemo(() => {
-    if (!query) return items;
+    const levelItems = level === "All"
+      ? items
+      : items.filter((course) =>
+        normalizeExamLevel(course.level || course.exam_level) === normalizeExamLevel(level)
+      );
+
+    if (!query) return levelItems;
     const q = query.toLowerCase();
-    return items.filter((c) =>
-      [c.title, c.description, c.teacher_name, c.subject_name]
+    return levelItems.filter((c) =>
+      [c.title, c.description, c.teacher_name, c.subject, c.subject_name]
         .filter(Boolean)
         .some((field) => field!.toLowerCase().includes(q))
     );
-  }, [items, query]);
+  }, [items, level, query]);
 
   const openCourse = useCallback(
     (c: Course) => router.push(`/library/${c.course_id}`),
@@ -425,10 +468,12 @@ export default function Library() {
 
   return (
     <SafeAreaView edges={["top"]} style={styles.root} testID="library-screen">
+      <GlobalAppHeader onSearchPress={() => router.push("/(tabs)/papers")} />
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Lessons</Text>
           <Text style={styles.sub}>Video lessons and study materials</Text>
+
         </View>
       </View>
 
@@ -455,18 +500,18 @@ export default function Library() {
         <FlatList
           horizontal
           data={LEVELS}
-          keyExtractor={(x) => x}
+          keyExtractor={(option) => option.value}
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={{ paddingHorizontal: spacing.lg, gap: 8 }}
-          renderItem={({ item: l }) => {
-            const active = level === l;
+          renderItem={({ item: option }) => {
+            const active = level === option.value;
             return (
               <Pressable
-                testID={`level-${l}`}
-                onPress={() => setLevel(l)}
+                testID={`level-${option.label}`}
+                onPress={() => setLevel(option.value)}
                 style={[styles.chip, active && styles.chipActive]}
               >
-                <Text style={[styles.chipTxt, active && styles.chipTxtActive]}>{l}</Text>
+                <Text style={[styles.chipTxt, active && styles.chipTxtActive]}>{option.label}</Text>
               </Pressable>
             );
           }}
@@ -531,35 +576,35 @@ export default function Library() {
 // changes card content significantly, update this alongside the styles.
 const CARD_HEIGHT = 180 + 112;
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.surface },
+const createStyles = (t: Palette) => StyleSheet.create({
+  root: { flex: 1, backgroundColor: t.surface },
   header: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end",
     paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.sm,
   },
-  title: { fontSize: 24, fontWeight: "800", color: theme.onSurface },
-  sub: { color: theme.onSurfaceMuted, marginTop: 2, fontSize: 13 },
+  title: { fontSize: 24, fontWeight: "800", color: t.onSurface },
+  sub: { color: t.onSurfaceMuted, marginTop: 2, fontSize: 13 },
   searchWrap: {
     flexDirection: "row", alignItems: "center", gap: 8,
     marginHorizontal: spacing.lg, marginBottom: spacing.sm,
     height: 40, paddingHorizontal: 12, borderRadius: radii.pill,
-    backgroundColor: "#fff", borderWidth: 1, borderColor: theme.border,
+    backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border,
   },
-  searchInput: { flex: 1, fontSize: 14, color: theme.onSurface, padding: 0 },
+  searchInput: { flex: 1, fontSize: 14, color: t.onSurface, padding: 0 },
   chipRow: { height: 56, alignItems: "center" },
   chip: {
     flexShrink: 0, height: 36, paddingHorizontal: 16, borderRadius: radii.pill,
-    backgroundColor: "#fff", borderWidth: 1, borderColor: theme.border,
+    backgroundColor: t.surfaceSecondary, borderWidth: 1, borderColor: t.border,
     alignItems: "center", justifyContent: "center",
   },
-  chipActive: { borderColor: theme.brandPrimary, backgroundColor: theme.brandTertiary },
-  chipTxt: { color: theme.onSurface, fontWeight: "600", fontSize: 13 },
-  chipTxtActive: { color: theme.brand },
-  card: { backgroundColor: "#fff", borderRadius: radii.md, overflow: "hidden", ...shadow1 },
-  skeletonBlock: { backgroundColor: theme.surfaceTertiary },
+  chipActive: { borderColor: t.brandPrimary, backgroundColor: t.brandTertiary },
+  chipTxt: { color: t.onSurface, fontWeight: "600", fontSize: 13 },
+  chipTxtActive: { color: t.brand },
+  card: { backgroundColor: t.surfaceSecondary, borderRadius: radii.md, overflow: "hidden", ...shadow1 },
+  skeletonBlock: { backgroundColor: t.surfaceTertiary },
   skeletonPill: { width: 60, height: 20, borderRadius: radii.pill },
   thumbWrap: { position: "relative" },
-  thumb: { width: "100%", height: 180, backgroundColor: theme.surfaceTertiary },
+  thumb: { width: "100%", height: 180, backgroundColor: t.surfaceTertiary },
   playIcon: {
     position: "absolute", top: "50%", left: "50%", marginLeft: -22, marginTop: -22,
     width: 44, height: 44, borderRadius: 22, backgroundColor: "rgba(37,99,235,0.9)",
@@ -569,16 +614,19 @@ const styles = StyleSheet.create({
     position: "absolute", right: 8, bottom: 8, backgroundColor: "rgba(0,0,0,0.7)",
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
   },
-  durTxt: { color: "#fff", fontSize: 11, fontWeight: "700" },
-  cardTitle: { fontSize: 16, fontWeight: "700", color: theme.onSurface, marginTop: 4 },
-  cardDesc: { fontSize: 13, color: theme.onSurfaceMuted, marginTop: 2 },
-  pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill, backgroundColor: theme.brandTertiary },
-  pillTxt: { color: theme.onBrandTertiary, fontSize: 11, fontWeight: "700" },
+  durTxt: { color: t.onBrandPrimary, fontSize: 11, fontWeight: "700" },
+  cardTitle: { fontSize: 16, fontWeight: "700", color: t.onSurface, marginTop: 4 },
+  cardDesc: { fontSize: 13, color: t.onSurfaceMuted, marginTop: 2 },
+  pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: radii.pill, backgroundColor: t.brandTertiary },
+  pillTxt: { color: t.onBrandTertiary, fontSize: 11, fontWeight: "700" },
   row: { flexDirection: "row", alignItems: "center", gap: 4 },
-  meta: { color: theme.onSurfaceMuted, fontSize: 12 },
+  teacherAvatar: { width: 22, height: 22, borderRadius: 11, marginRight: 2, backgroundColor: t.surfaceTertiary },
+  teacherAvatarFallback: { width: 22, height: 22, borderRadius: 11, marginRight: 2, backgroundColor: t.brandTertiary, alignItems: "center", justifyContent: "center" },
+  teacherAvatarInitial: { color: t.onBrandTertiary, fontSize: 11, fontWeight: "800" },
+  meta: { color: t.onSurfaceMuted, fontSize: 12 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.xl, gap: 8 },
-  emptyTxt: { color: theme.onSurface, fontSize: 16, fontWeight: "600" },
-  emptySub: { color: theme.onSurfaceMuted, fontSize: 14, textAlign: "center" },
+  emptyTxt: { color: t.onSurface, fontSize: 16, fontWeight: "600" },
+  emptySub: { color: t.onSurfaceMuted, fontSize: 14, textAlign: "center" },
   refreshBtn: {
     flexDirection: "row",
     alignItems: "center",
@@ -586,12 +634,20 @@ const styles = StyleSheet.create({
     marginTop: 12,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    backgroundColor: theme.brandTertiary,
+    backgroundColor: t.brandTertiary,
     borderRadius: radii.pill,
   },
   refreshTxt: {
-    color: theme.brandPrimary,
+    color: t.brandPrimary,
     fontWeight: "600",
     fontSize: 14,
   },
+});
+
+// Rebuild the module styles whenever the active palette changes so
+// every consumer (including helper components outside the screen
+// function) picks up light/dark without prop drilling.
+let styles = createStyles(getPaletteSnapshot());
+subscribeTheme(() => {
+  styles = createStyles(getPaletteSnapshot());
 });

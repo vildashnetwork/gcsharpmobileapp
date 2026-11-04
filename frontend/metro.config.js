@@ -5,6 +5,10 @@ const { FileStore } = require('metro-cache');
 
 const config = getDefaultConfig(__dirname);
 
+// pdf.js runtime files are bundled as assets so the PDF viewer works fully
+// offline (no CDN). They're inlined into the WebView HTML at runtime.
+config.resolver.assetExts.push("pdfjs");
+
 // Use a stable on-disk store (shared across web/android)
 const root = process.env.METRO_CACHE_ROOT || path.join(__dirname, '.metro-cache');
 config.cacheStores = [

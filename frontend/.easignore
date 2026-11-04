@@ -1,0 +1,11 @@
+# Local native-project output — EAS generates android/ remotely during prebuild
+android
+
+# Large local build artifacts (never upload)
+*.aab
+*.apk
+.aab-inspect
+
+# Local tooling caches
+.expo
+.metro-cache

@@ -257,9 +257,40 @@ function formatCases(inner: string): string {
     .join("\n");
 }
 
-export function humanize(input: string): string {
-  if (!input) return "";
-  let s = input;
+/**
+ * Coerce whatever the AI/backend returned into a plain string.
+ *
+ * Model output is not always a string: board lines and narration can come
+ * back as objects, arrays, or nested JSON strings. Passing those straight
+ * into humanize() used to throw "replace is not a function" / "Cannot read
+ * property of undefined", which crashed the video-solution sheet. Coercing
+ * first makes humanize() crash-proof for every caller in the app.
+ */
+function coerceToText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => coerceToText(item)).filter(Boolean).join("\n");
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const preferred = ["text", "body", "narration", "explanation", "answer", "result", "solution", "content"];
+    for (const key of preferred) {
+      const candidate = coerceToText(obj[key]);
+      if (candidate) return candidate;
+    }
+    return Object.values(obj)
+      .map((item) => coerceToText(item))
+      .filter(Boolean)
+      .join(" ");
+  }
+  return "";
+}
+
+export function humanize(input: unknown): string {
+  let s = coerceToText(input);
+  if (!s) return "";
 
   // Strip code fences ```...```
   s = s.replace(/```[a-zA-Z]*\n?([\s\S]*?)```/g, "$1");
