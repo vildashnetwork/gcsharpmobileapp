@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  type TextInputInstance,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -102,13 +103,13 @@ export default function PapersScreen() {
   const styles = useMemo(() => createStyles(t), [t]);
   const router = useRouter();
   const { user, loading: authLoading, isOnline } = useAuth();
-  const searchRef = useRef<TextInput | null>(null);
+  const searchRef = useRef<TextInputInstance | null>(null);
 
   const isTeacher = user?.role === "teacher" || user?.role === "admin";
   const userLevel = normalizeLevel(user?.exam_level);
-  const activeLevel = isTeacher ? selectedLevel : userLevel?.value || null;
   const [filters, setFilters] = useState<PaperFilters>(emptyFilters);
   const [selectedLevel, setSelectedLevel] = useState<string | null>(null);
+  const activeLevel = isTeacher ? selectedLevel : userLevel?.value || null;
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [selectedYear, setSelectedYear] = useState<number | null>(null);
   const [selectedPaper, setSelectedPaper] = useState<number | null>(null);
@@ -541,7 +542,7 @@ export default function PapersScreen() {
                 <Text style={styles.browseAll}>Browse the full paper library</Text>
               </Pressable>
             </View>
-          ) : null
+          ) : undefined
         }
       />
 

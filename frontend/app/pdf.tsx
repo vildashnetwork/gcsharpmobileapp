@@ -963,7 +963,7 @@ export default function PdfViewer() {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { t } = useLanguage();
-  const webRef = useRef<WebView>(null);
+  const webRef = useRef<WebView<object> | null>(null);
   const [loading, setLoading] = useState(true);
 
   // === SCREEN CAPTURE PROTECTION ===
@@ -1696,7 +1696,7 @@ export default function PdfViewer() {
       </View>
 
       <View style={{ flex: 1 }}>
-        <WebView
+        <WebView<object>
           ref={webRef}
           testID="pdf-webview"
           originWhitelist={["*"]}

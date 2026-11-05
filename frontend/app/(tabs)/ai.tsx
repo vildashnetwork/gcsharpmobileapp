@@ -15,8 +15,10 @@ import {
   TouchableWithoutFeedback,
   Alert,
   Clipboard,
+  type ScrollViewInstance,
+  type TextInputInstance,
 } from "react-native";
-import { Swipeable } from "react-native-gesture-handler";
+import Swipeable from "react-native-gesture-handler/ReanimatedSwipeable";
 import { FontAwesome6 } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
@@ -174,8 +176,8 @@ export default function AITutor() {
   // The exact text already read out loud for the reply in flight, so the
   // auto-speak effect never reads the same answer a second time.
   const spokeThisReplyRef = useRef("");
-  const scrollRef = useRef<ScrollView>(null);
-  const inputRef = useRef<TextInput>(null);
+  const scrollRef = useRef<ScrollViewInstance | null>(null);
+  const inputRef = useRef<TextInputInstance | null>(null);
   const seededRef = useRef(false);
   const openedSessionRef = useRef<string | null>(null);
   const drawerAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -1437,7 +1439,6 @@ let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => {
   styles = createStyles(getPaletteSnapshot());
 });
-
 
 
 

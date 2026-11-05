@@ -531,8 +531,6 @@ function AppContent() {
       {/* Status bar adapts to the active theme (light text on dark mode). */}
       <StatusBar
         barStyle={t.onSurface === "#F1F5F9" ? "light-content" : "dark-content"}
-        translucent
-        backgroundColor="transparent"
       />
       {/* Slim strip under the status bar whenever the device is offline. */}
       <OfflineBanner />

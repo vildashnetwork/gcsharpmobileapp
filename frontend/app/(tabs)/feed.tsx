@@ -810,7 +810,7 @@ export default function LearningFeedScreen() {
           }}
           ListFooterComponent={loadingMore ? (
             <ActivityIndicator style={{ marginVertical: 16 }} color={t.brandPrimary} />
-          ) : null}
+          ) : undefined}
           ListEmptyComponent={
             !loading ? (
               <View style={styles.center}>
@@ -834,7 +834,7 @@ export default function LearningFeedScreen() {
                   </Pressable>
                 )}
               </View>
-            ) : null
+            ) : undefined
           }
         />
       )}

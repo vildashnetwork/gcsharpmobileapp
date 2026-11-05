@@ -261,7 +261,7 @@ const createStyles = (t: Palette) => StyleSheet.create({
     centerState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10, padding: spacing.lg },
     stateText: { color: t.onSurfaceMuted, fontSize: 15 },
     imageViewer: { flex: 1, backgroundColor: "rgba(0, 0, 0, 0.96)", alignItems: "center", justifyContent: "center" },
-    imageViewerBackdrop: { ...StyleSheet.absoluteFillObject },
+    imageViewerBackdrop: { ...StyleSheet.absoluteFill },
     fullscreenImage: { width: "100%", height: "82%" },
     zoomControls: {
         position: "absolute",

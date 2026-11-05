@@ -4563,18 +4563,10 @@ async def _generate_gc_video_json(prompt: str, required_key: str, *,
                                   max_tokens: int = VIDEO_MAX_TOKENS,
                                   timeout: float = VIDEO_TIMEOUT,
                                   retries: int = 2):
-    """Generate video scripts with GCSharp's configured model, never an external LLM."""
-    import gc_model
-
-    try:
-        result = await gc_model.get_gc_model().generate_json(
-            prompt, required_key, system=system, max_tokens=max_tokens,
-            timeout=timeout, retries=retries)
-    except gc_model.GCModelUnavailableError as e:
-        logger.error("GCSharp video model generation failed: %s", str(e)[:500])
-        raise HTTPException(
-            503, f"GCSharp video model unavailable: {e}") from e
-    return result, "gcsharp"
+    """Generate video scripts through the configured Gemini/OpenRouter providers."""
+    return await _generate_ai_json(
+        prompt, required_key, system=system, max_tokens=max_tokens,
+        timeout=timeout, retries=retries)
 
 
 def _ai_unavailable_to_http(e: Exception) -> HTTPException:
@@ -4827,7 +4819,7 @@ async def generate_video_from_highlight(paper_id: str, req: HighlightVideoReques
 
 
 # ============================================================
-# Text-to-video + PDF-to-video: the GCSharp model generates the lesson script
+# Text-to-video + PDF-to-video: Gemini/OpenRouter generate the lesson script
 # (scenes with heading/whiteboard/narration); existing TTS, audio cache, and
 # player components consume the same scene shape as the other video routes.
 # ============================================================
@@ -4845,7 +4837,7 @@ _VIDEO_SCENE_SYSTEM = (
 async def _generate_text_lesson(source_text: str, *, title_hint: str,
                                 subject: str, level: str,
                                 focus: str) -> dict:
-    """Shared GCSharp-model lesson builder used by text- and PDF-to-video routes."""
+    """Shared provider-backed lesson builder for text- and PDF-to-video routes."""
     focus_line = ("Solve the problem step by step." if focus == "solve"
                   else "Explain the concept clearly with a worked example.")
     prompt = (
@@ -4891,7 +4883,7 @@ def _rate_limit_text_video(user_id: str) -> bool:
 @api_router.post("/ai/video/from-text")
 async def text_to_video(req: TextToVideoRequest,
                         user: dict = Depends(get_current_user)):
-    """Text/topic -> structured educational lesson via the GCSharp model."""
+    """Text/topic -> structured educational lesson via Gemini/OpenRouter."""
     if not _rate_limit_text_video(user["user_id"]):
         raise HTTPException(429, "Too many video generations. Try again later.")
     text = (req.text or "").strip()
@@ -4922,7 +4914,7 @@ async def text_to_video(req: TextToVideoRequest,
 
 @api_router.post("/ai/video/from-pdf")
 async def pdf_to_video(file: UploadFile, user: dict = Depends(get_current_user)):
-    """Uploaded PDF -> extracted content -> GCSharp-model-generated lesson."""
+    """Uploaded PDF -> extracted content -> provider-generated lesson."""
     if not _rate_limit_text_video(user["user_id"]):
         raise HTTPException(429, "Too many video generations. Try again later.")
     content = await file.read(15 * 1024 * 1024 + 1)
@@ -6112,12 +6104,8 @@ except Exception as _feed_err:
 
 @api_router.get("/ai/model/status")
 async def gc_model_status(probe: int = 0):
-    """Report external AI providers and GCSharp's video model configuration."""
-    import gc_model
-
+    """Report Gemini/OpenRouter availability for AI and video generation."""
     providers = gc_ai.provider_status()
-    video_model = gc_model.get_gc_model()
-    video_state = video_model.status()
     configured = bool(
         providers.get("gemini_configured") or providers.get("openrouter_configured"))
     status = {
@@ -6136,26 +6124,20 @@ async def gc_model_status(probe: int = 0):
             status.update(available=True, active_provider=provider)
         except gc_ai.AIProvidersUnavailableError as e:
             status["unavailable_reason"] = str(e)[:300]
-        video_state = await video_model.healthcheck(timeout=12.0)
     status["video_model"] = {
-        "configured": bool(video_state.get("configured")),
-        "backend": video_state.get("backend"),
-        "healthy": bool(video_state.get("healthy")),
-        "latency_ms": video_state.get("latency_ms"),
+        "configured": configured,
+        "backend": "gemini/openrouter" if configured else None,
+        "healthy": status["available"],
+        "latency_ms": None,
     }
-    status["video_available"] = bool(
-        video_state.get("configured")
-        and (video_state.get("healthy") if probe else True)
-    )
+    status["video_available"] = status["available"]
     if status["video_available"]:
         status["video_unavailable_reason"] = None
-    elif not video_state.get("configured"):
+    elif not configured:
         status["video_unavailable_reason"] = (
-            "Set GC_MODEL_URL, GC_MODEL_PATH, or GC_MODEL_REPO_ID and GC_MODEL_FILE.")
+            "Set GEMINI_API_KEY or OPENROUTER_API_KEY in the backend environment.")
     else:
-        status["video_unavailable_reason"] = (
-            "The GCSharp video model failed its health check. "
-            "Check backend logs and model-server availability.")
+        status["video_unavailable_reason"] = status["unavailable_reason"]
     return status
 
 

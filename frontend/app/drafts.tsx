@@ -727,7 +727,7 @@ export default function DraftsScreen() {
 
   const [refreshing, setRefreshing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const progressInterval = useRef<NodeJS.Timeout | null>(null);
+  const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const [highlights, setHighlights] = useState<LocalHighlight[]>([]);
 
   const [levelFilter, setLevelFilter] = useState("All");
@@ -1083,7 +1083,7 @@ export default function DraftsScreen() {
                   <Text style={styles.clearText}>Clear filters</Text>
                 </Pressable>
               </View>
-            ) : null
+            ) : undefined
           }
           contentContainerStyle={{ padding: spacing.md, paddingBottom: 40 }}
           ItemSeparatorComponent={() => <View style={{ height: spacing.md }} />}

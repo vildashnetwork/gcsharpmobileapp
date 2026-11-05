@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View, Text, StyleSheet, Pressable, ScrollView, TextInput, Image,
+  type ScrollViewInstance,
   ActivityIndicator, Alert, Modal, Platform,
 } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
@@ -73,7 +74,7 @@ export default function StudyGroupChat() {
   const [hlOpen, setHlOpen] = useState(false);
   const [hlPaper, setHlPaper] = useState<Paper | null>(null);
   const [hlSending, setHlSending] = useState(false);
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ScrollViewInstance | null>(null);
   const typingTimer = useRef<any>(null);
   const player = useAudioPlayer(null);
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -912,6 +913,3 @@ const createStyles = (t: Palette) => StyleSheet.create({
 
 let styles = createStyles(getPaletteSnapshot());
 subscribeTheme(() => { styles = createStyles(getPaletteSnapshot()); });
-
-
-
