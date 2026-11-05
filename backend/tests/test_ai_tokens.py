@@ -347,70 +347,52 @@ def test_paper_question_answer_uses_authenticated_token_meter(server_module, mon
     assert charged == ["test-user"]
 
 
-def test_video_json_generation_uses_gcsharp_model(server_module, monkeypatch):
+def test_video_json_generation_uses_shared_provider_engine(server_module, monkeypatch):
     module, _users = server_module
-    import gc_model
 
     calls = []
 
-    class FakeGCModel:
-        async def generate_json(self, prompt, required_key, **kwargs):
-            calls.append((prompt, required_key, kwargs))
-            return {"scenes": [{"heading": "Worked solution"}]}
+    async def fake_generate_json(prompt, required_key, **kwargs):
+        calls.append((prompt, required_key, kwargs))
+        return {"scenes": [{"heading": "Worked solution"}]}, "google-gemini"
 
-    monkeypatch.setattr(gc_model, "get_gc_model", lambda: FakeGCModel())
+    monkeypatch.setattr(module.gc_ai, "generate_json", fake_generate_json)
 
     result, provider = asyncio.run(module._generate_gc_video_json(
         "Create a video script", "scenes", system="Teacher instructions"))
 
-    assert provider == "gcsharp"
+    assert provider == "google-gemini"
     assert result["scenes"][0]["heading"] == "Worked solution"
     assert calls[0][0:2] == ("Create a video script", "scenes")
     assert calls[0][2]["system"] == "Teacher instructions"
 
 
-def test_video_json_generation_preserves_model_setup_error(server_module, monkeypatch):
+def test_video_json_generation_reports_provider_unavailable(server_module, monkeypatch):
     module, _users = server_module
-    import gc_model
 
-    class UnavailableGCModel:
-        async def generate_json(self, *args, **kwargs):
-            raise gc_model.GCModelUnavailableError(
-                "GCSharp model is not configured. Set GC_MODEL_URL.",
-                configured=False,
-            )
+    async def unavailable(*args, **kwargs):
+        raise module.gc_ai.AIProvidersUnavailableError(
+            "Neither Gemini nor OpenRouter is available.")
 
-    monkeypatch.setattr(gc_model, "get_gc_model", lambda: UnavailableGCModel())
+    monkeypatch.setattr(module.gc_ai, "generate_json", unavailable)
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(module._generate_gc_video_json("prompt", "scenes"))
 
     assert error.value.status_code == 503
-    assert "GCSharp video model unavailable" in error.value.detail
-    assert "Set GC_MODEL_URL" in error.value.detail
+    assert "GC AI is temporarily unavailable" in error.value.detail
 
 
-def test_model_status_reports_gcsharp_video_model_configuration(server_module, monkeypatch):
+def test_model_status_uses_external_providers_for_video(server_module, monkeypatch):
     module, _users = server_module
-    import gc_model
-
-    class FakeGCModel:
-        def status(self):
-            return {
-                "configured": False,
-                "backend": None,
-                "healthy": False,
-                "latency_ms": None,
-            }
 
     monkeypatch.setattr(
         module.gc_ai, "provider_status",
         lambda: {"gemini_configured": True, "openrouter_configured": False})
-    monkeypatch.setattr(gc_model, "get_gc_model", lambda: FakeGCModel())
 
     status = asyncio.run(module.gc_model_status())
 
     assert status["configured"] is True
-    assert status["video_model"]["configured"] is False
-    assert status["video_available"] is False
-    assert "GC_MODEL_URL" in status["video_unavailable_reason"]
+    assert status["video_model"]["configured"] is True
+    assert status["video_available"] is True
+    assert status["video_unavailable_reason"] is None
