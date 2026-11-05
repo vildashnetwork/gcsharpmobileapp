@@ -20,7 +20,7 @@ export default function TeacherDashboard() {
       try {
         const r = await api<any>("/teacher/overview");
         setD(r);
-      } catch {}
+      } catch { }
     })();
   }, []);
 
@@ -48,11 +48,11 @@ export default function TeacherDashboard() {
       </View>
 
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md, paddingBottom: 40 }}>
-        <View style={[styles.earn, { backgroundColor: theme.brand }]}>
+        {/* <View style={[styles.earn, { backgroundColor: theme.brand }]}>
           <Text style={styles.earnLbl}>Estimated Earnings</Text>
           <Text style={styles.earnAmt}>{d.earnings_fcfa.toLocaleString()} FCFA</Text>
           <Text style={styles.earnMeta}>{d.monthly_views.toLocaleString()} qualified views × {d.rate_per_view} FCFA</Text>
-        </View>
+        </View> */}
 
         <View style={{ flexDirection: "row", gap: spacing.sm }}>
           <View style={styles.stat}>

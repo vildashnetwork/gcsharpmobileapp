@@ -14,6 +14,7 @@ export function pdfHtml(
     pdfjsWorker?: string;
     interactive?: boolean;
     copyOnly?: boolean;
+    externalLinks?: boolean;
   } = {}
 ): string {
   // The runtime is normally inlined by the caller (app/pdf.tsx resolves the
@@ -28,6 +29,7 @@ export function pdfHtml(
       pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
     } catch (e) { pdfjsLib.GlobalWorkerOptions.workerSrc = ""; }`
     : `pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";`;
+  const externalLinks = opts.externalLinks === true;
   const popupMarkup = opts.copyOnly ? `
   <div id="popup">
     <button class="primary" id="copyBtn">Copy text</button>
@@ -60,6 +62,9 @@ export function pdfHtml(
   #wrap { padding: 12px; }
   .page { margin: 0 auto 12px; position: relative; background: #fff; box-shadow: 0 2px 8px rgba(15,23,42,0.1); border-radius: 8px; overflow: hidden; }
   .page canvas { display:block; width:100%; height:auto; }
+  .pdfLinkLayer { position:absolute; inset:0; z-index:2; pointer-events:none; }
+  .pdfExternalLink { position:absolute; display:block; pointer-events:auto; background:transparent; }
+  .pdfExternalLink:active { background:rgba(37,99,235,0.12); }
   .textLayer {
     position:absolute; left:0; top:0; right:0; bottom:0; overflow:hidden;
     line-height:1.0; color: transparent;
@@ -100,6 +105,7 @@ ${runtimeTag}
   const START_PAGE = ${page};
   const INTERACTIVE = ${opts.interactive !== false};
   const COPY_ONLY = ${opts.copyOnly === true};
+  const EXTERNAL_LINKS = ${externalLinks};
   const post = (msg) => window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(msg));
   ${workerSetup}
 
@@ -187,6 +193,40 @@ ${runtimeTag}
         pdfjsLib.renderTextLayer({
           textContent, container: textLayer, viewport, textDivs: []
         });
+        if (EXTERNAL_LINKS) {
+          const annotations = await page.getAnnotations({ intent: "display" });
+          const linkLayer = document.createElement("div");
+          linkLayer.className = "pdfLinkLayer";
+          annotations.forEach((annotation) => {
+            if (annotation.subtype !== "Link") return;
+            const href = annotation.url || annotation.unsafeUrl;
+            if (typeof href !== "string") return;
+            let parsedUrl;
+            try { parsedUrl = new URL(href); } catch { return; }
+            if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") return;
+            const rect = viewport.convertToViewportRectangle(annotation.rect);
+            const left = Math.min(rect[0], rect[2]);
+            const top = Math.min(rect[1], rect[3]);
+            const width = Math.abs(rect[2] - rect[0]);
+            const height = Math.abs(rect[3] - rect[1]);
+            if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return;
+            const link = document.createElement("a");
+            link.className = "pdfExternalLink";
+            link.href = "#";
+            link.setAttribute("aria-label", "Open " + parsedUrl.hostname);
+            link.style.left = left + "px";
+            link.style.top = top + "px";
+            link.style.width = width + "px";
+            link.style.height = height + "px";
+            link.addEventListener("click", (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              post({ type: "openLink", url: parsedUrl.href });
+            });
+            linkLayer.appendChild(link);
+          });
+          pageEl.appendChild(linkLayer);
+        }
         pageEl.dataset.rendered = "1";
       };
 

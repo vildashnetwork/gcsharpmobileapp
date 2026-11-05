@@ -11,6 +11,7 @@ import hashlib
 import asyncio
 import requests
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Literal, Dict
 from contextlib import asynccontextmanager
@@ -255,6 +256,20 @@ async def lifespan(app: FastAPI):
         # Existing indexes
         await db.users.create_index("email", unique=True)
         await db.users.create_index("user_id", unique=True)
+        await db.downloadnewversion.update_one(
+            {"_id": "android"},
+            {"$setOnInsert": {
+                "platform": "android",
+                "version_name": "2.5.7",
+                "version_code": 21,
+                "play_store_url": (
+                    "https://play.google.com/store/apps/details?id=com.gcsharp"
+                ),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_by": "system",
+            }},
+            upsert=True,
+        )
         await db.offline_paper_downloads.create_index(
             [("user_id", 1), ("day", 1)], unique=True)
         await db.offline_paper_downloads.create_index(
@@ -1016,129 +1031,8 @@ class ResetPinWithOtpRequest(BaseModel):
             raise ValueError("PIN must contain exactly 6 digits")
         return value
 
-# ============================================================
-# PUSH NOTIFICATION HELPERS
-# ============================================================
-
-EXPO_PUSH_API_URL = "https://exp.host/--/api/v2/payloads"
-# The legacy single-send endpoint is still honoured as a fallback.
-EXPO_PUSH_SEND_URL = "https://exp.host/--/api/v2/push/send"
-
-# Push reliability (Phase 6): bounded retries with exponential backoff.
-PUSH_MAX_ATTEMPTS = 3
-_PUSH_DEDUP_TTL_SECONDS = 300  # suppress identical pushes within 5 minutes
-
-
-def _push_dedupe_key(user_id: str, title: str, body: str) -> str:
-    return hashlib.sha1(f"{user_id}|{title}|{body}".encode()).hexdigest()
-
-
-async def _mark_token_invalid(user_id: str, token: str) -> None:
-    """Clear a dead Expo token so we stop re-sending to it."""
-    try:
-        await db.users.update_one(
-            {"user_id": user_id},
-            {"$unset": {"expo_push_token": ""},
-             "$push": {"invalid_push_tokens": {"$each": [token],
-                                                "$slice": -20}}})
-        logger.info(f"Cleared invalid push token for user {user_id}")
-    except Exception as e:
-        logger.warning(f"Failed to clear invalid push token: {e}")
-
-
-async def send_expo_push(token: str, title: str, body: str,
-                         data: Optional[dict] = None,
-                         user_id: Optional[str] = None) -> bool:
-    """Send a push to one Expo token with retry + invalid-token cleanup.
-
-    Returns True when Expo accepted the message. Failures are retried up to
-    PUSH_MAX_ATTEMPTS with backoff. A dead token is removed from the user.
-    """
-    if not token:
-        return False
-
-    if user_id:
-        dkey = _push_dedupe_key(user_id, title, body)
-        try:
-            recent = await db.push_log.find_one(
-                {"dedupe_key": dkey, "created_at": {
-                    "$gte": (datetime.utcnow() - timedelta(
-                        seconds=_PUSH_DEDUP_TTL_SECONDS)).isoformat()}})
-            if recent:
-                logger.info(f"Push suppressed as duplicate for user {user_id}")
-                return False
-        except Exception:
-            pass  # logging issues must never block a send
-
-    payload = {
-        "to": token, "sound": "default", "title": title, "body": body,
-        "data": data or {}, "priority": "high",
-    }
-    ok = False
-    for attempt in range(1, PUSH_MAX_ATTEMPTS + 1):
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(EXPO_PUSH_SEND_URL, json=payload)
-            if response.status_code == 200:
-                try:
-                    ticket_data = response.json().get("data", {})
-                except (ValueError, AttributeError):
-                    ticket_data = {}
-                tickets = ticket_data if isinstance(ticket_data, list) else [ticket_data]
-                ticket = next((item for item in tickets if isinstance(item, dict)), {})
-                if ticket.get("status") == "ok":
-                    ok = True
-                    break
-                details = ticket.get("details") or {}
-                error_code = str(details.get("error") or "").lower()
-                message = str(ticket.get("message") or "").lower()
-                if error_code in {"devicenotregistered", "invalidpushtoken"}:
-                    if user_id:
-                        await _mark_token_invalid(user_id, token)
-                    return False
-                logger.warning(
-                    "Expo push ticket rejected (attempt %s): %s %s",
-                    attempt, error_code or "unknown", message[:160])
-            else:
-                txt = (response.text or "").lower()
-                if any(m in txt for m in ("devicenotregistered", "device not found",
-                                          "invalidpushtoken", "notregistered")):
-                    if user_id:
-                        await _mark_token_invalid(user_id, token)
-                    return False
-                logger.warning(f"Expo push attempt {attempt} -> {response.status_code}")
-                if 400 <= response.status_code < 500 and response.status_code != 429:
-                    break
-        except Exception as e:
-            logger.warning(f"Expo push attempt {attempt} error: {e}")
-        if attempt < PUSH_MAX_ATTEMPTS:
-            await asyncio.sleep(0.8 * (2 ** (attempt - 1)))  # 0.8s, 1.6s, ...
-
-    if user_id:
-        try:
-            await db.push_log.insert_one({
-                "dedupe_key": _push_dedupe_key(user_id, title, body),
-                "user_id": user_id, "ok": ok,
-                "created_at": datetime.utcnow().isoformat()})
-        except Exception:
-            pass
-    return ok
-
-# ============================================================
-# MODIFIED create_notification – now sends push too
-# ============================================================
-
-# Notification type -> push title mapping (extensible).
-_NOTIF_TITLES = {
-    "streak": "\U0001F525 Streak Update",
-    "reminder": "⏰ Study Reminder",
-    "ai_reply": "\U0001F916 AI Reply",
-    "reply": "\U0001F4AC New Reply",
-    "mention": "\U0001F4CC You were mentioned",
-    "feed_post": "\U0001F4E2 New in Learning Feed",
-    "video_ready": "\U0001F3A5 Video Ready",
-    "ai_answer": "\U0001F916 AI Answer Ready",
-}
+# In-app notification duplicate suppression window.
+_NOTIFICATION_DEDUP_TTL_SECONDS = 300
 
 
 async def create_notification(user_id: str, message: str, type: str = "info",
@@ -1155,7 +1049,7 @@ async def create_notification(user_id: str, message: str, type: str = "info",
                 "user_id": user_id, "message": message, "read": False,
                 "created_at": {"$gte": (
                     datetime.utcnow() - timedelta(
-                        seconds=_PUSH_DEDUP_TTL_SECONDS)).isoformat()}})
+                        seconds=_NOTIFICATION_DEDUP_TTL_SECONDS)).isoformat()}})
             if recent:
                 return {**recent, "_id": str(recent.get("_id", ""))}
         except Exception:
@@ -1187,18 +1081,6 @@ async def create_notification(user_id: str, message: str, type: str = "info",
         }, topic="notification", target_user_id=user_id, deliver=False)
     except Exception as e:
         logger.warning("Could not publish notification event: %s", e)
-
-    # Push notification (Expo) - resilient to provider failures.
-    try:
-        user_doc = await db.users.find_one(
-            {"user_id": user_id}, {"_id": 0, "expo_push_token": 1})
-        if user_doc and user_doc.get("expo_push_token"):
-            title = _NOTIF_TITLES.get(type, "GC Smart")
-            await send_expo_push(user_doc["expo_push_token"], title, message,
-                                 {"link": link, "type": type}, user_id=user_id)
-    except Exception as e:
-        # A push-provider outage must never break the API response.
-        logger.warning(f"Push dispatch failed (non-fatal): {e}")
 
     return notif
 
@@ -1400,37 +1282,6 @@ def _clean_json(text: str):
 
 # ============================================================
 
-class PushTokenRequest(BaseModel):
-    token: str = Field(
-        min_length=20, max_length=200,
-        pattern=r"^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$")
-
-@api_router.post("/notifications/register-push-token")
-async def register_push_token(req: PushTokenRequest, user: dict = Depends(get_current_user)):
-    # A device token belongs to one account at a time. Remove stale ownership
-    # when someone signs out and another account signs in on the same device.
-    await db.users.update_many(
-        {"user_id": {"$ne": user["user_id"]},
-         "expo_push_token": req.token},
-        {"$unset": {"expo_push_token": ""}})
-    await db.users.update_one(
-        {"user_id": user["user_id"]},
-        {"$set": {"expo_push_token": req.token}}
-    )
-    return {"ok": True}
-
-
-@api_router.delete("/notifications/register-push-token")
-async def unregister_push_token(token: str,
-                                user: dict = Depends(get_current_user)):
-    # Reuse the registration validator to reject malformed token values.
-    PushTokenRequest(token=token)
-    await db.users.update_one(
-        {"user_id": user["user_id"], "expo_push_token": token},
-        {"$unset": {"expo_push_token": ""}})
-    return {"ok": True}
-
-
 # ============================================================
 # Local Math Solver
 # ============================================================
@@ -1479,6 +1330,70 @@ def solve_math_local(question: str) -> Optional[str]:
 # ============================================================
 # Pydantic Models (existing)
 # ============================================================
+
+class DownloadNewVersionUpdate(BaseModel):
+    version_name: str = Field(min_length=1, max_length=32)
+    version_code: int = Field(gt=0)
+    play_store_url: str = Field(min_length=1, max_length=500)
+
+    @field_validator("play_store_url")
+    @classmethod
+    def validate_play_store_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        package_ids = parse_qs(parsed.query).get("id", [])
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "play.google.com"
+            or parsed.path != "/store/apps/details"
+            or package_ids != ["com.gcsharp"]
+        ):
+            raise ValueError(
+                "Use the Google Play listing URL for com.gcsharp."
+            )
+        return value
+
+
+@api_router.get("/app/downloadnewversion")
+async def get_download_new_version():
+    version = await db.downloadnewversion.find_one(
+        {"_id": "android"},
+        {"_id": 0, "platform": 1, "version_name": 1, "version_code": 1,
+         "play_store_url": 1, "updated_at": 1},
+    )
+    if not version:
+        raise HTTPException(
+            status_code=503,
+            detail="The latest app version is not configured.",
+        )
+    return version
+
+
+@api_router.put("/app/downloadnewversion")
+async def set_download_new_version(
+    req: DownloadNewVersionUpdate,
+    user: dict = Depends(get_current_user),
+):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    updated_at = datetime.now(timezone.utc).isoformat()
+    version = {
+        "_id": "android",
+        "platform": "android",
+        "version_name": req.version_name,
+        "version_code": req.version_code,
+        "play_store_url": req.play_store_url,
+        "updated_at": updated_at,
+        "updated_by": user["user_id"],
+    }
+    await db.downloadnewversion.replace_one(
+        {"_id": "android"},
+        version,
+        upsert=True,
+    )
+    version.pop("_id")
+    return version
+
 
 class RegisterRequest(BaseModel):
     name: str
@@ -4222,7 +4137,7 @@ async def create_lesson(req: LessonIn, user: dict = Depends(get_current_user)):
     }
     await db.lesson_videos.insert_one(doc)
 
-    # Notify followers (email + push) in the background so the upload
+    # Notify followers by email in the background so the upload
     # response returns immediately and email-provider latency/slowness
     # can never fail the publish.
     try:
@@ -4233,7 +4148,7 @@ async def create_lesson(req: LessonIn, user: dict = Depends(get_current_user)):
             follower_ids = [f["follower_id"] for f in followers]
             follower_docs = await db.users.find(
                 {"user_id": {"$in": follower_ids}},
-                {"_id": 0, "email": 1, "full_name": 1, "expo_push_token": 1},
+                {"_id": 0, "email": 1, "full_name": 1},
             ).to_list(1000)
             asyncio.create_task(
                 _notify_followers_new_lesson(user["full_name"], doc, follower_docs)
@@ -4440,7 +4355,7 @@ async def my_following(user: dict = Depends(get_current_user)):
 
 
 async def _notify_followers_new_lesson(teacher_name: str, lesson: dict, followers: list):
-    """Background task: email (Brevo) + push (Expo) every follower about a
+    """Background task: email (Brevo) every follower about a
     newly published lesson. Runs outside the request so publishing stays fast
     and a slow email provider never fails the upload."""
     title = lesson.get("title", "a new lesson")
@@ -4472,13 +4387,6 @@ async def _notify_followers_new_lesson(teacher_name: str, lesson: dict, follower
                 email_sent += 1
             except Exception as e:
                 logger.error(f"Follower email to {email} failed: {e}")
-        token = f.get("expo_push_token")
-        if token:
-            try:
-                await send_expo_push(token, f"New lesson from {teacher_name}", title,
-                                     {"lesson_id": lesson.get("lesson_id")})
-            except Exception as e:
-                logger.error(f"Follower push failed: {e}")
     logger.info(f"New-lesson notifications: {email_sent} emails sent for '{title}'")
 
 

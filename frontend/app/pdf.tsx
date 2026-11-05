@@ -608,7 +608,7 @@ import { useTheme } from "@/src/theme-context";
 // screens/PdfViewer.tsx
 import { useMemo, useRef, useState, useEffect } from "react";
 import {
-  View, Text, StyleSheet, Pressable, ActivityIndicator, Modal, ScrollView, SafeAreaView, AppState
+  View, Text, StyleSheet, Pressable, ActivityIndicator, Modal, ScrollView, SafeAreaView, AppState, Linking, Alert
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView } from "react-native-webview";
@@ -1407,7 +1407,11 @@ export default function PdfViewer() {
   };
 
   const html = useMemo(
-    () => pdfHtml(pdfSrc ?? "", 1, { pdfjsRuntime: PDFJS_RUNTIME, pdfjsWorker: PDFJS_WORKER }),
+    () => pdfHtml(pdfSrc ?? "", 1, {
+      pdfjsRuntime: PDFJS_RUNTIME,
+      pdfjsWorker: PDFJS_WORKER,
+      externalLinks: true,
+    }),
     [pdfSrc]
   );
 
@@ -1423,6 +1427,24 @@ export default function PdfViewer() {
     try {
       const msg = JSON.parse(e.nativeEvent.data);
       if (msg.type === "meta") return;
+      if (msg.type === "openLink" && typeof msg.url === "string") {
+        let linkUrl: URL;
+        try {
+          linkUrl = new URL(msg.url);
+        } catch {
+          Alert.alert("Invalid link", "This PDF contains a link that cannot be opened.");
+          return;
+        }
+        if (linkUrl.protocol !== "https:" && linkUrl.protocol !== "http:") {
+          Alert.alert("Unsupported link", "Only website links can be opened from this PDF.");
+          return;
+        }
+        void Linking.openURL(linkUrl.href).catch((error: unknown) => {
+          console.error("Could not open PDF link:", error);
+          Alert.alert("Unable to open link", "Please try again later.");
+        });
+        return;
+      }
       if (msg.type === "ask") setAskOpen({ text: msg.text });
       else if (msg.type === "video") setVideoOpen({ text: msg.text });
       else if (msg.type === "draft") setSaveOpen({ text: msg.text, page: msg.page ?? 1 });

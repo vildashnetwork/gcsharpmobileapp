@@ -414,7 +414,6 @@ import {
   resetSyncState,
 } from "./lib/syncWorker";
 import { clearResponseCache } from "./lib/offlineCache";
-import { unregisterPushToken } from "./lib/pushNotifications";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -894,11 +893,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = async () => {
     updateProgress(20);
     stopSyncWorker();
-    try {
-      await unregisterPushToken();
-    } catch (error) {
-      console.warn("[push] could not unregister device token during logout:", error);
-    }
     await setToken(null);
     setUser(null);
     processedSessions.clear();

@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { Tabs } from "expo-router";
+import { Tabs, type BottomTabBarProps } from "expo-router/js-tabs";
 import { Ionicons } from "@expo/vector-icons";
 import { View, Text, StyleSheet, Pressable, Image } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { theme, shadow1 } from "@/src/theme";
 import { useTheme } from "@/src/theme-context";
 import { getPaletteSnapshot, subscribeTheme, type Palette } from "@/src/theme";
@@ -67,8 +66,7 @@ function ProfileTabIcon({ focused }: { focused: boolean }) {
   );
 }
 
-function CustomTabBar({ state, descriptors, navigation }: any) {
-  const insets = useSafeAreaInsets();
+function CustomTabBar({ state, emitter, navigateToTab, insets }: BottomTabBarProps) {
   const TAB_ITEMS = useTabItems();
 
   return (
@@ -85,13 +83,13 @@ function CustomTabBar({ state, descriptors, navigation }: any) {
             const focused = state.routes[state.index]?.key === route.key;
 
             const onPress = () => {
-              const event = navigation.emit({
+              const event = emitter.emit({
                 type: "tabPress",
                 target: route.key,
                 canPreventDefault: true,
               });
               if (!focused && !event.defaultPrevented) {
-                navigation.navigate(route.name);
+                navigateToTab(route.key);
               }
             };
 
@@ -147,19 +145,19 @@ export default function TabsLayout() {
   useTheme(); // re-render this screen when light/dark changes
   return (
     <Tabs
-      initialRouteName="feed"
       tabBar={(props) => <CustomTabBar {...props} />}
       screenOptions={{ headerShown: false }}
     >
-      {/* Match the five-item learning layout; keep the dashboard and groups as hidden routes. */}
+      {/* Only these five routes appear in the custom tab bar; other routes remain navigable. */}
       <Tabs.Screen name="feed" />
       <Tabs.Screen name="papers" />
       <Tabs.Screen name="ai" />
       <Tabs.Screen name="lessons" />
       <Tabs.Screen name="profile" />
-      <Tabs.Screen name="index" options={{ href: null }} />
-      <Tabs.Screen name="groups" options={{ href: null }} />
-      <Tabs.Screen name="teacher-upload" options={{ href: null }} />
+      <Tabs.Screen name="index" />
+      <Tabs.Screen name="groups" />
+      <Tabs.Screen name="library" />
+      <Tabs.Screen name="teacher-upload" />
     </Tabs>
   );
 }

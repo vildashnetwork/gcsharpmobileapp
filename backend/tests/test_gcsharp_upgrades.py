@@ -802,12 +802,12 @@ class TestAppWiring:
         "/api/ai/training/run",
         "/api/ai/training/runs",
         "/api/ai/training/checkpoints",
-        # Phase 5/6 - realtime + notifications
+        # Phase 5/6 - realtime + in-app notifications
         "/api/ws/learning",
         "/api/realtime/events",
         "/api/notifications/unread-count",
         "/api/notifications",
-        "/api/notifications/register-push-token",
+        "/api/app/downloadnewversion",
     ]
 
     @pytest.fixture(scope="class")
@@ -831,12 +831,65 @@ class TestAppWiring:
                 methods.update(getattr(route, "methods", set()))
         assert {"GET", "PATCH", "DELETE"}.issubset(methods)
 
-    def test_push_token_endpoint_rejects_non_expo_tokens(self):
+    def test_expo_push_token_endpoint_is_removed(self):
+        import server_sqlite_full_corrected as s
+        paths = {getattr(route, "path", "") for route in s.app.routes}
+        assert "/api/notifications/register-push-token" not in paths
+
+    def test_download_new_version_is_public_and_admin_managed(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from fastapi import HTTPException
         from pydantic import ValidationError
-        from server_sqlite_full_corrected import PushTokenRequest
-        assert PushTokenRequest(token="ExpoPushToken[valid-Token_123]").token
+        import server_sqlite_full_corrected as s
+
+        class VersionCollection:
+            document = {
+                "_id": "android",
+                "platform": "android",
+                "version_name": "2.5.7",
+                "version_code": 21,
+                "play_store_url": (
+                    "https://play.google.com/store/apps/details?id=com.gcsharp"
+                ),
+                "updated_at": "2026-10-23T00:00:00+00:00",
+            }
+
+            async def find_one(self, query, projection):
+                return {key: value for key, value in self.document.items()
+                        if key != "_id"}
+
+            async def replace_one(self, query, document, upsert):
+                self.document = document
+
+        versions = VersionCollection()
+        monkeypatch.setattr(s, "db", SimpleNamespace(downloadnewversion=versions))
+
+        latest = asyncio.run(s.get_download_new_version())
+        assert latest["version_code"] == 21
+
+        update = s.DownloadNewVersionUpdate(
+            version_name="2.5.8",
+            version_code=22,
+            play_store_url=(
+                "https://play.google.com/store/apps/details?id=com.gcsharp"
+            ),
+        )
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(s.set_download_new_version(update, {"role": "teacher"}))
+        assert exc.value.status_code == 403
+
+        saved = asyncio.run(s.set_download_new_version(
+            update, {"role": "admin", "user_id": "admin-1"}))
+        assert saved["version_code"] == 22
+        assert versions.document["updated_by"] == "admin-1"
+
         with pytest.raises(ValidationError):
-            PushTokenRequest(token="not-a-push-token")
+            s.DownloadNewVersionUpdate(
+                version_name="2.5.8",
+                version_code=22,
+                play_store_url="https://example.com/download",
+            )
 
     def test_provider_status_reports_external_configuration(self, monkeypatch):
         import asyncio
