@@ -1,17 +1,16 @@
 # Configuring GCSharp AI Providers
 
 GC Sharp uses **Gemini first** and **OpenRouter as a bounded fallback** for
-tutor answers, feed answers, worked solutions, and question generation.
-Paper-video, highlighted-question video, text-to-video, and uploaded-PDF-to-video
-scripts are generated only by the GCSharp model configured through `GC_MODEL_*`;
-they do not fall back to an external LLM. AI-backed tutor responses use Google
-Custom Search when configured and include citations from the evidence actually
-retrieved. DuckDuckGo remains a keyless search fallback.
+runtime AI generation, including tutor answers, worked solutions, question
+generation, and video scripts. A self-hosted GCSharp model configured through
+`GC_MODEL_*` is optional and is not required for app video generation. AI-backed
+tutor responses use Google Custom Search when configured and include citations
+from the evidence actually retrieved. DuckDuckGo remains a keyless search
+fallback.
 
-## 1. Configure external generation and search for non-video AI
+## 1. Configure external generation and search
 
-For non-video tutor and question features, set at least one generation
-provider in the backend service environment:
+Set at least one generation provider in the backend service environment:
 
 ```text
 GEMINI_API_KEY=<your Gemini API key>
@@ -34,14 +33,12 @@ Google credentials are absent or return no usable results, the service uses
 the existing keyless DuckDuckGo fallback. Keep all keys in the deployment
 provider's secret environment settings; do not commit them to `.env.example`.
 
-## 2. Configure the GCSharp video-generation model
+## 2. Optional self-hosted GCSharp model
 
 The adapter (`backend/gc_model.py`) supports OpenAI-compatible inference
 servers and local GGUF weights, plus an optional workflow for downloading GGUF
-weights. Configure at least one of `GC_MODEL_URL`, `GC_MODEL_PATH`, or both
-`GC_MODEL_REPO_ID` and `GC_MODEL_FILE` in the backend service environment.
-Without a working GCSharp model, the video endpoints return HTTP 503 with a
-configuration or reachability message; they do not use Gemini/OpenRouter.
+weights. Configure these settings only when using the standalone self-hosted
+model adapter; video endpoints use the Gemini/OpenRouter providers above.
 
 ### Option A — OpenAI-compatible server (`GC_MODEL_URL`) — recommended
 
@@ -115,6 +112,7 @@ In the Render service settings:
    GC_MODEL_N_THREADS=1
    GC_MODEL_MAX_TOKENS=512
    ```
+
 3. Redeploy, then call `/api/ai/model/status?probe=1`. The first probe downloads
    and loads the model, so it may take several minutes. If Render terminates
    the process for memory use, or the request times out, this instance cannot
@@ -129,7 +127,7 @@ model. `GC_MODEL_PATH`, when set, takes precedence over the download settings.
 ## 3. Environment variables
 
 | Variable | Meaning | Default |
-|---|---|---|
+| --- | --- | --- |
 | `GEMINI_API_KEY` | Gemini API key (preferred generation provider) | unset |
 | `GEMINI_MODEL` | Gemini model id | `gemini-2.5-flash` |
 | `OPENROUTER_API_KEY` | OpenRouter API key (fallback provider) | unset |
@@ -164,15 +162,14 @@ curl https://<backend-host>/api/ai/model/status?probe=1  # small live generation
 ```
 
 The response reports which providers and search service are configured. The
-probe identifies the external provider that answered and checks the separate
-`video_model` status. `video_available` is false when GCSharp video generation
-is not configured or fails its health check. Video endpoints return HTTP 503
-with the model's configuration or reachability reason if they cannot generate.
+probe identifies the external provider that answered. `video_available` follows
+the same provider availability because video scripts use Gemini/OpenRouter.
+Video endpoints return HTTP 503 if neither provider can generate a response.
 
 ## 5. Background jobs
 
 | Job | Schedule | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | Knowledge growth | every `KG_INTERVAL_HOURS` | mines student questions / syllabus topics, searches trustworthy sources (`google_search`, `score_source`), asks Gemini/OpenRouter for an explanation grounded in vetted evidence, and stores it in `ai_knowledge` with full provenance (subject, topic, level, source URL/title, retrieved_at, evidence, verification_status, quality_score, content_version, dedupe_hash). New knowledge is retrievable **immediately** — no retraining. |
 | Daily reminders | hourly | existing streak/study reminders |
 
